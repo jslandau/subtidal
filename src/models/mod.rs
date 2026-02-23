@@ -1,3 +1,6 @@
+// Functions consumed by Phase 2+
+#![allow(dead_code)]
+
 use std::path::PathBuf;
 
 /// Returns the base directory for downloaded model files.

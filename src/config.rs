@@ -3,69 +3,49 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// Which STT engine to use for inference.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Engine {
+    #[default]
     Parakeet,
     Moonshine,
 }
 
-impl Default for Engine {
-    fn default() -> Self {
-        Engine::Parakeet
-    }
-}
-
 /// The PipeWire audio source to capture from.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AudioSource {
     /// System-wide monitor sink (default output loopback).
+    #[default]
     SystemOutput,
     /// A specific application's PipeWire node, identified by node ID.
     Application { node_id: u32, node_name: String },
 }
 
-impl Default for AudioSource {
-    fn default() -> Self {
-        AudioSource::SystemOutput
-    }
-}
-
 /// Overlay display mode.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OverlayMode {
     /// Anchored to a screen edge via wlr-layer-shell.
+    #[default]
     Docked,
     /// Freely positioned xdg_toplevel window.
     Floating,
 }
 
-impl Default for OverlayMode {
-    fn default() -> Self {
-        OverlayMode::Docked
-    }
-}
-
 /// Which screen edge the overlay is anchored to in docked mode.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScreenEdge {
     Top,
+    #[default]
     Bottom,
     Left,
     Right,
 }
 
-impl Default for ScreenEdge {
-    fn default() -> Self {
-        ScreenEdge::Bottom
-    }
-}
-
 /// Position of the overlay window in floating mode.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OverlayPosition {
     pub x: i32,
     pub y: i32,
@@ -131,6 +111,10 @@ pub struct Config {
     /// Caption text appearance.
     #[serde(default)]
     pub appearance: AppearanceConfig,
+
+    /// Path to config file, set by load_from(). Used by save().
+    #[serde(skip)]
+    pub config_file_path: Option<PathBuf>,
 }
 
 fn default_locked() -> bool {
@@ -147,6 +131,7 @@ impl Default for Config {
             position: OverlayPosition::default(),
             locked: true,
             appearance: AppearanceConfig::default(),
+            config_file_path: None,
         }
     }
 }
@@ -180,12 +165,19 @@ impl Config {
     pub fn load_from(path: &Path) -> Result<Config> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading {}", path.display()))?;
-        toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
+        let mut cfg: Config = toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        cfg.config_file_path = Some(path.to_path_buf());
+        Ok(cfg)
     }
 
     /// Persist the current config to disk. Creates parent directories if needed.
+    /// If config_file_path is set, saves to that path; otherwise uses default config_path().
     pub fn save(&self) -> Result<()> {
-        let path = Self::config_path();
+        let path = if let Some(ref config_path) = self.config_file_path {
+            config_path.clone()
+        } else {
+            Self::config_path()
+        };
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating config dir {}", parent.display()))?;
@@ -206,12 +198,13 @@ mod tests {
     fn config_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        let original = Config {
+        let mut original = Config {
             engine: Engine::Moonshine,
             overlay_mode: OverlayMode::Floating,
             locked: false,
             ..Config::default()
         };
+        original.config_file_path = Some(path.clone());
         let text = toml::to_string_pretty(&original).unwrap();
         fs::write(&path, &text).unwrap();
         let loaded = Config::load_from(&path).unwrap();
@@ -240,10 +233,10 @@ mod tests {
     fn config_partial_toml_fills_defaults() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("partial.toml");
-        // Only engine field; other fields should default.
-        fs::write(&path, "[engine]\nmoonshine = {}").unwrap();
-        // If this parses, locked should be the default (true).
-        // If it fails, that is acceptable — we only test that malformed doesn't panic.
-        let _ = Config::load_from(&path);
+        fs::write(&path, "engine = \"moonshine\"\n").unwrap();
+        let cfg = Config::load_from(&path).unwrap();
+        assert_eq!(cfg.engine, Engine::Moonshine);
+        assert!(cfg.locked);
+        assert_eq!(cfg.screen_edge, ScreenEdge::Bottom);
     }
 }
