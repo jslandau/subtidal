@@ -1,0 +1,59 @@
+[package]
+name = "live-captions"
+version = "0.1.0"
+edition = "2021"
+description = "Real-time speech-to-text overlay for Linux/Wayland"
+
+[[bin]]
+name = "live-captions"
+path = "src/main.rs"
+
+[dependencies]
+# GUI
+gtk4 = { version = "0.10", features = ["v4_10"] }
+gtk4-layer-shell = "0.7"
+
+# System tray
+ksni = "0.3"
+
+# Audio
+pipewire = "0.9"
+rubato = "1.0"
+ringbuf = "0.4"
+
+# STT
+ort = { version = "2.0.0-rc.11", features = ["cuda"] }
+parakeet-rs = "0.3"
+
+# Model management
+hf-hub = { version = "0.5", features = ["tokio"] }
+
+# Config hot-reload
+notify = "8"
+
+# Desktop notifications
+notify-rust = "4"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+# Error handling
+anyhow = "1"
+
+# Async runtime (required by hf-hub)
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs"] }
+
+# CLI argument parsing
+clap = { version = "4", features = ["derive"] }
+
+# XDG directory resolution
+dirs = "5"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+[dev-dependencies]
+tempfile = "3"
