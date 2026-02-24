@@ -31,6 +31,12 @@ pub enum AudioCommand {
     Shutdown,
 }
 
+/// Event sent when an audio node disappears and we fall back to system output (AC1.4).
+pub struct FallbackEvent {
+    pub lost_name: String,
+    pub lost_id: u32,
+}
+
 /// Shared list of discovered audio nodes (updated by registry callbacks).
 pub type NodeList = Arc<Mutex<Vec<AudioNode>>>;
 
@@ -52,6 +58,7 @@ const RING_BUF_CAPACITY: usize = 48_000 * 2;
 /// - `tx_cmd`: send AudioCommand to the PipeWire thread
 /// - `rx_audio`: receive raw interleaved stereo 48kHz f32 samples (drained by inference thread)
 /// - `node_list`: shared list of available audio nodes (updated by registry)
+/// - `fallback_rx`: receive FallbackEvent when a captured node disappears (AC1.4)
 ///
 /// Exits the process if PipeWire is unavailable (AC1.5).
 pub fn start_audio_thread(
@@ -60,6 +67,7 @@ pub fn start_audio_thread(
     std::sync::mpsc::SyncSender<AudioCommand>,
     ringbuf::HeapCons<f32>,
     NodeList,
+    std::sync::mpsc::Receiver<FallbackEvent>,
 )> {
     // Initialize PipeWire library (must be called before any PW objects).
     pw::init();
@@ -75,6 +83,7 @@ pub fn start_audio_thread(
     let node_list_clone = Arc::clone(&node_list);
 
     let (tx_cmd, rx_cmd) = std::sync::mpsc::sync_channel::<AudioCommand>(8);
+    let (fallback_tx, fallback_rx) = std::sync::mpsc::sync_channel::<FallbackEvent>(4);
 
     let ring_producer_thread = Arc::clone(&ring_producer);
 
@@ -86,6 +95,7 @@ pub fn start_audio_thread(
                 ring_producer_thread,
                 node_list_clone,
                 rx_cmd,
+                fallback_tx,
             ) {
                 eprintln!("error: PipeWire audio thread exited: {e:#}");
                 std::process::exit(1);
@@ -93,7 +103,7 @@ pub fn start_audio_thread(
         })
         .context("spawning PipeWire thread")?;
 
-    Ok((tx_cmd, ring_consumer, node_list))
+    Ok((tx_cmd, ring_consumer, node_list, fallback_rx))
 }
 
 /// Enumerate available audio nodes from the shared node list.
@@ -108,6 +118,7 @@ fn run_pipewire_loop(
     ring_producer: Arc<Mutex<ringbuf::HeapProd<f32>>>,
     node_list: NodeList,
     rx_cmd: std::sync::mpsc::Receiver<AudioCommand>,
+    fallback_tx: std::sync::mpsc::SyncSender<FallbackEvent>,
 ) -> Result<()> {
     let mainloop = pw::main_loop::MainLoopRc::new(None)
         .context("creating PipeWire MainLoop — is PipeWire running?")?;
@@ -165,7 +176,8 @@ fn run_pipewire_loop(
         .register();
 
     // Create the capture stream for the initial source.
-    let mut _capture = create_capture_stream(&core, &initial_source, Arc::clone(&ring_producer))?;
+    let mut _capture = Some(create_capture_stream(&core, &initial_source, Arc::clone(&ring_producer))?);
+    let mut current_source = initial_source.clone(); // track for fallback check (AC1.4)
 
     // Poll for AudioCommands and run the PipeWire event loop.
     // PipeWire Loop::iterate() processes pending events non-blockingly.
@@ -176,12 +188,13 @@ fn run_pipewire_loop(
         match rx_cmd.try_recv() {
             Ok(AudioCommand::Shutdown) => break,
             Ok(AudioCommand::SwitchSource(new_source)) => {
+                current_source = new_source.clone(); // track new source for fallback check
                 // Drop the current capture (stream and listener) to disconnect it from PipeWire.
-                drop(_capture);
+                _capture = None;
                 // Reconnect to the new source.
                 match create_capture_stream(&core, &new_source, Arc::clone(&ring_producer)) {
                     Ok(c) => {
-                        _capture = c;
+                        _capture = Some(c);
                         eprintln!("info: audio source switched to {:?}", new_source);
                     }
                     Err(e) => {
@@ -193,7 +206,7 @@ fn run_pipewire_loop(
                             Arc::clone(&ring_producer),
                         ) {
                             Ok(c) => {
-                                _capture = c;
+                                _capture = Some(c);
                                 eprintln!("warn: fell back to system output capture");
                             }
                             Err(e2) => {
@@ -208,18 +221,51 @@ fn run_pipewire_loop(
             Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
         }
 
-        // Phase 8: drain nodes that disappeared during this iterate() call.
-        // The registry global_remove callback appends disappeared node IDs to
-        // `disappeared_node_ids`. Phase 8 adds AudioCommand::NodeDisappeared handling
-        // below via the fallback_tx; for Phase 3, just drain to avoid unbounded growth.
-        // (Phase 8 replaces this comment with actual fallback logic.)
-        if let Ok(mut ids) = disappeared_node_ids.try_lock() {
-            ids.retain(|&id| {
-                // Phase 8: check if `id` is the currently captured node and fall back.
-                // For Phase 3: remove known nodes from the list so the tray stays accurate.
-                node_list.lock().unwrap().retain(|n| n.node_id != id);
-                false // retain returns false = remove the entry from disappeared_node_ids
-            });
+        // Phase 8: Drain disappeared nodes and check for fallback (AC1.4).
+        {
+            let mut should_reconnect = false;
+            let mut lost_name = String::new();
+            let mut lost_id = 0u32;
+
+            if let Ok(mut ids) = disappeared_node_ids.try_lock() {
+                ids.retain(|&id| {
+                    // Remove from node list so tray doesn't show stale entries.
+                    node_list.lock().unwrap().retain(|n| n.node_id != id);
+
+                    // Check if this is our currently captured application node.
+                    if let crate::config::AudioSource::Application { node_id: active_id, ref node_name } =
+                        current_source.clone()
+                    {
+                        if active_id == id {
+                            eprintln!(
+                                "warn: audio node {id} ({node_name}) disappeared — falling back to system output"
+                            );
+                            current_source = crate::config::AudioSource::SystemOutput;
+                            should_reconnect = true;
+                            lost_name = node_name.clone();
+                            lost_id = active_id;
+                        }
+                    }
+                    false // remove from ids list
+                });
+            }
+
+            // Perform reconnect outside the closure
+            if should_reconnect {
+                _capture = None;
+                match create_capture_stream(&core, &crate::config::AudioSource::SystemOutput, Arc::clone(&ring_producer)) {
+                    Ok(s) => {
+                        _capture = Some(s);
+                    }
+                    Err(e) => {
+                        eprintln!("error: failed to reconnect to system output: {e:#}");
+                    }
+                }
+                let _ = fallback_tx.send(FallbackEvent {
+                    lost_name,
+                    lost_id,
+                });
+            }
         }
     }
 

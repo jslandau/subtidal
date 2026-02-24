@@ -109,7 +109,7 @@ fn main() {
     });
 
     // Phase 3: Start audio capture
-    let (audio_cmd_tx, ring_consumer, node_list) =
+    let (audio_cmd_tx, ring_consumer, node_list, fallback_rx) =
         audio::start_audio_thread(cfg.audio_source.clone())
             .unwrap_or_else(|e| {
                 eprintln!("error: failed to start audio capture: {e:#}");
@@ -207,22 +207,60 @@ fn main() {
         }
     };
 
+    // Clone caption_tx for engine switching before spawning the inference thread.
+    let caption_tx_for_switch = caption_tx.clone();
+
     // Spawn the inference thread.
     let _inference_handle = stt::spawn_inference_thread(engine, chunk_rx, caption_tx);
 
     // Phase 6: Set up engine-switch channel.
     let (engine_switch_tx, engine_switch_rx) = std::sync::mpsc::sync_channel::<tray::EngineCommand>(4);
 
-    // Wire engine-switch receiver (restarts inference thread on switch — Phase 8 completes this).
+    // Phase 8: Wire engine-switch receiver (restarts inference thread on switch).
+    // chunk_tx is Arc<Mutex<SyncSender<Vec<f32>>>> from Phase 4 Task 4.
+    // The audio bridge thread calls chunk_tx.lock().unwrap().send(chunk) on every chunk.
+    // When we replace *chunk_tx.lock(), the very next chunk goes to the new inference engine.
     {
-        let audio_tx_for_engine = audio_cmd_tx.clone();
+        let chunk_tx_for_switch = std::sync::Arc::clone(&chunk_tx); // Phase 4's Arc<Mutex<SyncSender>>
+
         std::thread::spawn(move || {
             for cmd in engine_switch_rx.iter() {
                 match cmd {
-                    tray::EngineCommand::Switch(new_engine) => {
-                        eprintln!("info: engine switch to {new_engine:?} — respawn inference (Phase 8)");
-                        // Full respawn logic wired in Phase 8.
-                        let _ = audio_tx_for_engine; // used in Phase 8
+                    tray::EngineCommand::Switch(new_engine_choice) => {
+                        eprintln!("info: switching STT engine to {new_engine_choice:?}");
+
+                        let new_engine: Box<dyn stt::SttEngine> = match new_engine_choice {
+                            config::Engine::Parakeet => {
+                                match stt::parakeet::ParakeetEngine::new(&models::parakeet_model_dir()) {
+                                    Ok(e) => Box::new(e),
+                                    Err(e) => {
+                                        eprintln!("error: failed to load Parakeet: {e:#}");
+                                        continue;
+                                    }
+                                }
+                            }
+                            config::Engine::Moonshine => {
+                                match stt::moonshine::MoonshineEngine::new(&models::moonshine_model_dir()) {
+                                    Ok(e) => Box::new(e),
+                                    Err(e) => {
+                                        eprintln!("error: failed to load Moonshine: {e:#}");
+                                        continue;
+                                    }
+                                }
+                            }
+                        };
+
+                        // Spawn new inference thread and get its new SyncSender.
+                        let (new_chunk_tx, _handle) = stt::restart_inference_thread(
+                            new_engine,
+                            caption_tx_for_switch.clone(),
+                        );
+
+                        // Atomically replace the inner SyncSender.
+                        // The audio bridge thread will send to the new inference thread on next chunk.
+                        *chunk_tx_for_switch.lock().unwrap() = new_chunk_tx;
+
+                        eprintln!("info: engine switch complete — audio bridge now targeting new engine");
                     }
                 }
             }
@@ -265,8 +303,38 @@ fn main() {
     // Use the already-built tokio runtime (from Phase 2 model download).
     let tray_handle = tray::spawn_tray(tray_state, &runtime);
 
-    // Tray handle is stored so Phase 8 can call handle.update() when state changes.
-    let _ = tray_handle; // used in Phase 8
+    // Phase 8: Handle FallbackEvent from audio thread (AC1.4).
+    // Capture a Tokio Handle from the runtime before spawning the plain OS thread.
+    // tokio::runtime::Handle::current() panics in plain threads; we must pass the
+    // Handle in from a scope where the runtime is live.
+    let tokio_handle = runtime.handle().clone();
+    let tray_handle_for_fallback = tray_handle.clone();
+    std::thread::spawn(move || {
+        for event in fallback_rx.iter() {
+            // Desktop notification (AC1.4).
+            let _ = notify_rust::Notification::new()
+                .summary("Live Captions: Audio Source Lost")
+                .body(&format!(
+                    "'{}' (id:{}) disconnected — switched to System Output.",
+                    event.lost_name, event.lost_id
+                ))
+                .timeout(notify_rust::Timeout::Milliseconds(5000))
+                .show();
+
+            // Update tray to reflect fallback source.
+            // Uses the captured Handle to run the async update on the Tokio runtime.
+            tokio_handle.block_on(async {
+                tray_handle_for_fallback.update(|tray: &mut tray::TrayState| {
+                    tray.active_source = crate::config::AudioSource::SystemOutput;
+                }).await;
+            });
+
+            // Update config.
+            let mut cfg = crate::config::Config::load();
+            cfg.audio_source = crate::config::AudioSource::SystemOutput;
+            let _ = cfg.save();
+        }
+    });
 
     // Phase 7: Start config hot-reload watcher.
     // _config_watcher must stay in scope until process exit (drop = stop watching).
@@ -283,6 +351,20 @@ fn main() {
                 None
             }
         };
+
+    // Phase 8: Graceful shutdown on Ctrl-C / SIGTERM.
+    let audio_tx_for_signal = audio_cmd_tx.clone();
+    let glib_cmd_tx_for_signal = cmd_tx_to_gtk.clone();
+    ctrlc::set_handler(move || {
+        eprintln!("info: received shutdown signal, stopping...");
+        // Shut down the audio thread.
+        let _ = audio_tx_for_signal.send(audio::AudioCommand::Shutdown);
+        // Signal GTK4 to quit cleanly via the existing glib channel.
+        // overlay::OverlayCommand::Quit calls app.quit() from the GTK main thread,
+        // ensuring all Drop impls run and the GTK main loop exits normally.
+        let _ = glib_cmd_tx_for_signal.send(overlay::OverlayCommand::Quit);
+    })
+    .expect("setting Ctrl-C handler");
 
     // Run GTK4 main loop (blocks until application exits).
     overlay::run_gtk_app(cfg, caption_rx_from_inference, cmd_rx, Arc::clone(&captions_enabled));

@@ -58,6 +58,18 @@ pub fn spawn_inference_thread(
         .expect("spawning inference thread")
 }
 
+/// Restart the inference thread with a new engine.
+/// Drops the old chunk_rx (causing the old thread to exit when its sender is replaced).
+/// Returns new chunk_tx for the audio bridge thread.
+pub fn restart_inference_thread(
+    engine: Box<dyn SttEngine>,
+    caption_tx: mpsc::SyncSender<String>,
+) -> (mpsc::SyncSender<Vec<f32>>, thread::JoinHandle<()>) {
+    let (chunk_tx, chunk_rx) = mpsc::sync_channel::<Vec<f32>>(32);
+    let handle = spawn_inference_thread(engine, chunk_rx, caption_tx);
+    (chunk_tx, handle)
+}
+
 /// Detect CUDA availability via ort.
 /// Returns true if a CUDA-capable GPU is accessible.
 pub fn cuda_available() -> bool {
