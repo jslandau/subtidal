@@ -3,9 +3,10 @@
 use crate::config::{AppearanceConfig, Config, OverlayMode, ScreenEdge};
 use gtk4::prelude::*;
 use gtk4::{Application, ApplicationWindow, Label};
-use gtk4::glib::{self, prelude::*};
+use gtk4::glib;
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use std::sync::{Arc, atomic::{AtomicBool, AtomicI32, Ordering}};
+use std::cell::RefCell;
 
 pub mod input_region;
 
@@ -62,7 +63,7 @@ pub fn run_gtk_app(
         let window = build_overlay_window(app, &cfg);
 
         // Apply initial appearance.
-        apply_appearance(&window, &cfg.appearance);
+        apply_appearance(&cfg.appearance);
 
         // Wire up caption receiver using glib timeout_add to poll.
         let label = find_caption_label(&window);
@@ -71,7 +72,7 @@ pub fn run_gtk_app(
         let caption_rx_clone = Arc::clone(&caption_rx);
 
         glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-            if let Ok(mut rx) = caption_rx_clone.try_lock() {
+            if let Ok(rx) = caption_rx_clone.try_lock() {
                 while let Ok(text) = rx.try_recv() {
                     if enabled.load(Ordering::Relaxed) {
                         label.set_text(&text);
@@ -88,7 +89,7 @@ pub fn run_gtk_app(
         let cmd_rx_clone = Arc::clone(&cmd_rx);
 
         glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-            if let Ok(mut rx) = cmd_rx_clone.try_lock() {
+            if let Ok(rx) = cmd_rx_clone.try_lock() {
                 while let Ok(cmd) = rx.try_recv() {
                     handle_overlay_command(&window_clone2, cmd, &config_for_cmd);
                 }
@@ -184,7 +185,14 @@ fn configure_floating(window: &ApplicationWindow, cfg: &Config) {
 }
 
 /// Set CSS on the caption label and window to reflect appearance config.
-pub fn apply_appearance(window: &ApplicationWindow, appearance: &AppearanceConfig) {
+///
+/// Uses a thread-local provider to avoid resource leaks: old provider is removed
+/// before creating a new one on each call.
+pub fn apply_appearance(appearance: &AppearanceConfig) {
+    thread_local! {
+        static CSS_PROVIDER: RefCell<Option<gtk4::CssProvider>> = const { RefCell::new(None) };
+    }
+
     let css = format!(
         r#"
         window {{
@@ -201,16 +209,28 @@ pub fn apply_appearance(window: &ApplicationWindow, appearance: &AppearanceConfi
         fs = appearance.font_size,
     );
 
-    let provider = gtk4::CssProvider::new();
-    provider.load_from_data(&css);
-
-    // Use gdk4 re-exported from gtk4
     let display = gtk4::gdk::Display::default().expect("no GDK display");
-    gtk4::style_context_add_provider_for_display(
-        &display,
-        &provider,
-        gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
-    );
+
+    CSS_PROVIDER.with(|provider_cell| {
+        let mut provider_opt = provider_cell.borrow_mut();
+
+        // Remove old provider if it exists
+        if let Some(ref old_provider) = *provider_opt {
+            gtk4::style_context_remove_provider_for_display(&display, old_provider);
+        }
+
+        // Create and add new provider
+        let new_provider = gtk4::CssProvider::new();
+        new_provider.load_from_data(&css);
+        gtk4::style_context_add_provider_for_display(
+            &display,
+            &new_provider,
+            gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+
+        // Store the new provider for next call
+        *provider_opt = Some(new_provider);
+    });
 }
 
 fn find_caption_label(window: &ApplicationWindow) -> Label {
@@ -276,7 +296,7 @@ fn handle_overlay_command(
             }
         }
         OverlayCommand::UpdateAppearance(appearance) => {
-            apply_appearance(window, &appearance);
+            apply_appearance(&appearance);
         }
         OverlayCommand::SetCaption(text) => {
             if let Some(label) = window.child().and_downcast::<Label>() {
@@ -292,7 +312,27 @@ fn handle_overlay_command(
     }
 }
 
+fn remove_drag_handlers(window: &ApplicationWindow) {
+    // Remove existing GestureDrag controllers to prevent accumulation.
+    // On repeated calls to add_drag_handler (e.g., SetLocked(false), SetMode(Floating)),
+    // we must clean up previous gesture controllers to avoid erratic drag behavior.
+    let controllers = window.observe_controllers();
+    let n = controllers.n_items();
+    for i in (0..n).rev() {
+        if let Some(obj) = controllers.item(i) {
+            if obj.downcast_ref::<gtk4::GestureDrag>().is_some() {
+                if let Ok(ctrl) = obj.downcast::<gtk4::EventController>() {
+                    window.remove_controller(&ctrl);
+                }
+            }
+        }
+    }
+}
+
 fn add_drag_handler(window: &ApplicationWindow) {
+    // Remove any existing drag handlers first to prevent accumulation.
+    remove_drag_handlers(window);
+
     // For gtk4-layer-shell floating windows, position is controlled by margins
     // (not compositor-managed coordinates). We use GestureDrag to track delta
     // and update set_margin() on each drag update.

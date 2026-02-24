@@ -4,7 +4,6 @@ mod models;
 mod stt;
 mod overlay;
 
-use anyhow::{Context, Result};
 use clap::Parser;
 use config::Config;
 use ringbuf::traits::Consumer;
@@ -219,7 +218,9 @@ fn main() {
     // Store cmd_tx_to_gtk for use by tray (Phase 6).
     // For Phase 5, wire directly.
     let _cuda_warning = _cuda_fallback_warning; // from Phase 4
-    let _cmd_tx_to_gtk = cmd_tx_to_gtk; // Phase 6: wire to tray
+    // NOTE: cmd_tx_to_gtk must outlive run_gtk_app — Phase 6 tray will use this sender.
+    // Keeping the underscore prevents "unused variable" warning while showing intent.
+    let _cmd_tx_to_gtk = cmd_tx_to_gtk;
 
     // Run GTK4 main loop (blocks until application exits).
     overlay::run_gtk_app(cfg, caption_rx_from_inference, cmd_rx, Arc::clone(&captions_enabled));
