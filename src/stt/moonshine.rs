@@ -157,3 +157,26 @@ impl SttEngine for MoonshineEngine {
         Ok(None) // silence, not in speech
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// AC2.4: Silence produces no spurious output — test VAD_RMS_THRESHOLD.
+    /// Verify that silent audio (all zeros) has RMS below the VAD threshold.
+    #[test]
+    fn silence_rms_below_threshold() {
+        let silent_chunk = vec![0.0f32; 2560];
+        let rms = MoonshineEngine::rms(&silent_chunk);
+        assert!(rms < VAD_RMS_THRESHOLD, "silent audio RMS {} should be below threshold {}", rms, VAD_RMS_THRESHOLD);
+    }
+
+    /// AC2.4: Verify that non-silent audio exceeds the VAD_RMS_THRESHOLD.
+    /// Use a signal with amplitude 0.01 to be well above threshold.
+    #[test]
+    fn non_silent_rms_above_threshold() {
+        let signal: Vec<f32> = (0..2560).map(|i| 0.01 * ((i as f32) * 0.01).sin()).collect();
+        let rms = MoonshineEngine::rms(&signal);
+        assert!(rms > VAD_RMS_THRESHOLD, "non-silent audio RMS {} should be above threshold {}", rms, VAD_RMS_THRESHOLD);
+    }
+}

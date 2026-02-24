@@ -141,4 +141,15 @@ mod tests {
         let received: Vec<String> = caption_rx.iter().collect();
         assert_eq!(received, vec!["hi"]);
     }
+
+    /// AC5.3: CUDA unavailable triggers Moonshine fallback.
+    /// Test that cuda_available() returns a bool without panicking.
+    /// (The actual fallback logic is in main.rs and is inherently hard to unit test.)
+    #[test]
+    fn cuda_available_detection_does_not_panic() {
+        // This should not panic. The result depends on the system,
+        // so we only verify the function completes successfully.
+        let _result = cuda_available();
+        // Test passes if we reach this point without panicking.
+    }
 }

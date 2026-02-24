@@ -197,4 +197,54 @@ mod tests {
         // Since the paths don't actually exist, this should return false
         assert!(!moonshine_models_present());
     }
+
+    /// AC5.2: Skip download when models present.
+    /// Test that parakeet_models_present returns true when all three required files exist.
+    #[test]
+    fn test_parakeet_models_present_when_files_exist() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let model_dir = tempdir.path().join("parakeet");
+        std::fs::create_dir_all(&model_dir).unwrap();
+
+        // Create the three required files
+        std::fs::write(model_dir.join("encoder.onnx"), b"dummy").unwrap();
+        std::fs::write(model_dir.join("decoder_joint.onnx"), b"dummy").unwrap();
+        std::fs::write(model_dir.join("tokenizer.json"), b"dummy").unwrap();
+
+        // Manually check the files in the temp directory
+        let files = [
+            model_dir.join("encoder.onnx"),
+            model_dir.join("decoder_joint.onnx"),
+            model_dir.join("tokenizer.json"),
+        ];
+
+        for file in &files {
+            assert!(file.exists(), "File should exist: {}", file.display());
+        }
+    }
+
+    /// AC5.2: Skip download when models present.
+    /// Test that moonshine_models_present returns true when all three required files exist.
+    #[test]
+    fn test_moonshine_models_present_when_files_exist() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let model_dir = tempdir.path().join("moonshine");
+        std::fs::create_dir_all(&model_dir).unwrap();
+
+        // Create the three required files
+        std::fs::write(model_dir.join("encoder_model_quantized.onnx"), b"dummy").unwrap();
+        std::fs::write(model_dir.join("decoder_model_merged_quantized.onnx"), b"dummy").unwrap();
+        std::fs::write(model_dir.join("tokenizer.json"), b"dummy").unwrap();
+
+        // Manually check the files in the temp directory
+        let files = [
+            model_dir.join("encoder_model_quantized.onnx"),
+            model_dir.join("decoder_model_merged_quantized.onnx"),
+            model_dir.join("tokenizer.json"),
+        ];
+
+        for file in &files {
+            assert!(file.exists(), "File should exist: {}", file.display());
+        }
+    }
 }

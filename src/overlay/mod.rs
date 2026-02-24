@@ -185,16 +185,11 @@ fn configure_floating(window: &ApplicationWindow, cfg: &Config) {
     });
 }
 
-/// Set CSS on the caption label and window to reflect appearance config.
-///
-/// Uses a thread-local provider to avoid resource leaks: old provider is removed
-/// before creating a new one on each call.
-pub fn apply_appearance(appearance: &AppearanceConfig) {
-    thread_local! {
-        static CSS_PROVIDER: RefCell<Option<gtk4::CssProvider>> = const { RefCell::new(None) };
-    }
-
-    let css = format!(
+/// Build CSS string from appearance config.
+/// AC3.7: Verify CSS contains configured appearance settings.
+/// This is a pure function that can be tested without GTK display.
+fn build_css(appearance: &AppearanceConfig) -> String {
+    format!(
         r#"
         window {{
             background-color: {bg};
@@ -208,7 +203,19 @@ pub fn apply_appearance(appearance: &AppearanceConfig) {
         bg = appearance.background_color,
         fg = appearance.text_color,
         fs = appearance.font_size,
-    );
+    )
+}
+
+/// Set CSS on the caption label and window to reflect appearance config.
+///
+/// Uses a thread-local provider to avoid resource leaks: old provider is removed
+/// before creating a new one on each call.
+pub fn apply_appearance(appearance: &AppearanceConfig) {
+    thread_local! {
+        static CSS_PROVIDER: RefCell<Option<gtk4::CssProvider>> = const { RefCell::new(None) };
+    }
+
+    let css = build_css(appearance);
 
     let display = gtk4::gdk::Display::default().expect("no GDK display");
 
@@ -381,4 +388,43 @@ fn add_drag_handler(window: &ApplicationWindow) {
     });
 
     window.add_controller(gesture);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// AC3.7: Caption text respects configured appearance (CSS).
+    /// Test that build_css generates CSS containing configured colors and font size.
+    #[test]
+    fn build_css_contains_appearance_settings() {
+        let appearance = AppearanceConfig {
+            background_color: "rgba(255,0,0,0.5)".to_string(),
+            text_color: "#00ff00".to_string(),
+            font_size: 24.0,
+            max_lines: 5,
+        };
+        let css = build_css(&appearance);
+
+        // Verify CSS contains the background color
+        assert!(css.contains("rgba(255,0,0,0.5)"), "CSS should contain background_color");
+
+        // Verify CSS contains the text color
+        assert!(css.contains("#00ff00"), "CSS should contain text_color");
+
+        // Verify CSS contains the font size
+        assert!(css.contains("24"), "CSS should contain font_size");
+    }
+
+    /// AC3.7: Test with default appearance settings.
+    #[test]
+    fn build_css_with_default_appearance() {
+        let appearance = AppearanceConfig::default();
+        let css = build_css(&appearance);
+
+        // Verify CSS contains the default colors and font size
+        assert!(css.contains("rgba(0,0,0,0.7)"), "CSS should contain default background_color");
+        assert!(css.contains("#ffffff"), "CSS should contain default text_color");
+        assert!(css.contains("16"), "CSS should contain default font_size");
+    }
 }
