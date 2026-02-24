@@ -18,8 +18,6 @@ pub struct TrayState {
     pub locked: bool,
     pub active_engine: Engine,
     pub cuda_warning: Option<&'static str>,
-    /// Available PipeWire nodes — refreshed from NodeList on each menu open.
-    pub audio_nodes: Vec<AudioNode>,
     /// Channel to send OverlayCommand to the GTK4 main thread.
     pub overlay_tx: Sender<OverlayCommand>,
     /// Channel to send AudioCommand to the PipeWire thread.
@@ -197,7 +195,6 @@ fn build_audio_source_submenu(
             }
             opts
         },
-        ..Default::default()
     }
     .into()];
 
@@ -219,7 +216,6 @@ fn build_overlay_submenu(tray: &TrayState) -> Vec<MenuItem<TrayState>> {
                 RadioItem { label: "Docked".to_string(), enabled: true, ..Default::default() },
                 RadioItem { label: "Floating".to_string(), enabled: true, ..Default::default() },
             ],
-            ..Default::default()
         }
         .into(),
 
@@ -262,7 +258,6 @@ fn build_engine_submenu(active: &Engine) -> Vec<MenuItem<TrayState>> {
                 ..Default::default()
             },
         ],
-        ..Default::default()
     }
     .into()]
 }

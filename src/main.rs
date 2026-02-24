@@ -243,7 +243,6 @@ fn main() {
         locked: cfg.locked,
         active_engine: active_engine.clone(),
         cuda_warning: cuda_fallback_warning,
-        audio_nodes: Vec::new(),
         overlay_tx: cmd_tx_to_gtk.clone(),
         audio_tx: audio_cmd_tx.clone(),
         engine_tx: engine_switch_tx,
