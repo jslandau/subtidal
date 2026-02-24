@@ -1,6 +1,8 @@
 // Functions consumed by Phase 2+
 #![allow(dead_code)]
 
+use anyhow::{Context, Result};
+use std::path::Path;
 use std::path::PathBuf;
 
 /// Returns the base directory for downloaded model files.
@@ -54,6 +56,91 @@ pub fn parakeet_models_present() -> bool {
 /// Returns true if all required Moonshine model files are present on disk.
 pub fn moonshine_models_present() -> bool {
     moonshine_model_files().iter().all(|p| p.exists())
+}
+
+/// HuggingFace repo and file paths for the Parakeet EOU model.
+/// Repo: altunenes/parakeet-rs
+/// Subfolder: realtime_eou_120m-v1-onnx/
+const PARAKEET_REPO: &str = "altunenes/parakeet-rs";
+const PARAKEET_FILES: &[(&str, &str)] = &[
+    ("realtime_eou_120m-v1-onnx/encoder.onnx", "encoder.onnx"),
+    ("realtime_eou_120m-v1-onnx/decoder_joint.onnx", "decoder_joint.onnx"),
+    ("realtime_eou_120m-v1-onnx/tokenizer.json", "tokenizer.json"),
+];
+
+/// HuggingFace repo and file paths for the Moonshine tiny quantized model.
+/// Repo: onnx-community/moonshine-tiny-ONNX
+const MOONSHINE_REPO: &str = "onnx-community/moonshine-tiny-ONNX";
+const MOONSHINE_FILES: &[(&str, &str)] = &[
+    ("onnx/encoder_model_quantized.onnx", "encoder_model_quantized.onnx"),
+    ("onnx/decoder_model_merged_quantized.onnx", "decoder_model_merged_quantized.onnx"),
+    ("tokenizer.json", "tokenizer.json"),
+];
+
+/// Download all Parakeet EOU model files to `~/.local/share/live-captions/models/parakeet/`.
+/// Skips individual files that already exist.
+/// Exits the process with an error message if any download fails.
+pub async fn ensure_parakeet_models() -> Result<()> {
+    let dest_dir = parakeet_model_dir();
+    std::fs::create_dir_all(&dest_dir)
+        .with_context(|| format!("creating {}", dest_dir.display()))?;
+
+    let api = hf_hub::api::tokio::Api::new()
+        .context("initializing HuggingFace API")?;
+    let repo = api.model(PARAKEET_REPO.to_string());
+
+    for (remote_path, local_name) in PARAKEET_FILES {
+        let dest = dest_dir.join(local_name);
+        if dest.exists() {
+            eprintln!("info: parakeet model file already present: {}", dest.display());
+            continue;
+        }
+        eprintln!("info: downloading {} ...", remote_path);
+        let cached = repo.get(remote_path).await
+            .with_context(|| format!("downloading {remote_path} from {PARAKEET_REPO}"))?;
+        copy_model_file(&cached, &dest)
+            .with_context(|| format!("copying {remote_path} to {}", dest.display()))?;
+        eprintln!("info: saved to {}", dest.display());
+    }
+    Ok(())
+}
+
+/// Download all Moonshine model files to `~/.local/share/live-captions/models/moonshine/`.
+/// Skips individual files that already exist.
+/// Exits the process with an error message if any download fails.
+pub async fn ensure_moonshine_models() -> Result<()> {
+    let dest_dir = moonshine_model_dir();
+    std::fs::create_dir_all(&dest_dir)
+        .with_context(|| format!("creating {}", dest_dir.display()))?;
+
+    let api = hf_hub::api::tokio::Api::new()
+        .context("initializing HuggingFace API")?;
+    let repo = api.model(MOONSHINE_REPO.to_string());
+
+    for (remote_path, local_name) in MOONSHINE_FILES {
+        let dest = dest_dir.join(local_name);
+        if dest.exists() {
+            eprintln!("info: moonshine model file already present: {}", dest.display());
+            continue;
+        }
+        eprintln!("info: downloading {} ...", remote_path);
+        let cached = repo.get(remote_path).await
+            .with_context(|| format!("downloading {remote_path} from {MOONSHINE_REPO}"))?;
+        copy_model_file(&cached, &dest)
+            .with_context(|| format!("copying {remote_path} to {}", dest.display()))?;
+        eprintln!("info: saved to {}", dest.display());
+    }
+    Ok(())
+}
+
+fn copy_model_file(src: &Path, dest: &Path) -> Result<()> {
+    // Try hardlink first (free if on same filesystem as HF cache).
+    // Fall back to copy if hardlink fails (different filesystem).
+    if std::fs::hard_link(src, dest).is_err() {
+        std::fs::copy(src, dest)
+            .with_context(|| format!("copying {} to {}", src.display(), dest.display()))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
