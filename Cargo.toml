@@ -20,6 +20,8 @@ ksni = "0.3"
 pipewire = "0.9"
 rubato = "1.0"
 ringbuf = "0.4"
+bytemuck = "1"
+audioadapter-buffers = "2"
 
 # STT
 ort = { version = "2.0.0-rc.11", features = ["cuda"] }
