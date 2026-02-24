@@ -97,9 +97,8 @@ impl AudioResampler {
             .context("resampling audio")?;
 
             // Downmix to mono by averaging.
-            for i in 0..output_count {
-                let mono = (output_vecs[0][i] + output_vecs[1][i]) * 0.5;
-                self.accumulator.push(mono);
+            for (l, r) in output_vecs[0][..output_count].iter().zip(&output_vecs[1][..output_count]) {
+                self.accumulator.push((l + r) * 0.5);
             }
 
             // Drain full 160ms output chunks.

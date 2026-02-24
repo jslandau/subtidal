@@ -34,6 +34,14 @@ pub enum AudioCommand {
 /// Shared list of discovered audio nodes (updated by registry callbacks).
 pub type NodeList = Arc<Mutex<Vec<AudioNode>>>;
 
+/// Wrapper holding both the PipeWire stream and its associated listener.
+/// Ensures both are dropped together when the stream is switched or disconnected,
+/// preventing listener memory leaks.
+struct CaptureStream<'a> {
+    stream: pw::stream::StreamBox<'a>,
+    _listener: Box<dyn std::any::Any>,
+}
+
 /// Ring buffer capacity: 1 second of 48kHz stereo f32 samples.
 /// HeapRb<f32> counts f32 elements, not bytes — so 48000 frames × 2 channels = 96_000 elements.
 const RING_BUF_CAPACITY: usize = 48_000 * 2;
@@ -157,7 +165,7 @@ fn run_pipewire_loop(
         .register();
 
     // Create the capture stream for the initial source.
-    let mut _stream = create_capture_stream(&core, &initial_source, Arc::clone(&ring_producer))?;
+    let mut _capture = create_capture_stream(&core, &initial_source, Arc::clone(&ring_producer))?;
 
     // Poll for AudioCommands and run the PipeWire event loop.
     // PipeWire Loop::iterate() processes pending events non-blockingly.
@@ -168,12 +176,12 @@ fn run_pipewire_loop(
         match rx_cmd.try_recv() {
             Ok(AudioCommand::Shutdown) => break,
             Ok(AudioCommand::SwitchSource(new_source)) => {
-                // Drop the current stream to disconnect it from PipeWire.
-                drop(_stream);
+                // Drop the current capture (stream and listener) to disconnect it from PipeWire.
+                drop(_capture);
                 // Reconnect to the new source.
                 match create_capture_stream(&core, &new_source, Arc::clone(&ring_producer)) {
-                    Ok(s) => {
-                        _stream = s;
+                    Ok(c) => {
+                        _capture = c;
                         eprintln!("info: audio source switched to {:?}", new_source);
                     }
                     Err(e) => {
@@ -184,8 +192,8 @@ fn run_pipewire_loop(
                             &crate::config::AudioSource::SystemOutput,
                             Arc::clone(&ring_producer),
                         ) {
-                            Ok(s) => {
-                                _stream = s;
+                            Ok(c) => {
+                                _capture = c;
                                 eprintln!("warn: fell back to system output capture");
                             }
                             Err(e2) => {
@@ -219,11 +227,13 @@ fn run_pipewire_loop(
 }
 
 /// Create a PipeWire capture stream connected to the given AudioSource.
+/// Returns a CaptureStream wrapper holding both the stream and its listener,
+/// ensuring proper cleanup when switched or dropped.
 fn create_capture_stream<'a>(
     core: &'a pw::core::CoreRc,
     source: &crate::config::AudioSource,
     ring_producer: Arc<Mutex<ringbuf::HeapProd<f32>>>,
-) -> Result<pw::stream::StreamBox<'a>> {
+) -> Result<CaptureStream<'a>> {
     use pw::spa::pod::Pod;
     use pw::spa::param::audio::{AudioFormat, AudioInfoRaw};
 
@@ -289,17 +299,15 @@ fn create_capture_stream<'a>(
                         // Convert bytes to f32 slice (F32LE, native endian on x86).
                         let samples = bytemuck::cast_slice::<u8, f32>(float_bytes);
                         // Push to ring buffer — never block in RT context.
-                        let mut prod = ring_producer.lock().unwrap();
-                        let _ = prod.push_slice(samples); // drop samples if ring full
+                        if let Ok(mut prod) = ring_producer.try_lock() {
+                            let _ = prod.push_slice(samples); // drop samples if ring full
+                        }
                     }
                 }
             }
         })
         .register()
         .context("registering PipeWire stream listener")?;
-
-    // Leak the listener to keep it alive for the lifetime of the stream.
-    std::mem::forget(_listener);
 
     // Connect the stream.
     stream.connect(
@@ -312,5 +320,9 @@ fn create_capture_stream<'a>(
     )
     .context("connecting PipeWire capture stream")?;
 
-    Ok(stream)
+    // Return both stream and listener wrapped together to ensure proper cleanup.
+    Ok(CaptureStream {
+        stream,
+        _listener: Box::new(_listener),
+    })
 }
