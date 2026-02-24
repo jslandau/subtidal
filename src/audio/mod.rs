@@ -326,3 +326,30 @@ fn create_capture_stream<'a>(
         _listener: Box::new(_listener),
     })
 }
+
+/// Validate that a saved audio source is still available.
+/// If an Application source references a node_id that no longer exists,
+/// falls back to SystemOutput (which is always available).
+///
+/// Returns the validated source (either the input source if valid, or SystemOutput as fallback).
+pub fn validate_audio_source(
+    saved_source: crate::config::AudioSource,
+    current_nodes: &[AudioNode],
+) -> crate::config::AudioSource {
+    match &saved_source {
+        crate::config::AudioSource::SystemOutput => {
+            // System output is always available.
+            saved_source
+        }
+        crate::config::AudioSource::Application { node_id, .. } => {
+            // Check if the saved node_id exists in current nodes.
+            if current_nodes.iter().any(|n| n.node_id == *node_id) {
+                saved_source
+            } else {
+                eprintln!("warn: saved audio source (node_id={}) no longer available", node_id);
+                eprintln!("warn: falling back to system output");
+                crate::config::AudioSource::SystemOutput
+            }
+        }
+    }
+}

@@ -370,8 +370,13 @@ fn add_drag_handler(window: &ApplicationWindow) {
     gesture.connect_drag_end(move |_, _offset_x, _offset_y| {
         let x = win_for_release.margin(Edge::Left);
         let y = win_for_release.margin(Edge::Top);
-        eprintln!("info: overlay dragged to ({x}, {y}) — save to config in Phase 7");
-        // Phase 7 wires this to Config::save().
+        eprintln!("info: overlay dragged to ({x}, {y})");
+        let mut cfg = crate::config::Config::load();
+        cfg.position.x = x;
+        cfg.position.y = y;
+        if let Err(e) = cfg.save() {
+            eprintln!("warn: failed to save position: {e}");
+        }
     });
 
     window.add_controller(gesture);

@@ -176,7 +176,13 @@ fn build_audio_source_submenu(
                 AudioSource::SystemOutput
             };
             tray.active_source = new_source.clone();
-            let _ = tray.audio_tx.send(AudioCommand::SwitchSource(new_source));
+            let _ = tray.audio_tx.send(AudioCommand::SwitchSource(new_source.clone()));
+            // Persist audio source change to config.
+            let mut cfg = crate::config::Config::load();
+            cfg.audio_source = tray.active_source.clone();
+            if let Err(e) = cfg.save() {
+                eprintln!("warn: failed to save config: {e}");
+            }
         }),
         options: {
             let mut opts = vec![RadioItem {
@@ -210,7 +216,12 @@ fn build_overlay_submenu(tray: &TrayState) -> Vec<MenuItem<TrayState>> {
             select: Box::new(|tray: &mut TrayState, idx: usize| {
                 let mode = if idx == 0 { OverlayMode::Docked } else { OverlayMode::Floating };
                 tray.overlay_mode = mode.clone();
-                let _ = tray.overlay_tx.send(OverlayCommand::SetMode(mode));
+                let _ = tray.overlay_tx.send(OverlayCommand::SetMode(mode.clone()));
+                let mut cfg = crate::config::Config::load();
+                cfg.overlay_mode = tray.overlay_mode.clone();
+                if let Err(e) = cfg.save() {
+                    eprintln!("warn: failed to save config: {e}");
+                }
             }),
             options: vec![
                 RadioItem { label: "Docked".to_string(), enabled: true, ..Default::default() },
@@ -230,6 +241,11 @@ fn build_overlay_submenu(tray: &TrayState) -> Vec<MenuItem<TrayState>> {
                 if tray.overlay_mode == OverlayMode::Floating {
                     tray.locked = !tray.locked;
                     let _ = tray.overlay_tx.send(OverlayCommand::SetLocked(tray.locked));
+                    let mut cfg = crate::config::Config::load();
+                    cfg.locked = tray.locked;
+                    if let Err(e) = cfg.save() {
+                        eprintln!("warn: failed to save config: {e}");
+                    }
                 }
             }),
             ..Default::default()
@@ -244,7 +260,12 @@ fn build_engine_submenu(active: &Engine) -> Vec<MenuItem<TrayState>> {
         select: Box::new(|tray: &mut TrayState, idx: usize| {
             let engine = if idx == 0 { Engine::Parakeet } else { Engine::Moonshine };
             tray.active_engine = engine.clone();
-            let _ = tray.engine_tx.send(EngineCommand::Switch(engine));
+            let _ = tray.engine_tx.send(EngineCommand::Switch(engine.clone()));
+            let mut cfg = crate::config::Config::load();
+            cfg.engine = tray.active_engine.clone();
+            if let Err(e) = cfg.save() {
+                eprintln!("warn: failed to save config: {e}");
+            }
         }),
         options: vec![
             RadioItem {

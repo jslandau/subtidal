@@ -117,6 +117,19 @@ fn main() {
                 std::process::exit(1);
             });
 
+    // Validate the loaded audio source against available nodes; if invalid, fall back to SystemOutput.
+    // This ensures that if a saved Application source's node_id disappears (e.g. app restarted),
+    // we gracefully switch to the always-available SystemOutput instead of failing.
+    let validated_source = {
+        let nodes = node_list.lock().unwrap();
+        audio::validate_audio_source(cfg.audio_source.clone(), &nodes)
+    };
+    if validated_source != cfg.audio_source {
+        cfg.audio_source = validated_source.clone();
+        // Notify audio thread of the fallback source if needed.
+        let _ = audio_cmd_tx.send(audio::AudioCommand::SwitchSource(validated_source));
+    }
+
     // Phase 4: Determine active engine (with CUDA fallback).
     let active_engine = cfg.engine.clone();
     let (active_engine, cuda_fallback_warning) = match active_engine {
@@ -254,6 +267,22 @@ fn main() {
 
     // Tray handle is stored so Phase 8 can call handle.update() when state changes.
     let _ = tray_handle; // used in Phase 8
+
+    // Phase 7: Start config hot-reload watcher.
+    // _config_watcher must stay in scope until process exit (drop = stop watching).
+    // Typed as Option so the failure path compiles without a dummy Debouncer.
+    let _config_watcher: Option<notify_debouncer_mini::Debouncer<notify::RecommendedWatcher>> =
+        match config::start_hot_reload(cmd_tx_to_gtk.clone()) {
+            Ok(watcher) => {
+                eprintln!("info: config hot-reload active (watching config.toml)");
+                Some(watcher)
+            }
+            Err(e) => {
+                eprintln!("warn: config hot-reload unavailable: {e}");
+                eprintln!("warn: config.toml changes will require a restart to take effect");
+                None
+            }
+        };
 
     // Run GTK4 main loop (blocks until application exits).
     overlay::run_gtk_app(cfg, caption_rx_from_inference, cmd_rx, Arc::clone(&captions_enabled));
