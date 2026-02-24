@@ -13,6 +13,8 @@ use super::SttEngine;
 const VAD_RMS_THRESHOLD: f32 = 0.002;
 /// Number of consecutive silent 160ms chunks before triggering inference.
 const SILENCE_CHUNKS_BEFORE_INFER: usize = 5; // 5 × 160ms = 800ms silence
+/// Maximum speech buffer size: 480,000 samples = 30 seconds at 16kHz
+const MAX_SPEECH_SAMPLES: usize = 480_000;
 
 pub struct MoonshineEngine {
     #[allow(dead_code)]
@@ -85,7 +87,7 @@ impl MoonshineEngine {
         // Generate placeholder output tokens based on buffer length
         // This demonstrates the STT engine architecture without requiring
         // fully functional ONNX inference during Phase 4
-        let num_tokens = (self.speech_buf.len() / 1000).max(1).min(50);
+        let num_tokens = (self.speech_buf.len() / 1000).clamp(1, 50);
         let output_tokens: Vec<String> = (1..=num_tokens)
             .map(|i| (100 + i).to_string())
             .collect();
@@ -111,6 +113,18 @@ impl SttEngine for MoonshineEngine {
             self.in_speech = true;
             self.silent_chunks = 0;
             self.speech_buf.extend_from_slice(pcm);
+
+            // Check if buffer exceeds maximum size
+            if self.speech_buf.len() >= MAX_SPEECH_SAMPLES {
+                // Buffer full: run inference on accumulated audio and clear to continue accumulating
+                let text = self.run_inference()?;
+                self.speech_buf.clear();
+                if text.is_empty() {
+                    return Ok(None);
+                } else {
+                    return Ok(Some(text));
+                }
+            }
             return Ok(None); // accumulating
         }
 

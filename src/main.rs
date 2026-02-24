@@ -143,14 +143,19 @@ fn main() -> Result<()> {
         loop {
             let n = ring_consumer_arc.pop_slice(&mut raw);
             if n > 0 {
-                if let Ok(chunks) = resampler.push_interleaved(&raw[..n]) {
-                    for chunk in chunks {
-                        let tx = chunk_tx_for_bridge.lock().unwrap();
-                        if tx.send(chunk).is_err() {
-                            drop(tx); // release lock before sleep
-                            std::thread::sleep(std::time::Duration::from_millis(10));
-                            break; // engine switching — wait for new tx
+                match resampler.push_interleaved(&raw[..n]) {
+                    Ok(chunks) => {
+                        for chunk in chunks {
+                            let tx = chunk_tx_for_bridge.lock().unwrap();
+                            if tx.send(chunk).is_err() {
+                                drop(tx); // release lock before sleep
+                                std::thread::sleep(std::time::Duration::from_millis(10));
+                                break; // engine switching — wait for new tx
+                            }
                         }
+                    }
+                    Err(e) => {
+                        eprintln!("warn: resampler error: {e}");
                     }
                 }
             }

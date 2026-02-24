@@ -13,6 +13,8 @@ use std::thread;
 /// Both methods are called from the inference thread. Implementors must be `Send + 'static`.
 pub trait SttEngine: Send + 'static {
     /// The sample rate this engine expects. Both engines return 16000.
+    /// Note: Currently unused but will be used in future phases for runtime validation.
+    #[allow(dead_code)]
     fn sample_rate(&self) -> u32;
 
     /// Process one 160ms chunk of 16kHz mono PCM.
