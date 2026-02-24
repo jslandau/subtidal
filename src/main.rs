@@ -3,6 +3,7 @@ mod config;
 mod models;
 mod stt;
 mod overlay;
+mod tray;
 
 use clap::Parser;
 use config::Config;
@@ -108,7 +109,7 @@ fn main() {
     });
 
     // Phase 3: Start audio capture
-    let (audio_cmd_tx, ring_consumer, _node_list) =
+    let (audio_cmd_tx, ring_consumer, node_list) =
         audio::start_audio_thread(cfg.audio_source.clone())
             .unwrap_or_else(|e| {
                 eprintln!("error: failed to start audio capture: {e:#}");
@@ -118,7 +119,7 @@ fn main() {
 
     // Phase 4: Determine active engine (with CUDA fallback).
     let active_engine = cfg.engine.clone();
-    let (active_engine, _cuda_fallback_warning) = match active_engine {
+    let (active_engine, cuda_fallback_warning) = match active_engine {
         config::Engine::Parakeet => {
             if stt::cuda_available() {
                 (config::Engine::Parakeet, None)
@@ -196,6 +197,25 @@ fn main() {
     // Spawn the inference thread.
     let _inference_handle = stt::spawn_inference_thread(engine, chunk_rx, caption_tx);
 
+    // Phase 6: Set up engine-switch channel.
+    let (engine_switch_tx, engine_switch_rx) = std::sync::mpsc::sync_channel::<tray::EngineCommand>(4);
+
+    // Wire engine-switch receiver (restarts inference thread on switch — Phase 8 completes this).
+    {
+        let audio_tx_for_engine = audio_cmd_tx.clone();
+        std::thread::spawn(move || {
+            for cmd in engine_switch_rx.iter() {
+                match cmd {
+                    tray::EngineCommand::Switch(new_engine) => {
+                        eprintln!("info: engine switch to {new_engine:?} — respawn inference (Phase 8)");
+                        // Full respawn logic wired in Phase 8.
+                        let _ = audio_tx_for_engine; // used in Phase 8
+                    }
+                }
+            }
+        });
+    }
+
     // Phase 5: Set up channels for caption and command delivery.
     // We use std::sync::mpsc because glib::channel is not available in glib 0.19.
     // The glib main loop will poll these channels via timeout_add.
@@ -215,12 +235,26 @@ fn main() {
     // Shared captions-enabled flag (also used by tray in Phase 6).
     let captions_enabled = Arc::new(std::sync::atomic::AtomicBool::new(true));
 
-    // Store cmd_tx_to_gtk for use by tray (Phase 6).
-    // For Phase 5, wire directly.
-    let _cuda_warning = _cuda_fallback_warning; // from Phase 4
-    // NOTE: cmd_tx_to_gtk must outlive run_gtk_app — Phase 6 tray will use this sender.
-    // Keeping the underscore prevents "unused variable" warning while showing intent.
-    let _cmd_tx_to_gtk = cmd_tx_to_gtk;
+    // Spawn the system tray (Phase 6).
+    let tray_state = tray::TrayState {
+        captions_enabled: Arc::clone(&captions_enabled),
+        active_source: cfg.audio_source.clone(),
+        overlay_mode: cfg.overlay_mode.clone(),
+        locked: cfg.locked,
+        active_engine: active_engine.clone(),
+        cuda_warning: cuda_fallback_warning,
+        audio_nodes: Vec::new(),
+        overlay_tx: cmd_tx_to_gtk.clone(),
+        audio_tx: audio_cmd_tx.clone(),
+        engine_tx: engine_switch_tx,
+        node_list: Arc::clone(&node_list),
+    };
+
+    // Use the already-built tokio runtime (from Phase 2 model download).
+    let tray_handle = tray::spawn_tray(tray_state, &runtime);
+
+    // Tray handle is stored so Phase 8 can call handle.update() when state changes.
+    let _ = tray_handle; // used in Phase 8
 
     // Run GTK4 main loop (blocks until application exits).
     overlay::run_gtk_app(cfg, caption_rx_from_inference, cmd_rx, Arc::clone(&captions_enabled));
