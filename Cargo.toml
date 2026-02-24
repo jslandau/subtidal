@@ -33,7 +33,8 @@ ndarray = "0.16"
 hf-hub = { version = "0.5", features = ["tokio"] }
 
 # Config hot-reload
-notify = "8"
+notify = "6"
+notify-debouncer-mini = "0.4"
 
 # Desktop notifications
 notify-rust = "4"

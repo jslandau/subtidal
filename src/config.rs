@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use notify_debouncer_mini::{new_debouncer, DebounceEventResult};
+use std::time::Duration;
 
 /// Which STT engine to use for inference.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -187,6 +189,54 @@ impl Config {
             .with_context(|| format!("writing config to {}", path.display()))?;
         Ok(())
     }
+}
+
+/// Start watching config.toml for changes. When appearance fields change,
+/// sends an UpdateAppearance command to the overlay.
+///
+/// Returns the debouncer watcher (must be kept alive for the lifetime of the watch).
+/// Drop the returned watcher to stop watching.
+pub fn start_hot_reload(
+    overlay_tx: std::sync::mpsc::Sender<crate::overlay::OverlayCommand>,
+) -> anyhow::Result<notify_debouncer_mini::Debouncer<notify::RecommendedWatcher>> {
+    let config_path = Config::config_path();
+
+    // Ensure the config directory exists (it should from startup, but guard here).
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    // Debounce at 500ms: multiple rapid writes (e.g. from an editor) collapse into one event.
+    let mut debouncer = new_debouncer(Duration::from_millis(500), move |result: DebounceEventResult| {
+        match result {
+            Ok(_events) => {
+                // Config file changed: reload and extract appearance.
+                match Config::load_from(&Config::config_path()) {
+                    Ok(new_cfg) => {
+                        let _ = overlay_tx.send(
+                            crate::overlay::OverlayCommand::UpdateAppearance(new_cfg.appearance)
+                        );
+                    }
+                    Err(e) => {
+                        // AC6.3: malformed TOML → warn and keep current appearance.
+                        eprintln!("warn: config hot-reload failed (malformed TOML): {e}");
+                        eprintln!("warn: keeping current overlay appearance");
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("warn: config file watch error: {e:?}");
+            }
+        }
+    })?;
+
+    // Watch the config file itself (NonRecursive = only the file).
+    debouncer.watcher().watch(
+        &config_path,
+        notify::RecursiveMode::NonRecursive,
+    )?;
+
+    Ok(debouncer)
 }
 
 #[cfg(test)]
