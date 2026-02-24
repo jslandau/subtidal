@@ -196,6 +196,10 @@ impl Config {
 ///
 /// Returns the debouncer watcher (must be kept alive for the lifetime of the watch).
 /// Drop the returned watcher to stop watching.
+///
+/// Note: Programmatic saves (e.g. from tray callbacks) will trigger the watcher,
+/// causing a redundant but harmless reload cycle. The UpdateAppearance command is
+/// idempotent, so this is accepted as a trade-off for simplicity.
 pub fn start_hot_reload(
     overlay_tx: std::sync::mpsc::Sender<crate::overlay::OverlayCommand>,
 ) -> anyhow::Result<notify_debouncer_mini::Debouncer<notify::RecommendedWatcher>> {
