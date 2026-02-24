@@ -9,6 +9,7 @@ use clap::Parser;
 use config::Config;
 use ringbuf::traits::Consumer;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Parser, Debug)]
 #[command(name = "live-captions", about = "Real-time speech-to-text overlay for Linux/Wayland")]
@@ -151,16 +152,23 @@ fn main() {
     let chunk_tx = std::sync::Arc::new(std::sync::Mutex::new(chunk_tx_inner));
     let (caption_tx, caption_rx) = std::sync::mpsc::sync_channel::<String>(64);
 
+    // Create shutdown flag for audio bridge thread.
+    let bridge_shutdown = Arc::new(AtomicBool::new(false));
+
     // Spawn the audio→chunk bridge thread.
     // Drains the ring buffer, resamples, and sends 160ms chunks to the inference thread.
     // Locks chunk_tx on each send so Phase 8 can atomically swap the inner SyncSender.
     let mut ring_consumer_arc = ring_consumer;
     let chunk_tx_for_bridge = std::sync::Arc::clone(&chunk_tx);
+    let bridge_shutdown_for_thread = Arc::clone(&bridge_shutdown);
     std::thread::spawn(move || {
         let mut resampler = audio::resampler::AudioResampler::new()
             .expect("creating resampler");
         let mut raw = vec![0f32; 4096];
         loop {
+            if bridge_shutdown_for_thread.load(Ordering::Relaxed) {
+                break;
+            }
             let n = ring_consumer_arc.pop_slice(&mut raw);
             if n > 0 {
                 match resampler.push_interleaved(&raw[..n]) {
@@ -196,6 +204,7 @@ fn main() {
             )
         }
         config::Engine::Moonshine => {
+            eprintln!("warn: Moonshine engine uses placeholder inference — real ONNX inference not yet implemented");
             let model_dir = models::moonshine_model_dir();
             Box::new(
                 stt::moonshine::MoonshineEngine::new(&model_dir)
@@ -221,7 +230,7 @@ fn main() {
     // The audio bridge thread calls chunk_tx.lock().unwrap().send(chunk) on every chunk.
     // When we replace *chunk_tx.lock(), the very next chunk goes to the new inference engine.
     // We store old inference thread handles in a Vec to prevent JoinHandle leaks.
-    let inference_handles = Arc::new(Mutex::new(Vec::new()));
+    let inference_handles: Arc<Mutex<Vec<std::thread::JoinHandle<()>>>> = Arc::new(Mutex::new(Vec::new()));
     {
         let chunk_tx_for_switch = std::sync::Arc::clone(&chunk_tx); // Phase 4's Arc<Mutex<SyncSender>>
         let inference_handles = Arc::clone(&inference_handles);
@@ -261,7 +270,10 @@ fn main() {
 
                         // Store the old handle to prevent JoinHandle leak.
                         // The inference thread will exit when the old chunk_tx is dropped.
-                        inference_handles.lock().unwrap().push(handle);
+                        // Before pushing, retain only handles whose threads have finished.
+                        let mut handles = inference_handles.lock().unwrap();
+                        handles.retain(|h| !h.is_finished());
+                        handles.push(handle);
 
                         // Atomically replace the inner SyncSender.
                         // The audio bridge thread will send to the new inference thread on next chunk.
@@ -362,8 +374,11 @@ fn main() {
     // Phase 8: Graceful shutdown on Ctrl-C / SIGTERM.
     let audio_tx_for_signal = audio_cmd_tx.clone();
     let glib_cmd_tx_for_signal = cmd_tx_to_gtk.clone();
+    let bridge_shutdown_for_signal = Arc::clone(&bridge_shutdown);
     ctrlc::set_handler(move || {
         eprintln!("info: received shutdown signal, stopping...");
+        // Signal audio bridge thread to stop.
+        bridge_shutdown_for_signal.store(true, Ordering::Relaxed);
         // Shut down the audio thread.
         let _ = audio_tx_for_signal.send(audio::AudioCommand::Shutdown);
         // Signal GTK4 to quit cleanly via the existing glib channel.

@@ -22,6 +22,7 @@ pub enum OverlayCommand {
     /// Update appearance from config.
     UpdateAppearance(AppearanceConfig),
     /// Update caption text (also sent as plain String via glib channel in normal flow).
+    #[allow(dead_code)]
     SetCaption(String),
     /// Quit the application cleanly (sent by tray Quit and SIGTERM handler).
     Quit,

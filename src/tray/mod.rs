@@ -37,8 +37,9 @@ impl TrayState {
     /// Toggle captions on/off and notify the overlay. Single source of truth for
     /// the toggle — called from both left-click (activate) and the Captions checkmark.
     fn toggle_captions(&mut self) {
-        let enabled = self.captions_enabled.fetch_xor(true, Ordering::Relaxed);
-        let _ = self.overlay_tx.send(OverlayCommand::SetVisible(!enabled));
+        let prev = self.captions_enabled.load(Ordering::Relaxed);
+        self.captions_enabled.store(!prev, Ordering::Relaxed);
+        let _ = self.overlay_tx.send(OverlayCommand::SetVisible(!prev));
     }
 }
 
@@ -178,6 +179,7 @@ fn build_audio_source_submenu(
             tray.active_source = new_source.clone();
             let _ = tray.audio_tx.send(AudioCommand::SwitchSource(new_source.clone()));
             // Persist audio source change to config.
+            // Note: load-modify-save pattern has a theoretical race if multiple tray actions fire simultaneously. Acceptable for single-user desktop app.
             let mut cfg = crate::config::Config::load();
             cfg.audio_source = tray.active_source.clone();
             if let Err(e) = cfg.save() {
@@ -217,6 +219,7 @@ fn build_overlay_submenu(tray: &TrayState) -> Vec<MenuItem<TrayState>> {
                 let mode = if idx == 0 { OverlayMode::Docked } else { OverlayMode::Floating };
                 tray.overlay_mode = mode.clone();
                 let _ = tray.overlay_tx.send(OverlayCommand::SetMode(mode.clone()));
+                // Note: load-modify-save pattern has a theoretical race if multiple tray actions fire simultaneously. Acceptable for single-user desktop app.
                 let mut cfg = crate::config::Config::load();
                 cfg.overlay_mode = tray.overlay_mode.clone();
                 if let Err(e) = cfg.save() {
@@ -241,6 +244,7 @@ fn build_overlay_submenu(tray: &TrayState) -> Vec<MenuItem<TrayState>> {
                 if tray.overlay_mode == OverlayMode::Floating {
                     tray.locked = !tray.locked;
                     let _ = tray.overlay_tx.send(OverlayCommand::SetLocked(tray.locked));
+                    // Note: load-modify-save pattern has a theoretical race if multiple tray actions fire simultaneously. Acceptable for single-user desktop app.
                     let mut cfg = crate::config::Config::load();
                     cfg.locked = tray.locked;
                     if let Err(e) = cfg.save() {
@@ -261,6 +265,7 @@ fn build_engine_submenu(active: &Engine) -> Vec<MenuItem<TrayState>> {
             let engine = if idx == 0 { Engine::Parakeet } else { Engine::Moonshine };
             tray.active_engine = engine.clone();
             let _ = tray.engine_tx.send(EngineCommand::Switch(engine.clone()));
+            // Note: load-modify-save pattern has a theoretical race if multiple tray actions fire simultaneously. Acceptable for single-user desktop app.
             let mut cfg = crate::config::Config::load();
             cfg.engine = tray.active_engine.clone();
             if let Err(e) = cfg.save() {
@@ -274,7 +279,7 @@ fn build_engine_submenu(active: &Engine) -> Vec<MenuItem<TrayState>> {
                 ..Default::default()
             },
             RadioItem {
-                label: "Moonshine (CPU)".to_string(),
+                label: "Moonshine (CPU) [experimental]".to_string(),
                 enabled: true,
                 ..Default::default()
             },

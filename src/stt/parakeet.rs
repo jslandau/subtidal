@@ -13,15 +13,9 @@ impl ParakeetEngine {
     /// Directory must contain: encoder.onnx, decoder_joint.onnx, tokenizer.json
     /// (downloaded in Phase 2 to ~/.local/share/live-captions/models/parakeet/).
     pub fn new(model_dir: &Path) -> Result<Self> {
-        // Build execution config with CUDA (falls through to CPU if CUDA unavailable).
-        // Try CUDA if available via ort feature; otherwise defaults to CPU.
-        #[cfg(feature = "cuda")]
-        let exec_config = {
-            parakeet_rs::ExecutionConfig::new()
-                .with_execution_provider(parakeet_rs::ExecutionProvider::Cuda)
-        };
-
-        #[cfg(not(feature = "cuda"))]
+        // Build execution config with default execution providers.
+        // ort will use CUDA if available, CPU otherwise (cuda_available() in stt/mod.rs
+        // handles the runtime check for user warnings).
         let exec_config = parakeet_rs::ExecutionConfig::new();
 
         let inner = parakeet_rs::ParakeetEOU::from_pretrained(model_dir, Some(exec_config))
