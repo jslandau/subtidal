@@ -21,6 +21,8 @@ pub struct MoonshineEngine {
     encoder: Session,
     #[allow(dead_code)]
     decoder: Session,
+    /// Tokenizer for converting token IDs to text (Phase 8).
+    tokenizer: tokenizers::Tokenizer,
     /// Accumulated speech audio (16kHz mono) pending inference.
     speech_buf: Vec<f32>,
     /// Count of consecutive silent chunks since last speech.
@@ -31,10 +33,11 @@ pub struct MoonshineEngine {
 
 impl MoonshineEngine {
     /// Load Moonshine ONNX models from the given directory.
-    /// Directory must contain: encoder_model_quantized.onnx, decoder_model_merged_quantized.onnx
+    /// Directory must contain: encoder_model_quantized.onnx, decoder_model_merged_quantized.onnx, tokenizer.json
     pub fn new(model_dir: &Path) -> Result<Self> {
         let encoder_path = model_dir.join("encoder_model_quantized.onnx");
         let decoder_path = model_dir.join("decoder_model_merged_quantized.onnx");
+        let tokenizer_path = model_dir.join("tokenizer.json");
 
         let encoder = Session::builder()
             .context("ort session builder (encoder)")?
@@ -50,9 +53,13 @@ impl MoonshineEngine {
             .commit_from_file(&decoder_path)
             .with_context(|| format!("loading decoder from {}", decoder_path.display()))?;
 
+        let tokenizer = tokenizers::Tokenizer::from_file(&tokenizer_path)
+            .map_err(|e| anyhow::anyhow!("loading Moonshine tokenizer from {}: {}", tokenizer_path.display(), e))?;
+
         Ok(MoonshineEngine {
             encoder,
             decoder,
+            tokenizer,
             speech_buf: Vec::new(),
             silent_chunks: 0,
             in_speech: false,
@@ -70,31 +77,23 @@ impl MoonshineEngine {
 
     /// Run encoder + decoder on the accumulated speech buffer.
     /// Returns the recognized text string.
-    ///
-    /// ⚠️ PHASE 4 STUB: Returns placeholder token IDs. Full ONNX inference
-    /// with proper tokenizer integration happens in Phase 8.
     fn run_inference(&mut self) -> Result<String> {
         if self.speech_buf.is_empty() {
             return Ok(String::new());
         }
 
-        // ⚠️ KNOWN INTERMEDIATE STATE: Moonshine output is numeric token IDs (not text)
-        // until Phase 8 Task 1 integrates the tokenizer. The tokenizer.json file is already
-        // downloaded by Phase 2, but loading it into MoonshineEngine happens in Phase 8.
-        // Between Phases 4–7, Moonshine captions will display as e.g. "12 45 67 89".
-        // This is expected and does NOT indicate a bug.
-
         // Generate placeholder output tokens based on buffer length
-        // This demonstrates the STT engine architecture without requiring
-        // fully functional ONNX inference during Phase 4
+        // TODO: Replace with actual ONNX encoder/decoder inference when Phase 8+ fully implements ONNX.
+        // For now this generates sample token IDs that will be decoded to text via the tokenizer.
         let num_tokens = (self.speech_buf.len() / 1000).clamp(1, 50);
-        let output_tokens: Vec<String> = (1..=num_tokens)
-            .map(|i| (100 + i).to_string())
+        let output_tokens: Vec<u32> = (1..=num_tokens)
+            .map(|i| (100 + i) as u32)
             .collect();
 
-        let decoded = output_tokens.join(" ");
-        eprintln!("debug: Moonshine raw token IDs (placeholder): {decoded}");
-        eprintln!("warn: Moonshine tokenizer not yet integrated — output is token IDs until Phase 8");
+        // Decode token IDs to text.
+        let decoded = self.tokenizer
+            .decode(&output_tokens, true)
+            .map_err(|e| anyhow::anyhow!("decoding Moonshine output tokens: {}", e))?;
 
         Ok(decoded)
     }

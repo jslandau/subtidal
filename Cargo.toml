@@ -55,6 +55,12 @@ clap = { version = "4", features = ["derive"] }
 # XDG directory resolution
 dirs = "5"
 
+# Moonshine tokenizer
+tokenizers = "0.20"
+
+# Signal handling
+ctrlc = "3"
+
 [profile.release]
 opt-level = 3
 lto = true
