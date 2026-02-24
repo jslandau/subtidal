@@ -12,6 +12,7 @@ path = "src/main.rs"
 # GUI
 gtk4 = { version = "0.10", features = ["v4_10"] }
 gtk4-layer-shell = "0.7"
+glib = "0.19"
 
 # System tray
 ksni = "0.3"

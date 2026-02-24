@@ -2,11 +2,13 @@ mod audio;
 mod config;
 mod models;
 mod stt;
+mod overlay;
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use config::Config;
 use ringbuf::traits::Consumer;
+use std::sync::Arc;
 
 #[derive(Parser, Debug)]
 #[command(name = "live-captions", about = "Real-time speech-to-text overlay for Linux/Wayland")]
@@ -24,7 +26,7 @@ struct Args {
     reset_config: bool,
 }
 
-fn main() -> Result<()> {
+fn main() {
     let args = Args::parse();
 
     // Load or reset config. --config overrides the default XDG path.
@@ -54,7 +56,9 @@ fn main() -> Result<()> {
     }
 
     // Persist the config (creates file on first run)
-    cfg.save()?;
+    cfg.save().unwrap_or_else(|e| {
+        eprintln!("warn: failed to save config: {e}");
+    });
 
     println!("Config loaded: {:?}", Config::config_path());
     println!("Engine: {:?}", cfg.engine);
@@ -65,7 +69,10 @@ fn main() -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .context("building tokio runtime")?;
+        .unwrap_or_else(|e| {
+            eprintln!("error: failed to build tokio runtime: {e}");
+            std::process::exit(1);
+        });
 
     let engine = cfg.engine.clone();
     runtime.block_on(async move {
@@ -190,21 +197,30 @@ fn main() -> Result<()> {
     // Spawn the inference thread.
     let _inference_handle = stt::spawn_inference_thread(engine, chunk_rx, caption_tx);
 
-    // Test consumer: print captions to stdout (replaced by GTK overlay in Phase 5).
+    // Phase 5: Set up channels for caption and command delivery.
+    // We use std::sync::mpsc because glib::channel is not available in glib 0.19.
+    // The glib main loop will poll these channels via timeout_add.
+    let (caption_tx_to_gtk, caption_rx_from_inference) = std::sync::mpsc::channel::<String>();
+    let (cmd_tx_to_gtk, cmd_rx) = std::sync::mpsc::channel::<overlay::OverlayCommand>();
+
+    // Bridge: forward inference thread captions directly.
+    let caption_rx_from_inference_out = caption_rx; // from Phase 4 spawn_inference_thread
     std::thread::spawn(move || {
-        for caption in caption_rx.iter() {
-            println!("[CAPTION] {caption}");
+        for caption in caption_rx_from_inference_out.iter() {
+            if caption_tx_to_gtk.send(caption).is_err() {
+                break;
+            }
         }
     });
 
-    // --- Remaining subsystem stubs (filled in subsequent phases) ---
-    // Phase 5: GTK4 overlay window
-    // Phase 6: ksni system tray
-    // Phase 7: config hot-reload
-    // Phase 8: full integration
+    // Shared captions-enabled flag (also used by tray in Phase 6).
+    let captions_enabled = Arc::new(std::sync::atomic::AtomicBool::new(true));
 
-    // Keep the main thread alive (in Phase 5, this becomes the GTK event loop)
-    loop {
-        std::thread::sleep(std::time::Duration::from_secs(1));
-    }
+    // Store cmd_tx_to_gtk for use by tray (Phase 6).
+    // For Phase 5, wire directly.
+    let _cuda_warning = _cuda_fallback_warning; // from Phase 4
+    let _cmd_tx_to_gtk = cmd_tx_to_gtk; // Phase 6: wire to tray
+
+    // Run GTK4 main loop (blocks until application exits).
+    overlay::run_gtk_app(cfg, caption_rx_from_inference, cmd_rx, Arc::clone(&captions_enabled));
 }
