@@ -1,6 +1,7 @@
 mod audio;
 mod config;
 mod models;
+mod stt;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -101,7 +102,7 @@ fn main() -> Result<()> {
     });
 
     // Phase 3: Start audio capture
-    let (audio_cmd_tx, mut ring_consumer, _node_list) =
+    let (audio_cmd_tx, ring_consumer, _node_list) =
         audio::start_audio_thread(cfg.audio_source.clone())
             .unwrap_or_else(|e| {
                 eprintln!("error: failed to start audio capture: {e:#}");
@@ -109,40 +110,96 @@ fn main() -> Result<()> {
                 std::process::exit(1);
             });
 
-    // Test consumer: resample and print chunk count (temporary, replaced in Phase 4)
-    let mut resampler = audio::resampler::AudioResampler::new()
-        .expect("creating resampler");
-    let mut chunk_count = 0u64;
-
-    println!("Audio capture started. Listening for 5 seconds...");
-    let start = std::time::Instant::now();
-    while start.elapsed().as_secs() < 5 {
-        // Drain ring buffer into a temporary vec.
-        let mut raw = vec![0f32; 4096];
-        let n = ring_consumer.pop_slice(&mut raw);
-        if n > 0 {
-            match resampler.push_interleaved(&raw[..n]) {
-                Ok(chunks) => {
-                    chunk_count += chunks.len() as u64;
-                    if !chunks.is_empty() {
-                        eprintln!("info: produced {} 160ms chunks (total: {})", chunks.len(), chunk_count);
-                    }
-                }
-                Err(e) => eprintln!("warn: resampler error: {e}"),
+    // Phase 4: Determine active engine (with CUDA fallback).
+    let active_engine = cfg.engine.clone();
+    let (active_engine, _cuda_fallback_warning) = match active_engine {
+        config::Engine::Parakeet => {
+            if stt::cuda_available() {
+                (config::Engine::Parakeet, None)
+            } else {
+                eprintln!("warn: CUDA not available, falling back to Moonshine (CPU)");
+                (config::Engine::Moonshine, Some("CUDA unavailable — using Moonshine (CPU)"))
             }
         }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+        config::Engine::Moonshine => (config::Engine::Moonshine, None),
+    };
 
-    println!("5 second test complete. Total 160ms chunks produced: {chunk_count}");
-    let _ = audio_cmd_tx.send(audio::AudioCommand::Shutdown);
+    // Create audio chunk channel (connects Phase 3 ring buffer drain to inference).
+    // Wrap the SyncSender in Arc<Mutex<>> so Phase 8 engine switching can replace it
+    // at runtime without restarting the bridge thread.
+    let (chunk_tx_inner, chunk_rx) = std::sync::mpsc::sync_channel::<Vec<f32>>(32);
+    let chunk_tx = std::sync::Arc::new(std::sync::Mutex::new(chunk_tx_inner));
+    let (caption_tx, caption_rx) = std::sync::mpsc::sync_channel::<String>(64);
+
+    // Spawn the audio→chunk bridge thread.
+    // Drains the ring buffer, resamples, and sends 160ms chunks to the inference thread.
+    // Locks chunk_tx on each send so Phase 8 can atomically swap the inner SyncSender.
+    let mut ring_consumer_arc = ring_consumer;
+    let chunk_tx_for_bridge = std::sync::Arc::clone(&chunk_tx);
+    std::thread::spawn(move || {
+        let mut resampler = audio::resampler::AudioResampler::new()
+            .expect("creating resampler");
+        let mut raw = vec![0f32; 4096];
+        loop {
+            let n = ring_consumer_arc.pop_slice(&mut raw);
+            if n > 0 {
+                if let Ok(chunks) = resampler.push_interleaved(&raw[..n]) {
+                    for chunk in chunks {
+                        let tx = chunk_tx_for_bridge.lock().unwrap();
+                        if tx.send(chunk).is_err() {
+                            drop(tx); // release lock before sleep
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                            break; // engine switching — wait for new tx
+                        }
+                    }
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    });
+
+    // Instantiate the active STT engine.
+    let engine: Box<dyn stt::SttEngine> = match active_engine {
+        config::Engine::Parakeet => {
+            let model_dir = models::parakeet_model_dir();
+            Box::new(
+                stt::parakeet::ParakeetEngine::new(&model_dir)
+                    .unwrap_or_else(|e| {
+                        eprintln!("error: failed to load Parakeet model: {e:#}");
+                        std::process::exit(1);
+                    })
+            )
+        }
+        config::Engine::Moonshine => {
+            let model_dir = models::moonshine_model_dir();
+            Box::new(
+                stt::moonshine::MoonshineEngine::new(&model_dir)
+                    .unwrap_or_else(|e| {
+                        eprintln!("error: failed to load Moonshine model: {e:#}");
+                        std::process::exit(1);
+                    })
+            )
+        }
+    };
+
+    // Spawn the inference thread.
+    let _inference_handle = stt::spawn_inference_thread(engine, chunk_rx, caption_tx);
+
+    // Test consumer: print captions to stdout (replaced by GTK overlay in Phase 5).
+    std::thread::spawn(move || {
+        for caption in caption_rx.iter() {
+            println!("[CAPTION] {caption}");
+        }
+    });
 
     // --- Remaining subsystem stubs (filled in subsequent phases) ---
-    // Phase 4: STT inference thread
     // Phase 5: GTK4 overlay window
     // Phase 6: ksni system tray
     // Phase 7: config hot-reload
     // Phase 8: full integration
 
-    Ok(())
+    // Keep the main thread alive (in Phase 5, this becomes the GTK event loop)
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
 }
