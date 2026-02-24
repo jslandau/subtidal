@@ -82,9 +82,20 @@ impl MoonshineEngine {
             return Ok(String::new());
         }
 
-        // Generate placeholder output tokens based on buffer length
-        // TODO: Replace with actual ONNX encoder/decoder inference when Phase 8+ fully implements ONNX.
-        // For now this generates sample token IDs that will be decoded to text via the tokenizer.
+        // ⚠️ KNOWN TECH DEBT: This function currently uses placeholder token generation instead of
+        // actual ONNX encoder/decoder inference. The encoder and decoder ONNX sessions are loaded
+        // but not wired into this function. The placeholder generates fake token IDs (101, 102, ...)
+        // based on buffer length, which are then decoded by the tokenizer for testing.
+        //
+        // TODO: Replace with actual ONNX inference:
+        // 1. Convert self.speech_buf (Vec<f32>) to the correct ONNX input format (likely mel-spectrogram)
+        // 2. Run self.encoder.run() with the prepared input
+        // 3. Run self.decoder.run() on encoder output
+        // 4. Extract token IDs from decoder output
+        // 5. Decode tokens to text using self.tokenizer
+        //
+        // This requires understanding the Moonshine ONNX model's input/output signatures,
+        // which will be completed in a future phase.
         let num_tokens = (self.speech_buf.len() / 1000).clamp(1, 50);
         let output_tokens: Vec<u32> = (1..=num_tokens)
             .map(|i| (100 + i) as u32)

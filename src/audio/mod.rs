@@ -233,21 +233,27 @@ fn run_pipewire_loop(
                     node_list.lock().unwrap().retain(|n| n.node_id != id);
 
                     // Check if this is our currently captured application node.
+                    // Use reference pattern (&current_source) instead of cloning to avoid
+                    // allocating on every disappeared node in the loop.
                     if let crate::config::AudioSource::Application { node_id: active_id, ref node_name } =
-                        current_source.clone()
+                        &current_source
                     {
-                        if active_id == id {
+                        if *active_id == id {
                             eprintln!(
                                 "warn: audio node {id} ({node_name}) disappeared — falling back to system output"
                             );
-                            current_source = crate::config::AudioSource::SystemOutput;
                             should_reconnect = true;
                             lost_name = node_name.clone();
-                            lost_id = active_id;
+                            lost_id = *active_id;
                         }
                     }
                     false // remove from ids list
                 });
+
+                // Update current_source after the retain closure to avoid borrow conflicts.
+                if should_reconnect {
+                    current_source = crate::config::AudioSource::SystemOutput;
+                }
             }
 
             // Perform reconnect outside the closure

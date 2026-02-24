@@ -8,7 +8,7 @@ mod tray;
 use clap::Parser;
 use config::Config;
 use ringbuf::traits::Consumer;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 #[derive(Parser, Debug)]
 #[command(name = "live-captions", about = "Real-time speech-to-text overlay for Linux/Wayland")]
@@ -220,8 +220,11 @@ fn main() {
     // chunk_tx is Arc<Mutex<SyncSender<Vec<f32>>>> from Phase 4 Task 4.
     // The audio bridge thread calls chunk_tx.lock().unwrap().send(chunk) on every chunk.
     // When we replace *chunk_tx.lock(), the very next chunk goes to the new inference engine.
+    // We store old inference thread handles in a Vec to prevent JoinHandle leaks.
+    let inference_handles = Arc::new(Mutex::new(Vec::new()));
     {
         let chunk_tx_for_switch = std::sync::Arc::clone(&chunk_tx); // Phase 4's Arc<Mutex<SyncSender>>
+        let inference_handles = Arc::clone(&inference_handles);
 
         std::thread::spawn(move || {
             for cmd in engine_switch_rx.iter() {
@@ -251,10 +254,14 @@ fn main() {
                         };
 
                         // Spawn new inference thread and get its new SyncSender.
-                        let (new_chunk_tx, _handle) = stt::restart_inference_thread(
+                        let (new_chunk_tx, handle) = stt::restart_inference_thread(
                             new_engine,
                             caption_tx_for_switch.clone(),
                         );
+
+                        // Store the old handle to prevent JoinHandle leak.
+                        // The inference thread will exit when the old chunk_tx is dropped.
+                        inference_handles.lock().unwrap().push(handle);
 
                         // Atomically replace the inner SyncSender.
                         // The audio bridge thread will send to the new inference thread on next chunk.
