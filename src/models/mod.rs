@@ -48,14 +48,38 @@ pub fn moonshine_model_files() -> [PathBuf; 3] {
     ]
 }
 
+/// Returns true if all required Parakeet model files are present on disk in the given directory.
+pub fn parakeet_models_present_in(dir: &Path) -> bool {
+    let model_dir = dir.join("parakeet");
+    [
+        model_dir.join("encoder.onnx"),
+        model_dir.join("decoder_joint.onnx"),
+        model_dir.join("tokenizer.json"),
+    ]
+    .iter()
+    .all(|p| p.exists())
+}
+
 /// Returns true if all required Parakeet model files are present on disk.
 pub fn parakeet_models_present() -> bool {
-    parakeet_model_files().iter().all(|p| p.exists())
+    parakeet_models_present_in(&models_dir())
+}
+
+/// Returns true if all required Moonshine model files are present on disk in the given directory.
+pub fn moonshine_models_present_in(dir: &Path) -> bool {
+    let model_dir = dir.join("moonshine");
+    [
+        model_dir.join("encoder_model_quantized.onnx"),
+        model_dir.join("decoder_model_merged_quantized.onnx"),
+        model_dir.join("tokenizer.json"),
+    ]
+    .iter()
+    .all(|p| p.exists())
 }
 
 /// Returns true if all required Moonshine model files are present on disk.
 pub fn moonshine_models_present() -> bool {
-    moonshine_model_files().iter().all(|p| p.exists())
+    moonshine_models_present_in(&models_dir())
 }
 
 /// HuggingFace repo and file paths for the Parakeet EOU model.
@@ -211,16 +235,11 @@ mod tests {
         std::fs::write(model_dir.join("decoder_joint.onnx"), b"dummy").unwrap();
         std::fs::write(model_dir.join("tokenizer.json"), b"dummy").unwrap();
 
-        // Manually check the files in the temp directory
-        let files = [
-            model_dir.join("encoder.onnx"),
-            model_dir.join("decoder_joint.onnx"),
-            model_dir.join("tokenizer.json"),
-        ];
-
-        for file in &files {
-            assert!(file.exists(), "File should exist: {}", file.display());
-        }
+        // Test that parakeet_models_present_in returns true when all files exist
+        assert!(
+            parakeet_models_present_in(tempdir.path()),
+            "parakeet_models_present_in should return true when all files exist"
+        );
     }
 
     /// AC5.2: Skip download when models present.
@@ -236,15 +255,10 @@ mod tests {
         std::fs::write(model_dir.join("decoder_model_merged_quantized.onnx"), b"dummy").unwrap();
         std::fs::write(model_dir.join("tokenizer.json"), b"dummy").unwrap();
 
-        // Manually check the files in the temp directory
-        let files = [
-            model_dir.join("encoder_model_quantized.onnx"),
-            model_dir.join("decoder_model_merged_quantized.onnx"),
-            model_dir.join("tokenizer.json"),
-        ];
-
-        for file in &files {
-            assert!(file.exists(), "File should exist: {}", file.display());
-        }
+        // Test that moonshine_models_present_in returns true when all files exist
+        assert!(
+            moonshine_models_present_in(tempdir.path()),
+            "moonshine_models_present_in should return true when all files exist"
+        );
     }
 }
