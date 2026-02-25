@@ -158,11 +158,18 @@ pub async fn ensure_moonshine_models() -> Result<()> {
 }
 
 fn copy_model_file(src: &Path, dest: &Path) -> Result<()> {
+    // Resolve symlinks: hf-hub returns paths that are symlinks into its blob store.
+    // We must resolve to the real file before hardlinking, otherwise we'd create a
+    // hardlink to the symlink (which has a relative target that won't resolve from
+    // our models directory).
+    let real_src = std::fs::canonicalize(src)
+        .with_context(|| format!("resolving symlink {}", src.display()))?;
+
     // Try hardlink first (free if on same filesystem as HF cache).
     // Fall back to copy if hardlink fails (different filesystem).
-    if std::fs::hard_link(src, dest).is_err() {
-        std::fs::copy(src, dest)
-            .with_context(|| format!("copying {} to {}", src.display(), dest.display()))?;
+    if std::fs::hard_link(&real_src, dest).is_err() {
+        std::fs::copy(&real_src, dest)
+            .with_context(|| format!("copying {} to {}", real_src.display(), dest.display()))?;
     }
     Ok(())
 }
