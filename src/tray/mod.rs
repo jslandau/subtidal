@@ -17,7 +17,6 @@ pub struct TrayState {
     pub overlay_mode: OverlayMode,
     pub locked: bool,
     pub active_engine: Engine,
-    pub cuda_warning: Option<&'static str>,
     /// Channel to send OverlayCommand to the GTK4 main thread.
     pub overlay_tx: Sender<OverlayCommand>,
     /// Channel to send AudioCommand to the PipeWire thread.
@@ -57,11 +56,7 @@ impl Tray for TrayState {
     }
 
     fn title(&self) -> String {
-        if let Some(warn) = self.cuda_warning {
-            format!("Live Captions — ⚠ {warn}")
-        } else {
-            "Live Captions".to_string()
-        }
+        "Live Captions".to_string()
     }
 
     fn activate(&mut self, _x: i32, _y: i32) {
@@ -304,11 +299,11 @@ fn build_overlay_submenu(tray: &TrayState) -> Vec<MenuItem<TrayState>> {
     ]
 }
 
-fn build_engine_submenu(active: &Engine) -> Vec<MenuItem<TrayState>> {
+fn build_engine_submenu(_active: &Engine) -> Vec<MenuItem<TrayState>> {
     vec![RadioGroup {
-        selected: if *active == Engine::Nemotron { 0 } else { 1 },
-        select: Box::new(|tray: &mut TrayState, idx: usize| {
-            let engine = if idx == 0 { Engine::Nemotron } else { Engine::Moonshine };
+        selected: 0, // Only Nemotron is available
+        select: Box::new(|tray: &mut TrayState, _idx: usize| {
+            let engine = Engine::Nemotron;
             tray.active_engine = engine.clone();
             let _ = tray.engine_tx.send(EngineCommand::Switch(engine.clone()));
             // Note: load-modify-save pattern has a theoretical race if multiple tray actions fire simultaneously. Acceptable for single-user desktop app.
@@ -321,11 +316,6 @@ fn build_engine_submenu(active: &Engine) -> Vec<MenuItem<TrayState>> {
         options: vec![
             RadioItem {
                 label: "Nemotron (GPU)".to_string(),
-                enabled: true,
-                ..Default::default()
-            },
-            RadioItem {
-                label: "Moonshine (CPU) [experimental]".to_string(),
                 enabled: true,
                 ..Default::default()
             },
@@ -364,7 +354,6 @@ mod tests {
             overlay_mode: OverlayMode::Docked,
             locked: false,
             active_engine: Engine::Nemotron,
-            cuda_warning: None,
             overlay_tx,
             audio_tx,
             engine_tx,
@@ -397,7 +386,6 @@ mod tests {
             overlay_mode: OverlayMode::Floating,
             locked: false,
             active_engine: Engine::Nemotron,
-            cuda_warning: None,
             overlay_tx,
             audio_tx,
             engine_tx,

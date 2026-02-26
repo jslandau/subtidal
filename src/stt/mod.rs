@@ -1,7 +1,6 @@
 //! STT engine abstraction and inference thread management.
 
 pub mod nemotron;
-pub mod moonshine;
 
 use anyhow::Result;
 use ort::ep::ExecutionProvider as _;

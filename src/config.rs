@@ -11,7 +11,6 @@ pub enum Engine {
     #[default]
     #[serde(alias = "parakeet")]
     Nemotron,
-    Moonshine,
 }
 
 /// The PipeWire audio source to capture from.
@@ -327,7 +326,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         let mut original = Config {
-            engine: Engine::Moonshine,
+            engine: Engine::Nemotron,
             overlay_mode: OverlayMode::Floating,
             locked: false,
             ..Config::default()
@@ -336,7 +335,7 @@ mod tests {
         let text = toml::to_string_pretty(&original).unwrap();
         fs::write(&path, &text).unwrap();
         let loaded = Config::load_from(&path).unwrap();
-        assert_eq!(loaded.engine, Engine::Moonshine);
+        assert_eq!(loaded.engine, Engine::Nemotron);
         assert_eq!(loaded.overlay_mode, OverlayMode::Floating);
         assert!(!loaded.locked);
     }
@@ -361,9 +360,9 @@ mod tests {
     fn config_partial_toml_fills_defaults() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("partial.toml");
-        fs::write(&path, "engine = \"moonshine\"\n").unwrap();
+        fs::write(&path, "engine = \"nemotron\"\n").unwrap();
         let cfg = Config::load_from(&path).unwrap();
-        assert_eq!(cfg.engine, Engine::Moonshine);
+        assert_eq!(cfg.engine, Engine::Nemotron);
         assert!(cfg.locked);
         assert_eq!(cfg.screen_edge, ScreenEdge::Bottom);
     }

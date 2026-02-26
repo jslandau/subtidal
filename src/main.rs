@@ -18,7 +18,7 @@ struct Args {
     #[arg(long)]
     config: Option<std::path::PathBuf>,
 
-    /// Override STT engine for this session (parakeet|moonshine)
+    /// Override STT engine for this session (nemotron|parakeet)
     #[arg(long)]
     engine: Option<String>,
 
@@ -48,9 +48,8 @@ fn main() {
     if let Some(engine_str) = args.engine {
         cfg.engine = match engine_str.to_lowercase().as_str() {
             "nemotron" | "parakeet" => config::Engine::Nemotron,
-            "moonshine" => config::Engine::Moonshine,
             other => {
-                eprintln!("Unknown engine '{}'. Use 'nemotron' or 'moonshine'.", other);
+                eprintln!("Unknown engine '{other}'. Valid engines: nemotron, parakeet.");
                 std::process::exit(1);
             }
         };
@@ -75,37 +74,18 @@ fn main() {
             std::process::exit(1);
         });
 
-    let engine = cfg.engine.clone();
-    runtime.block_on(async move {
-        match engine {
-            config::Engine::Nemotron => {
-                if !models::nemotron_models_present() {
-                    println!("Downloading Nemotron model files (first run)...");
-                    models::ensure_nemotron_models().await
-                        .unwrap_or_else(|e| {
-                            eprintln!("error: failed to download Nemotron model: {e:#}");
-                            eprintln!("hint: check network connectivity and disk space in ~/.local/share/subtidal/models/");
-                            std::process::exit(1);
-                        });
-                    println!("Nemotron models ready.");
-                } else {
-                    println!("Nemotron models already present, skipping download.");
-                }
-            }
-            config::Engine::Moonshine => {
-                if !models::moonshine_models_present() {
-                    println!("Downloading Moonshine model files (first run)...");
-                    models::ensure_moonshine_models().await
-                        .unwrap_or_else(|e| {
-                            eprintln!("error: failed to download Moonshine model: {e:#}");
-                            eprintln!("hint: check network connectivity and disk space in ~/.local/share/subtidal/models/");
-                            std::process::exit(1);
-                        });
-                    println!("Moonshine models ready.");
-                } else {
-                    println!("Moonshine models already present, skipping download.");
-                }
-            }
+    runtime.block_on(async {
+        if !models::nemotron_models_present() {
+            println!("Downloading Nemotron model files (first run)...");
+            models::ensure_nemotron_models().await
+                .unwrap_or_else(|e| {
+                    eprintln!("error: failed to download Nemotron model: {e:#}");
+                    eprintln!("hint: check network connectivity and disk space in ~/.local/share/subtidal/models/");
+                    std::process::exit(1);
+                });
+            println!("Nemotron models ready.");
+        } else {
+            println!("Nemotron models already present, skipping download.");
         }
     });
 
@@ -131,19 +111,12 @@ fn main() {
         let _ = audio_cmd_tx.send(audio::AudioCommand::SwitchSource(validated_source));
     }
 
-    // Phase 4: Determine active engine (with CUDA fallback).
-    let active_engine = cfg.engine.clone();
-    let (active_engine, cuda_fallback_warning) = match active_engine {
-        config::Engine::Nemotron => {
-            if stt::cuda_available() {
-                (config::Engine::Nemotron, None)
-            } else {
-                eprintln!("warn: CUDA not available, falling back to Moonshine (CPU)");
-                (config::Engine::Moonshine, Some("CUDA unavailable — using Moonshine (CPU)"))
-            }
-        }
-        config::Engine::Moonshine => (config::Engine::Moonshine, None),
-    };
+    // Log CUDA availability (Nemotron runs on CPU when CUDA is unavailable).
+    if stt::cuda_available() {
+        eprintln!("info: CUDA available, Nemotron will use GPU acceleration");
+    } else {
+        eprintln!("info: CUDA not available, Nemotron will use CPU");
+    }
 
     // Create audio chunk channel (connects Phase 3 ring buffer drain to inference).
     // Wrap the SyncSender in Arc<Mutex<>> so Phase 8 engine switching can replace it
@@ -191,29 +164,16 @@ fn main() {
         }
     });
 
-    // Instantiate the active STT engine.
-    let engine: Box<dyn stt::SttEngine> = match active_engine {
-        config::Engine::Nemotron => {
-            let model_dir = models::nemotron_model_dir();
-            Box::new(
-                stt::nemotron::NemotronEngine::new(&model_dir)
-                    .unwrap_or_else(|e| {
-                        eprintln!("error: failed to load Nemotron model: {e:#}");
-                        std::process::exit(1);
-                    })
-            )
-        }
-        config::Engine::Moonshine => {
-            eprintln!("warn: Moonshine engine uses placeholder inference — real ONNX inference not yet implemented");
-            let model_dir = models::moonshine_model_dir();
-            Box::new(
-                stt::moonshine::MoonshineEngine::new(&model_dir)
-                    .unwrap_or_else(|e| {
-                        eprintln!("error: failed to load Moonshine model: {e:#}");
-                        std::process::exit(1);
-                    })
-            )
-        }
+    // Instantiate the STT engine.
+    let engine: Box<dyn stt::SttEngine> = {
+        let model_dir = models::nemotron_model_dir();
+        Box::new(
+            stt::nemotron::NemotronEngine::new(&model_dir)
+                .unwrap_or_else(|e| {
+                    eprintln!("error: failed to load Nemotron model: {e:#}");
+                    std::process::exit(1);
+                })
+        )
     };
 
     // Clone caption_tx for engine switching before spawning the inference thread.
@@ -247,15 +207,6 @@ fn main() {
                                     Ok(e) => Box::new(e),
                                     Err(e) => {
                                         eprintln!("error: failed to load Nemotron: {e:#}");
-                                        continue;
-                                    }
-                                }
-                            }
-                            config::Engine::Moonshine => {
-                                match stt::moonshine::MoonshineEngine::new(&models::moonshine_model_dir()) {
-                                    Ok(e) => Box::new(e),
-                                    Err(e) => {
-                                        eprintln!("error: failed to load Moonshine: {e:#}");
                                         continue;
                                     }
                                 }
@@ -311,8 +262,7 @@ fn main() {
         active_source: cfg.audio_source.clone(),
         overlay_mode: cfg.overlay_mode.clone(),
         locked: cfg.locked,
-        active_engine: active_engine.clone(),
-        cuda_warning: cuda_fallback_warning,
+        active_engine: cfg.engine.clone(),
         overlay_tx: cmd_tx_to_gtk.clone(),
         audio_tx: audio_cmd_tx.clone(),
         engine_tx: engine_switch_tx,
