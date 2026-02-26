@@ -282,10 +282,13 @@ fn build_overlay_window(app: &Application, cfg: &Config) -> ApplicationWindow {
         .wrap(true)
         .wrap_mode(gtk4::pango::WrapMode::WordChar)
         .max_width_chars(max_chars)
+        .lines(cfg.appearance.max_lines as i32)
         .xalign(0.0) // left-align text
         .build();
+    label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
     label.set_widget_name("caption-label");
     window.set_child(Some(&label));
+    window.set_width_request(cfg.appearance.width);
 
     // Set click-through after window maps.
     let is_locked = cfg.locked || cfg.overlay_mode == OverlayMode::Docked;
@@ -374,6 +377,7 @@ fn build_css(appearance: &AppearanceConfig) -> String {
         r#"
         window {{
             background-color: {bg};
+            border-radius: 12px;
         }}
         #caption-label {{
             color: {fg};
@@ -517,6 +521,8 @@ fn handle_overlay_command(
             apply_appearance(&appearance);
             let label = find_caption_label(window);
             label.set_max_width_chars(estimate_max_chars(appearance.width, appearance.font_size));
+            label.set_lines(appearance.max_lines as i32);
+            window.set_width_request(appearance.width);
         }
         OverlayCommand::SetCaption(text) => {
             let label = find_caption_label(window);

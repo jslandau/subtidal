@@ -209,8 +209,25 @@ fn build_audio_source_submenu(
     items
 }
 
+/// Width presets for the overlay size submenu.
+const SIZE_PRESETS: &[(& str, i32)] = &[
+    ("Small (400px)", 400),
+    ("Medium (600px)", 600),
+    ("Large (800px)", 800),
+    ("Extra Large (1000px)", 1000),
+];
+
 fn build_overlay_submenu(tray: &TrayState) -> Vec<MenuItem<TrayState>> {
     let is_docked = tray.overlay_mode == OverlayMode::Docked;
+
+    // Determine which size preset is currently selected.
+    let cfg = crate::config::Config::load();
+    let current_width = cfg.appearance.width;
+    let size_idx = SIZE_PRESETS
+        .iter()
+        .position(|(_, w)| *w == current_width)
+        .unwrap_or(1); // default to Medium if custom
+
     vec![
         // Docked / Floating radio.
         RadioGroup {
@@ -219,7 +236,6 @@ fn build_overlay_submenu(tray: &TrayState) -> Vec<MenuItem<TrayState>> {
                 let mode = if idx == 0 { OverlayMode::Docked } else { OverlayMode::Floating };
                 tray.overlay_mode = mode.clone();
                 let _ = tray.overlay_tx.send(OverlayCommand::SetMode(mode.clone()));
-                // Note: load-modify-save pattern has a theoretical race if multiple tray actions fire simultaneously. Acceptable for single-user desktop app.
                 let mut cfg = crate::config::Config::load();
                 cfg.overlay_mode = tray.overlay_mode.clone();
                 if let Err(e) = cfg.save() {
@@ -235,6 +251,37 @@ fn build_overlay_submenu(tray: &TrayState) -> Vec<MenuItem<TrayState>> {
 
         MenuItem::Separator,
 
+        // Overlay width presets.
+        SubMenu {
+            label: "Size".to_string(),
+            submenu: vec![RadioGroup {
+                selected: size_idx,
+                select: Box::new(|tray: &mut TrayState, idx: usize| {
+                    let width = SIZE_PRESETS.get(idx).map(|(_, w)| *w).unwrap_or(600);
+                    let mut cfg = crate::config::Config::load();
+                    cfg.appearance.width = width;
+                    let appearance = cfg.appearance.clone();
+                    if let Err(e) = cfg.save() {
+                        eprintln!("warn: failed to save config: {e}");
+                    }
+                    let _ = tray.overlay_tx.send(OverlayCommand::UpdateAppearance(appearance));
+                }),
+                options: SIZE_PRESETS
+                    .iter()
+                    .map(|(label, _)| RadioItem {
+                        label: label.to_string(),
+                        enabled: true,
+                        ..Default::default()
+                    })
+                    .collect(),
+            }
+            .into()],
+            ..Default::default()
+        }
+        .into(),
+
+        MenuItem::Separator,
+
         // Lock overlay position (disabled in docked mode) — AC4.5.
         CheckmarkItem {
             label: "Lock Overlay Position".to_string(),
@@ -244,7 +291,6 @@ fn build_overlay_submenu(tray: &TrayState) -> Vec<MenuItem<TrayState>> {
                 if tray.overlay_mode == OverlayMode::Floating {
                     tray.locked = !tray.locked;
                     let _ = tray.overlay_tx.send(OverlayCommand::SetLocked(tray.locked));
-                    // Note: load-modify-save pattern has a theoretical race if multiple tray actions fire simultaneously. Acceptable for single-user desktop app.
                     let mut cfg = crate::config::Config::load();
                     cfg.locked = tray.locked;
                     if let Err(e) = cfg.save() {
