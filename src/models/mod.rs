@@ -6,34 +6,35 @@ use std::path::Path;
 use std::path::PathBuf;
 
 /// Returns the base directory for downloaded model files.
-/// ~/.local/share/live-captions/models/
+/// ~/.local/share/subtidal/models/
 pub fn models_dir() -> PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from(".local/share"))
-        .join("live-captions")
+        .join("subtidal")
         .join("models")
 }
 
-/// Returns the directory for Parakeet ONNX model files.
-/// ~/.local/share/live-captions/models/parakeet/
-pub fn parakeet_model_dir() -> PathBuf {
-    models_dir().join("parakeet")
+/// Returns the directory for Nemotron ONNX model files.
+/// ~/.local/share/subtidal/models/nemotron/
+pub fn nemotron_model_dir() -> PathBuf {
+    models_dir().join("nemotron")
 }
 
 /// Returns the directory for Moonshine ONNX model files.
-/// ~/.local/share/live-captions/models/moonshine/
+/// ~/.local/share/subtidal/models/moonshine/
 pub fn moonshine_model_dir() -> PathBuf {
     models_dir().join("moonshine")
 }
 
-/// Returns paths for the three Parakeet model files.
-/// Files: encoder.onnx, decoder_joint.onnx, tokenizer.json
-pub fn parakeet_model_files() -> [PathBuf; 3] {
-    let dir = parakeet_model_dir();
+/// Returns paths for the four Nemotron model files.
+/// Files: encoder.onnx, encoder.onnx.data, decoder_joint.onnx, tokenizer.model
+pub fn nemotron_model_files() -> [PathBuf; 4] {
+    let dir = nemotron_model_dir();
     [
         dir.join("encoder.onnx"),
+        dir.join("encoder.onnx.data"),
         dir.join("decoder_joint.onnx"),
-        dir.join("tokenizer.json"),
+        dir.join("tokenizer.model"),
     ]
 }
 
@@ -48,21 +49,22 @@ pub fn moonshine_model_files() -> [PathBuf; 3] {
     ]
 }
 
-/// Returns true if all required Parakeet model files are present on disk in the given directory.
-pub fn parakeet_models_present_in(dir: &Path) -> bool {
-    let model_dir = dir.join("parakeet");
+/// Returns true if all required Nemotron model files are present on disk in the given directory.
+pub fn nemotron_models_present_in(dir: &Path) -> bool {
+    let model_dir = dir.join("nemotron");
     [
         model_dir.join("encoder.onnx"),
+        model_dir.join("encoder.onnx.data"),
         model_dir.join("decoder_joint.onnx"),
-        model_dir.join("tokenizer.json"),
+        model_dir.join("tokenizer.model"),
     ]
     .iter()
     .all(|p| p.exists())
 }
 
-/// Returns true if all required Parakeet model files are present on disk.
-pub fn parakeet_models_present() -> bool {
-    parakeet_models_present_in(&models_dir())
+/// Returns true if all required Nemotron model files are present on disk.
+pub fn nemotron_models_present() -> bool {
+    nemotron_models_present_in(&models_dir())
 }
 
 /// Returns true if all required Moonshine model files are present on disk in the given directory.
@@ -82,14 +84,15 @@ pub fn moonshine_models_present() -> bool {
     moonshine_models_present_in(&models_dir())
 }
 
-/// HuggingFace repo and file paths for the Parakeet EOU model.
+/// HuggingFace repo and file paths for the Nemotron streaming model.
 /// Repo: altunenes/parakeet-rs
-/// Subfolder: realtime_eou_120m-v1-onnx/
-const PARAKEET_REPO: &str = "altunenes/parakeet-rs";
-const PARAKEET_FILES: &[(&str, &str)] = &[
-    ("realtime_eou_120m-v1-onnx/encoder.onnx", "encoder.onnx"),
-    ("realtime_eou_120m-v1-onnx/decoder_joint.onnx", "decoder_joint.onnx"),
-    ("realtime_eou_120m-v1-onnx/tokenizer.json", "tokenizer.json"),
+/// Subfolder: nemotron-speech-streaming-en-0.6b/
+const NEMOTRON_REPO: &str = "altunenes/parakeet-rs";
+const NEMOTRON_FILES: &[(&str, &str)] = &[
+    ("nemotron-speech-streaming-en-0.6b/encoder.onnx", "encoder.onnx"),
+    ("nemotron-speech-streaming-en-0.6b/encoder.onnx.data", "encoder.onnx.data"),
+    ("nemotron-speech-streaming-en-0.6b/decoder_joint.onnx", "decoder_joint.onnx"),
+    ("nemotron-speech-streaming-en-0.6b/tokenizer.model", "tokenizer.model"),
 ];
 
 /// HuggingFace repo and file paths for the Moonshine tiny quantized model.
@@ -101,27 +104,27 @@ const MOONSHINE_FILES: &[(&str, &str)] = &[
     ("tokenizer.json", "tokenizer.json"),
 ];
 
-/// Download all Parakeet EOU model files to `~/.local/share/live-captions/models/parakeet/`.
+/// Download all Nemotron model files to `~/.local/share/subtidal/models/nemotron/`.
 /// Skips individual files that already exist.
 /// Exits the process with an error message if any download fails.
-pub async fn ensure_parakeet_models() -> Result<()> {
-    let dest_dir = parakeet_model_dir();
+pub async fn ensure_nemotron_models() -> Result<()> {
+    let dest_dir = nemotron_model_dir();
     std::fs::create_dir_all(&dest_dir)
         .with_context(|| format!("creating {}", dest_dir.display()))?;
 
     let api = hf_hub::api::tokio::Api::new()
         .context("initializing HuggingFace API")?;
-    let repo = api.model(PARAKEET_REPO.to_string());
+    let repo = api.model(NEMOTRON_REPO.to_string());
 
-    for (remote_path, local_name) in PARAKEET_FILES {
+    for (remote_path, local_name) in NEMOTRON_FILES {
         let dest = dest_dir.join(local_name);
         if dest.exists() {
-            eprintln!("info: parakeet model file already present: {}", dest.display());
+            eprintln!("info: nemotron model file already present: {}", dest.display());
             continue;
         }
         eprintln!("info: downloading {} ...", remote_path);
         let cached = repo.get(remote_path).await
-            .with_context(|| format!("downloading {remote_path} from {PARAKEET_REPO}"))?;
+            .with_context(|| format!("downloading {remote_path} from {NEMOTRON_REPO}"))?;
         copy_model_file(&cached, &dest)
             .with_context(|| format!("copying {remote_path} to {}", dest.display()))?;
         eprintln!("info: saved to {}", dest.display());
@@ -129,7 +132,7 @@ pub async fn ensure_parakeet_models() -> Result<()> {
     Ok(())
 }
 
-/// Download all Moonshine model files to `~/.local/share/live-captions/models/moonshine/`.
+/// Download all Moonshine model files to `~/.local/share/subtidal/models/moonshine/`.
 /// Skips individual files that already exist.
 /// Exits the process with an error message if any download fails.
 pub async fn ensure_moonshine_models() -> Result<()> {
@@ -186,10 +189,10 @@ mod tests {
     }
 
     #[test]
-    fn test_parakeet_model_dir_contains_models_dir() {
-        let parakeet_dir = parakeet_model_dir();
+    fn test_nemotron_model_dir_contains_models_dir() {
+        let nemotron_dir = nemotron_model_dir();
         let models_base = models_dir();
-        assert!(parakeet_dir.starts_with(&models_base));
+        assert!(nemotron_dir.starts_with(&models_base));
     }
 
     #[test]
@@ -200,12 +203,13 @@ mod tests {
     }
 
     #[test]
-    fn test_parakeet_model_files_have_correct_names() {
-        let files = parakeet_model_files();
-        assert_eq!(files.len(), 3);
+    fn test_nemotron_model_files_have_correct_names() {
+        let files = nemotron_model_files();
+        assert_eq!(files.len(), 4);
         assert!(files[0].ends_with("encoder.onnx"));
-        assert!(files[1].ends_with("decoder_joint.onnx"));
-        assert!(files[2].ends_with("tokenizer.json"));
+        assert!(files[1].ends_with("encoder.onnx.data"));
+        assert!(files[2].ends_with("decoder_joint.onnx"));
+        assert!(files[3].ends_with("tokenizer.model"));
     }
 
     #[test]
@@ -218,9 +222,10 @@ mod tests {
     }
 
     #[test]
-    fn test_parakeet_models_present_nonexistent_returns_false() {
-        // Since the paths don't actually exist, this should return false
-        assert!(!parakeet_models_present());
+    fn test_nemotron_models_present_missing_file_returns_false() {
+        // Check against a temp dir with no files — should return false.
+        let tempdir = tempfile::tempdir().unwrap();
+        assert!(!nemotron_models_present_in(tempdir.path()));
     }
 
     #[test]
@@ -230,22 +235,23 @@ mod tests {
     }
 
     /// AC5.2: Skip download when models present.
-    /// Test that parakeet_models_present returns true when all three required files exist.
+    /// Test that nemotron_models_present returns true when all four required files exist.
     #[test]
-    fn test_parakeet_models_present_when_files_exist() {
+    fn test_nemotron_models_present_when_files_exist() {
         let tempdir = tempfile::tempdir().unwrap();
-        let model_dir = tempdir.path().join("parakeet");
+        let model_dir = tempdir.path().join("nemotron");
         std::fs::create_dir_all(&model_dir).unwrap();
 
-        // Create the three required files
+        // Create the four required files
         std::fs::write(model_dir.join("encoder.onnx"), b"dummy").unwrap();
+        std::fs::write(model_dir.join("encoder.onnx.data"), b"dummy").unwrap();
         std::fs::write(model_dir.join("decoder_joint.onnx"), b"dummy").unwrap();
-        std::fs::write(model_dir.join("tokenizer.json"), b"dummy").unwrap();
+        std::fs::write(model_dir.join("tokenizer.model"), b"dummy").unwrap();
 
-        // Test that parakeet_models_present_in returns true when all files exist
+        // Test that nemotron_models_present_in returns true when all files exist
         assert!(
-            parakeet_models_present_in(tempdir.path()),
-            "parakeet_models_present_in should return true when all files exist"
+            nemotron_models_present_in(tempdir.path()),
+            "nemotron_models_present_in should return true when all files exist"
         );
     }
 

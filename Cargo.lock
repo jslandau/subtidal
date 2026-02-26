@@ -2138,37 +2138,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
-name = "live-captions"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "audioadapter-buffers",
- "bytemuck",
- "clap",
- "ctrlc",
- "dirs 5.0.1",
- "glib 0.19.9",
- "gtk4",
- "gtk4-layer-shell",
- "hf-hub",
- "ksni",
- "ndarray 0.16.1",
- "notify",
- "notify-debouncer-mini",
- "notify-rust",
- "ort",
- "parakeet-rs",
- "pipewire",
- "ringbuf",
- "rubato",
- "serde",
- "tempfile",
- "tokenizers 0.20.4",
- "tokio",
- "toml 0.8.23",
-]
-
-[[package]]
 name = "log"
 version = "0.4.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3442,6 +3411,37 @@ name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
+
+[[package]]
+name = "subtidal"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "audioadapter-buffers",
+ "bytemuck",
+ "clap",
+ "ctrlc",
+ "dirs 5.0.1",
+ "glib 0.19.9",
+ "gtk4",
+ "gtk4-layer-shell",
+ "hf-hub",
+ "ksni",
+ "ndarray 0.16.1",
+ "notify",
+ "notify-debouncer-mini",
+ "notify-rust",
+ "ort",
+ "parakeet-rs",
+ "pipewire",
+ "ringbuf",
+ "rubato",
+ "serde",
+ "tempfile",
+ "tokenizers 0.20.4",
+ "tokio",
+ "toml 0.8.23",
+]
 
 [[package]]
 name = "subtle"

@@ -53,7 +53,7 @@ impl Tray for TrayState {
     }
 
     fn id(&self) -> String {
-        "live-captions".to_string()
+        "subtidal".to_string()
     }
 
     fn title(&self) -> String {
@@ -260,9 +260,9 @@ fn build_overlay_submenu(tray: &TrayState) -> Vec<MenuItem<TrayState>> {
 
 fn build_engine_submenu(active: &Engine) -> Vec<MenuItem<TrayState>> {
     vec![RadioGroup {
-        selected: if *active == Engine::Parakeet { 0 } else { 1 },
+        selected: if *active == Engine::Nemotron { 0 } else { 1 },
         select: Box::new(|tray: &mut TrayState, idx: usize| {
-            let engine = if idx == 0 { Engine::Parakeet } else { Engine::Moonshine };
+            let engine = if idx == 0 { Engine::Nemotron } else { Engine::Moonshine };
             tray.active_engine = engine.clone();
             let _ = tray.engine_tx.send(EngineCommand::Switch(engine.clone()));
             // Note: load-modify-save pattern has a theoretical race if multiple tray actions fire simultaneously. Acceptable for single-user desktop app.
@@ -274,7 +274,7 @@ fn build_engine_submenu(active: &Engine) -> Vec<MenuItem<TrayState>> {
         }),
         options: vec![
             RadioItem {
-                label: "Parakeet (GPU)".to_string(),
+                label: "Nemotron (GPU)".to_string(),
                 enabled: true,
                 ..Default::default()
             },
@@ -317,7 +317,7 @@ mod tests {
             active_source: AudioSource::SystemOutput,
             overlay_mode: OverlayMode::Docked,
             locked: false,
-            active_engine: Engine::Parakeet,
+            active_engine: Engine::Nemotron,
             cuda_warning: None,
             overlay_tx,
             audio_tx,
@@ -350,7 +350,7 @@ mod tests {
             active_source: AudioSource::SystemOutput,
             overlay_mode: OverlayMode::Floating,
             locked: false,
-            active_engine: Engine::Parakeet,
+            active_engine: Engine::Nemotron,
             cuda_warning: None,
             overlay_tx,
             audio_tx,

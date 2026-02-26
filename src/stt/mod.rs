@@ -1,6 +1,6 @@
 //! STT engine abstraction and inference thread management.
 
-pub mod parakeet;
+pub mod nemotron;
 pub mod moonshine;
 
 use anyhow::Result;

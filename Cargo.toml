@@ -1,11 +1,11 @@
 [package]
-name = "live-captions"
+name = "subtidal"
 version = "0.1.0"
 edition = "2021"
 description = "Real-time speech-to-text overlay for Linux/Wayland"
 
 [[bin]]
-name = "live-captions"
+name = "subtidal"
 path = "src/main.rs"
 
 [dependencies]

@@ -12,9 +12,9 @@ use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Parser, Debug)]
-#[command(name = "live-captions", about = "Real-time speech-to-text overlay for Linux/Wayland")]
+#[command(name = "subtidal", about = "Real-time speech-to-text overlay for Linux/Wayland")]
 struct Args {
-    /// Path to config file (default: ~/.config/live-captions/config.toml)
+    /// Path to config file (default: ~/.config/subtidal/config.toml)
     #[arg(long)]
     config: Option<std::path::PathBuf>,
 
@@ -47,10 +47,10 @@ fn main() {
     // CLI engine override
     if let Some(engine_str) = args.engine {
         cfg.engine = match engine_str.to_lowercase().as_str() {
-            "parakeet" => config::Engine::Parakeet,
+            "nemotron" | "parakeet" => config::Engine::Nemotron,
             "moonshine" => config::Engine::Moonshine,
             other => {
-                eprintln!("Unknown engine '{}'. Use 'parakeet' or 'moonshine'.", other);
+                eprintln!("Unknown engine '{}'. Use 'nemotron' or 'moonshine'.", other);
                 std::process::exit(1);
             }
         };
@@ -78,18 +78,18 @@ fn main() {
     let engine = cfg.engine.clone();
     runtime.block_on(async move {
         match engine {
-            config::Engine::Parakeet => {
-                if !models::parakeet_models_present() {
-                    println!("Downloading Parakeet model files (first run)...");
-                    models::ensure_parakeet_models().await
+            config::Engine::Nemotron => {
+                if !models::nemotron_models_present() {
+                    println!("Downloading Nemotron model files (first run)...");
+                    models::ensure_nemotron_models().await
                         .unwrap_or_else(|e| {
-                            eprintln!("error: failed to download Parakeet model: {e:#}");
-                            eprintln!("hint: check network connectivity and disk space in ~/.local/share/live-captions/models/");
+                            eprintln!("error: failed to download Nemotron model: {e:#}");
+                            eprintln!("hint: check network connectivity and disk space in ~/.local/share/subtidal/models/");
                             std::process::exit(1);
                         });
-                    println!("Parakeet models ready.");
+                    println!("Nemotron models ready.");
                 } else {
-                    println!("Parakeet models already present, skipping download.");
+                    println!("Nemotron models already present, skipping download.");
                 }
             }
             config::Engine::Moonshine => {
@@ -98,7 +98,7 @@ fn main() {
                     models::ensure_moonshine_models().await
                         .unwrap_or_else(|e| {
                             eprintln!("error: failed to download Moonshine model: {e:#}");
-                            eprintln!("hint: check network connectivity and disk space in ~/.local/share/live-captions/models/");
+                            eprintln!("hint: check network connectivity and disk space in ~/.local/share/subtidal/models/");
                             std::process::exit(1);
                         });
                     println!("Moonshine models ready.");
@@ -134,9 +134,9 @@ fn main() {
     // Phase 4: Determine active engine (with CUDA fallback).
     let active_engine = cfg.engine.clone();
     let (active_engine, cuda_fallback_warning) = match active_engine {
-        config::Engine::Parakeet => {
+        config::Engine::Nemotron => {
             if stt::cuda_available() {
-                (config::Engine::Parakeet, None)
+                (config::Engine::Nemotron, None)
             } else {
                 eprintln!("warn: CUDA not available, falling back to Moonshine (CPU)");
                 (config::Engine::Moonshine, Some("CUDA unavailable — using Moonshine (CPU)"))
@@ -193,12 +193,12 @@ fn main() {
 
     // Instantiate the active STT engine.
     let engine: Box<dyn stt::SttEngine> = match active_engine {
-        config::Engine::Parakeet => {
-            let model_dir = models::parakeet_model_dir();
+        config::Engine::Nemotron => {
+            let model_dir = models::nemotron_model_dir();
             Box::new(
-                stt::parakeet::ParakeetEngine::new(&model_dir)
+                stt::nemotron::NemotronEngine::new(&model_dir)
                     .unwrap_or_else(|e| {
-                        eprintln!("error: failed to load Parakeet model: {e:#}");
+                        eprintln!("error: failed to load Nemotron model: {e:#}");
                         std::process::exit(1);
                     })
             )
@@ -242,11 +242,11 @@ fn main() {
                         eprintln!("info: switching STT engine to {new_engine_choice:?}");
 
                         let new_engine: Box<dyn stt::SttEngine> = match new_engine_choice {
-                            config::Engine::Parakeet => {
-                                match stt::parakeet::ParakeetEngine::new(&models::parakeet_model_dir()) {
+                            config::Engine::Nemotron => {
+                                match stt::nemotron::NemotronEngine::new(&models::nemotron_model_dir()) {
                                     Ok(e) => Box::new(e),
                                     Err(e) => {
-                                        eprintln!("error: failed to load Parakeet: {e:#}");
+                                        eprintln!("error: failed to load Nemotron: {e:#}");
                                         continue;
                                     }
                                 }
@@ -359,7 +359,7 @@ fn main() {
     // _config_watcher must stay in scope until process exit (drop = stop watching).
     // Typed as Option so the failure path compiles without a dummy Debouncer.
     let _config_watcher: Option<notify_debouncer_mini::Debouncer<notify::RecommendedWatcher>> =
-        match config::start_hot_reload(cmd_tx_to_gtk.clone()) {
+        match config::start_hot_reload(cmd_tx_to_gtk.clone(), tray_handle.clone(), runtime.handle().clone()) {
             Ok(watcher) => {
                 eprintln!("info: config hot-reload active (watching config.toml)");
                 Some(watcher)

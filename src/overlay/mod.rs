@@ -1,12 +1,124 @@
 //! GTK4 overlay window: docked (wlr-layer-shell) and floating modes with caption display.
 
-use crate::config::{AppearanceConfig, Config, OverlayMode, ScreenEdge};
+use crate::config::{AppearanceConfig, Config, DockPosition, OverlayMode, ScreenEdge};
 use gtk4::prelude::*;
 use gtk4::{Application, ApplicationWindow, Label};
 use gtk4::glib;
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use std::sync::{Arc, atomic::{AtomicBool, AtomicI32, Ordering}};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+use std::time::Instant;
+
+/// Buffer that accumulates recent caption fragments with timestamps for expiry.
+struct CaptionBuffer {
+    /// Each entry is (timestamp, fragment_text). Fragments are displayed as
+    /// continuous flowing text separated by spaces.
+    fragments: Vec<(Instant, String)>,
+    max_fragments: usize,
+    expire_secs: u64,
+    /// Track the last few words to detect and skip repeated output from the RNNT decoder.
+    last_tail: String,
+}
+
+impl CaptionBuffer {
+    fn new(max_fragments: usize) -> Self {
+        CaptionBuffer {
+            fragments: Vec::new(),
+            max_fragments,
+            expire_secs: 8,
+            last_tail: String::new(),
+        }
+    }
+
+    /// Add a new caption fragment, deduplicating overlapping text from streaming RNNT.
+    /// Preserves leading/trailing whitespace from the engine — these signal word
+    /// boundaries (e.g. " ve" = new word, "ve" = continuation of previous word).
+    fn push(&mut self, text: String) {
+        if text.trim().is_empty() {
+            return;
+        }
+
+        // Deduplicate: if the new text starts with the end of what we already have,
+        // skip the overlapping prefix. Streaming RNNT decoders sometimes re-emit
+        // the tail of the previous output as the start of the next.
+        let deduped = Self::remove_overlap(&self.last_tail, text.trim());
+        if deduped.is_empty() {
+            return;
+        }
+
+        // Preserve the leading space from the original engine output if present.
+        // This signals a word boundary vs. a mid-word continuation.
+        let fragment = if text.starts_with(char::is_whitespace) && !deduped.starts_with(char::is_whitespace) {
+            format!(" {deduped}")
+        } else {
+            deduped.clone()
+        };
+
+        self.fragments.push((Instant::now(), fragment));
+        if self.fragments.len() > self.max_fragments {
+            self.fragments.remove(0);
+        }
+
+        // Update tail: keep last ~60 chars for overlap detection.
+        let display = self.display_text();
+        let tail_start = display.len().saturating_sub(60);
+        self.last_tail = display[tail_start..].to_string();
+    }
+
+    /// Remove overlapping prefix between existing tail and new text.
+    /// Only triggers on overlaps of 4+ characters to avoid false positives
+    /// from coincidental single-character matches.
+    fn remove_overlap(tail: &str, new: &str) -> String {
+        if tail.is_empty() {
+            return new.to_string();
+        }
+        let tail_lower = tail.to_lowercase();
+        let new_lower = new.to_lowercase();
+
+        // Only consider overlaps of 4+ characters to avoid false positives.
+        let max_check = tail_lower.len().min(new_lower.len());
+        for overlap_len in (4..=max_check).rev() {
+            let tail_suffix = &tail_lower[tail_lower.len() - overlap_len..];
+            let new_prefix = &new_lower[..overlap_len];
+            if tail_suffix == new_prefix {
+                let remainder = new[overlap_len..].trim_start();
+                if !remainder.is_empty() {
+                    return remainder.to_string();
+                }
+            }
+        }
+        new.to_string()
+    }
+
+    /// Remove fragments older than expire_secs. Returns true if any were removed.
+    fn expire(&mut self) -> bool {
+        let cutoff = Instant::now() - std::time::Duration::from_secs(self.expire_secs);
+        let before = self.fragments.len();
+        self.fragments.retain(|(ts, _)| *ts > cutoff);
+        if self.fragments.len() != before {
+            // Rebuild tail after expiry.
+            let display = self.display_text();
+            let tail_start = display.len().saturating_sub(60);
+            self.last_tail = display[tail_start..].to_string();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Join all buffered fragments into a single display string.
+    /// Fragments carry their own leading whitespace from the engine's tokenizer:
+    /// " Hello" = new word, "llo" = mid-word continuation. So we concatenate directly.
+    fn display_text(&self) -> String {
+        let mut result = String::new();
+        for (_, frag) in &self.fragments {
+            result.push_str(frag);
+        }
+        // Trim leading whitespace from the combined result.
+        result.trim_start().to_string()
+    }
+}
 
 pub mod input_region;
 
@@ -48,7 +160,7 @@ pub fn run_gtk_app(
     captions_enabled: CaptionsEnabled,
 ) {
     let app = Application::builder()
-        .application_id("com.example.live-captions")
+        .application_id("com.subtidal.app")
         .build();
 
     let config = Arc::new(std::sync::Mutex::new(config));
@@ -66,19 +178,53 @@ pub fn run_gtk_app(
         // Apply initial appearance.
         apply_appearance(&cfg.appearance);
 
+        // Dragging flag: when true, suppress all GTK mutations except margin updates.
+        // Any relayout (caption text, CSS reload, widget resize) during a drag causes
+        // the compositor to momentarily reposition the layer-shell surface, producing jitter.
+        let is_dragging = Rc::new(Cell::new(false));
+
+        // Initial drag handler for floating + unlocked.
+        if cfg.overlay_mode == OverlayMode::Floating && !cfg.locked {
+            add_drag_handler(&window, &is_dragging);
+        }
+
         // Wire up caption receiver using glib timeout_add to poll.
         let label = find_caption_label(&window);
         let window_clone = window.clone();
         let enabled = Arc::clone(&captions_enabled_clone);
         let caption_rx_clone = Arc::clone(&caption_rx);
+        let caption_buffer = Rc::new(RefCell::new(CaptionBuffer::new(cfg.appearance.max_lines as usize)));
 
+        // Poll for new captions and append to buffer.
+        let buf_for_poll = Rc::clone(&caption_buffer);
+        let label_for_poll = label.clone();
+        let window_for_poll = window_clone.clone();
+        let dragging_for_caption = Rc::clone(&is_dragging);
         glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
             if let Ok(rx) = caption_rx_clone.try_lock() {
+                let mut buf = buf_for_poll.borrow_mut();
                 while let Ok(text) = rx.try_recv() {
                     if enabled.load(Ordering::Relaxed) {
-                        label.set_text(&text);
-                        window_clone.set_visible(true);
+                        buf.push(text);
+                        if !dragging_for_caption.get() {
+                            label_for_poll.set_text(&buf.display_text());
+                            window_for_poll.set_visible(true);
+                        }
                     }
+                }
+            }
+            glib::ControlFlow::Continue
+        });
+
+        // Timer to expire old caption lines every second.
+        let buf_for_expire = Rc::clone(&caption_buffer);
+        let label_for_expire = label.clone();
+        let dragging_for_expire = Rc::clone(&is_dragging);
+        glib::timeout_add_local(std::time::Duration::from_secs(1), move || {
+            if !dragging_for_expire.get() {
+                let mut buf = buf_for_expire.borrow_mut();
+                if buf.expire() {
+                    label_for_expire.set_text(&buf.display_text());
                 }
             }
             glib::ControlFlow::Continue
@@ -88,11 +234,14 @@ pub fn run_gtk_app(
         let window_clone2 = window.clone();
         let config_for_cmd = Arc::clone(&config_clone);
         let cmd_rx_clone = Arc::clone(&cmd_rx);
+        let dragging_for_cmd = Rc::clone(&is_dragging);
 
         glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
             if let Ok(rx) = cmd_rx_clone.try_lock() {
                 while let Ok(cmd) = rx.try_recv() {
-                    handle_overlay_command(&window_clone2, cmd, &config_for_cmd);
+                    if !dragging_for_cmd.get() {
+                        handle_overlay_command(&window_clone2, cmd, &config_for_cmd, &dragging_for_cmd);
+                    }
                 }
             }
             glib::ControlFlow::Continue
@@ -111,7 +260,7 @@ fn build_overlay_window(app: &Application, cfg: &Config) -> ApplicationWindow {
         .application(app)
         .decorated(false)
         .resizable(false)
-        .title("live-captions")
+        .title("subtidal")
         .build();
 
     // Initialize layer shell.
@@ -120,15 +269,20 @@ fn build_overlay_window(app: &Application, cfg: &Config) -> ApplicationWindow {
     window.set_exclusive_zone(0); // don't push other windows aside
 
     match cfg.overlay_mode {
-        OverlayMode::Docked => configure_docked(&window, &cfg.screen_edge),
+        OverlayMode::Docked => configure_docked(&window, &cfg.screen_edge, &cfg.dock_position),
         OverlayMode::Floating => configure_floating(&window, cfg),
     }
 
-    // Build caption label.
+    // Build caption label with wrapping.
+    // max_width_chars caps the label's natural width, forcing GTK to wrap text
+    // instead of expanding the label/window to fit one long line.
+    let max_chars = estimate_max_chars(cfg.appearance.width, cfg.appearance.font_size);
     let label = Label::builder()
         .label("")
         .wrap(true)
-        .max_width_chars(80)
+        .wrap_mode(gtk4::pango::WrapMode::WordChar)
+        .max_width_chars(max_chars)
+        .xalign(0.0) // left-align text
         .build();
     label.set_widget_name("caption-label");
     window.set_child(Some(&label));
@@ -138,51 +292,78 @@ fn build_overlay_window(app: &Application, cfg: &Config) -> ApplicationWindow {
     window.connect_map(move |win| {
         if is_locked {
             input_region::set_empty_input_region(win);
+        } else {
+            input_region::clear_input_region(win);
         }
     });
-
-    // Drag handle for floating + unlocked.
-    if cfg.overlay_mode == OverlayMode::Floating && !cfg.locked {
-        add_drag_handler(&window);
-    }
 
     window
 }
 
-fn configure_docked(window: &ApplicationWindow, edge: &ScreenEdge) {
-    // Anchor to the selected screen edge and stretch horizontally/vertically as appropriate.
-    let (anchor_edge, stretch_edges) = match edge {
-        ScreenEdge::Bottom => (Edge::Bottom, vec![Edge::Left, Edge::Right]),
-        ScreenEdge::Top    => (Edge::Top,    vec![Edge::Left, Edge::Right]),
-        ScreenEdge::Left   => (Edge::Left,   vec![Edge::Top, Edge::Bottom]),
-        ScreenEdge::Right  => (Edge::Right,  vec![Edge::Top, Edge::Bottom]),
+fn configure_docked(window: &ApplicationWindow, edge: &ScreenEdge, dock_pos: &DockPosition) {
+    // Always anchor to the selected edge.
+    let anchor_edge = match edge {
+        ScreenEdge::Bottom => Edge::Bottom,
+        ScreenEdge::Top    => Edge::Top,
+        ScreenEdge::Left   => Edge::Left,
+        ScreenEdge::Right  => Edge::Right,
     };
-    window.set_anchor(anchor_edge, true);
-    for e in stretch_edges {
-        window.set_anchor(e, true);
+
+    // For Stretch, anchor both perpendicular edges (fills the edge).
+    // For Center/Offset, anchor only the primary edge — the compositor
+    // centers the window on that edge (layer-shell spec). We use margins
+    // to offset from center if needed.
+    match dock_pos {
+        DockPosition::Stretch => {
+            let stretch_edges = match edge {
+                ScreenEdge::Bottom | ScreenEdge::Top => vec![Edge::Left, Edge::Right],
+                ScreenEdge::Left | ScreenEdge::Right => vec![Edge::Top, Edge::Bottom],
+            };
+            window.set_anchor(anchor_edge, true);
+            for e in stretch_edges {
+                window.set_anchor(e, true);
+            }
+        }
+        DockPosition::Center => {
+            // Only anchor the primary edge — compositor centers on that edge.
+            window.set_anchor(anchor_edge, true);
+        }
+        DockPosition::Offset(px) => {
+            // Anchor primary edge + the "start" perpendicular edge, use margin for offset.
+            window.set_anchor(anchor_edge, true);
+            match edge {
+                ScreenEdge::Bottom | ScreenEdge::Top => {
+                    window.set_anchor(Edge::Left, true);
+                    window.set_margin(Edge::Left, *px);
+                }
+                ScreenEdge::Left | ScreenEdge::Right => {
+                    window.set_anchor(Edge::Top, true);
+                    window.set_margin(Edge::Top, *px);
+                }
+            }
+        }
     }
+
     // Keyboard and pointer click-through: handled by keyboard_mode + empty input region.
     window.set_keyboard_mode(KeyboardMode::None);
 }
 
 fn configure_floating(window: &ApplicationWindow, cfg: &Config) {
-    // Floating: no anchors (window positioned freely).
-    // gtk4-layer-shell with no anchors centres the surface; we then move it.
+    // Anchor to top-left so that Left/Top margins position the window absolutely.
+    // Without anchors, layer-shell centers the surface and margins are relative to
+    // center — which varies by compositor (KDE/Plasma doesn't support margin-from-center).
+    window.set_anchor(Edge::Top, true);
+    window.set_anchor(Edge::Left, true);
+
     window.set_keyboard_mode(if cfg.locked {
         KeyboardMode::None
     } else {
         KeyboardMode::OnDemand
     });
 
-    // Position the window after it realizes.
-    let pos = cfg.position.clone();
-    window.connect_realize(move |win| {
-        // Note: direct position setting on layer-shell surfaces is not standard.
-        // For Wayland, the compositor controls position for layer-shell surfaces.
-        // The "floating" appearance can be achieved by using margins:
-        win.set_margin(Edge::Left, pos.x);
-        win.set_margin(Edge::Top, pos.y);
-    });
+    // Position the window via margins from the anchored edges.
+    window.set_margin(Edge::Left, cfg.position.x);
+    window.set_margin(Edge::Top, cfg.position.y);
 }
 
 /// Build CSS string from appearance config.
@@ -241,10 +422,36 @@ pub fn apply_appearance(appearance: &AppearanceConfig) {
     });
 }
 
+/// Estimate the number of characters that fit in the given pixel width at the given font size.
+/// Uses an approximate average character width of 0.6 × font_size (reasonable for proportional fonts).
+fn estimate_max_chars(width_px: i32, font_size_pt: f32) -> i32 {
+    if width_px <= 0 || font_size_pt <= 0.0 {
+        return 80; // fallback
+    }
+    // Average char width ≈ 0.6 × font size in points (heuristic for proportional fonts).
+    // Subtract padding (8px + 12px = 20px per side from CSS).
+    let usable_width = (width_px - 24).max(100) as f32;
+    let avg_char_width = font_size_pt * 0.6;
+    (usable_width / avg_char_width).floor() as i32
+}
+
 fn find_caption_label(window: &ApplicationWindow) -> Label {
-    window
-        .child()
-        .and_downcast::<Label>()
+    // Label is inside ScrolledWindow → Viewport (auto-created by GTK4) → Label.
+    // Search by widget name to avoid fragile tree traversal.
+    fn find_by_name(widget: &gtk4::Widget, name: &str) -> Option<Label> {
+        if widget.widget_name() == name {
+            return widget.clone().downcast::<Label>().ok();
+        }
+        let mut child = widget.first_child();
+        while let Some(c) = child {
+            if let Some(found) = find_by_name(&c, name) {
+                return Some(found);
+            }
+            child = c.next_sibling();
+        }
+        None
+    }
+    find_by_name(window.upcast_ref(), "caption-label")
         .expect("caption label not found")
 }
 
@@ -252,6 +459,7 @@ fn handle_overlay_command(
     window: &ApplicationWindow,
     cmd: OverlayCommand,
     config: &Arc<std::sync::Mutex<Config>>,
+    is_dragging: &Rc<Cell<bool>>,
 ) {
     match cmd {
         OverlayCommand::SetVisible(v) => window.set_visible(v),
@@ -267,15 +475,17 @@ fn handle_overlay_command(
                     for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
                         window.set_anchor(edge, false);
                     }
-                    configure_docked(window, &cfg.screen_edge);
+                    configure_docked(window, &cfg.screen_edge, &cfg.dock_position);
                     // Docked mode is always click-through.
                     input_region::set_empty_input_region(window);
                 }
                 OverlayMode::Floating => {
-                    // Clear all anchors (layer-shell will centre the surface).
+                    // Clear all anchors, then set top-left for margin-based positioning.
                     for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
                         window.set_anchor(edge, false);
                     }
+                    window.set_anchor(Edge::Top, true);
+                    window.set_anchor(Edge::Left, true);
                     // Restore position from config.
                     window.set_margin(Edge::Left, cfg.position.x);
                     window.set_margin(Edge::Top, cfg.position.y);
@@ -288,7 +498,7 @@ fn handle_overlay_command(
                         input_region::set_empty_input_region(window);
                     } else {
                         input_region::clear_input_region(window);
-                        add_drag_handler(window);
+                        add_drag_handler(window, is_dragging);
                     }
                 }
             }
@@ -300,16 +510,17 @@ fn handle_overlay_command(
             } else {
                 input_region::clear_input_region(window);
                 window.set_keyboard_mode(KeyboardMode::OnDemand);
-                add_drag_handler(window);
+                add_drag_handler(window, is_dragging);
             }
         }
         OverlayCommand::UpdateAppearance(appearance) => {
             apply_appearance(&appearance);
+            let label = find_caption_label(window);
+            label.set_max_width_chars(estimate_max_chars(appearance.width, appearance.font_size));
         }
         OverlayCommand::SetCaption(text) => {
-            if let Some(label) = window.child().and_downcast::<Label>() {
-                label.set_text(&text);
-            }
+            let label = find_caption_label(window);
+            label.set_text(&text);
         }
         OverlayCommand::Quit => {
             // Quit the GTK4 application cleanly so all cleanup (Drop impls) runs.
@@ -337,7 +548,7 @@ fn remove_drag_handlers(window: &ApplicationWindow) {
     }
 }
 
-fn add_drag_handler(window: &ApplicationWindow) {
+fn add_drag_handler(window: &ApplicationWindow, is_dragging: &Rc<Cell<bool>>) {
     // Remove any existing drag handlers first to prevent accumulation.
     remove_drag_handlers(window);
 
@@ -349,33 +560,56 @@ fn add_drag_handler(window: &ApplicationWindow) {
     // On Wayland with layer-shell, the compositor positions the surface via margins.
     let gesture = gtk4::GestureDrag::new();
 
-    // Capture starting margins when drag begins.
+    // Capture starting margins when drag begins and set the dragging flag.
+    // While dragging, all other GTK mutations (captions, CSS, commands) are
+    // suppressed to prevent relayout-induced jitter on the layer-shell surface.
     let start_x = Arc::new(AtomicI32::new(0));
     let start_y = Arc::new(AtomicI32::new(0));
+    // How much we've moved the window so far (cumulative).
+    // GestureDrag reports offsets in widget-local coords. When set_margin() moves
+    // the window, the coordinate system shifts by the same amount, so GTK's reported
+    // offset becomes: real_mouse_movement - accumulated_window_movement.
+    // Therefore: true_total = accumulated + reported_offset.
+    let moved_x = Arc::new(AtomicI32::new(0));
+    let moved_y = Arc::new(AtomicI32::new(0));
+
     let sx = Arc::clone(&start_x);
     let sy = Arc::clone(&start_y);
+    let mx = Arc::clone(&moved_x);
+    let my = Arc::clone(&moved_y);
     let win_begin = window.clone();
+    let dragging_begin = Rc::clone(is_dragging);
     gesture.connect_drag_begin(move |_, _, _| {
-        sx.store(win_begin.margin(Edge::Left), std::sync::atomic::Ordering::Relaxed);
-        sy.store(win_begin.margin(Edge::Top), std::sync::atomic::Ordering::Relaxed);
+        dragging_begin.set(true);
+        sx.store(win_begin.margin(Edge::Left), Ordering::Relaxed);
+        sy.store(win_begin.margin(Edge::Top), Ordering::Relaxed);
+        mx.store(0, Ordering::Relaxed);
+        my.store(0, Ordering::Relaxed);
     });
 
     // Update margins on each drag update.
     let sx2 = Arc::clone(&start_x);
     let sy2 = Arc::clone(&start_y);
+    let mx2 = Arc::clone(&moved_x);
+    let my2 = Arc::clone(&moved_y);
     let win_update = window.clone();
     gesture.connect_drag_update(move |_, dx, dy| {
-        let new_x = sx2.load(std::sync::atomic::Ordering::Relaxed) + dx as i32;
-        let new_y = sy2.load(std::sync::atomic::Ordering::Relaxed) + dy as i32;
-        win_update.set_margin(Edge::Left, new_x.max(0));
-        win_update.set_margin(Edge::Top, new_y.max(0));
+        let total_x = mx2.load(Ordering::Relaxed) + dx as i32;
+        let total_y = my2.load(Ordering::Relaxed) + dy as i32;
+        let new_x = (sx2.load(Ordering::Relaxed) + total_x).max(0);
+        let new_y = (sy2.load(Ordering::Relaxed) + total_y).max(0);
+        win_update.set_margin(Edge::Left, new_x);
+        win_update.set_margin(Edge::Top, new_y);
+        // Record how much we actually moved (clamped position - start position).
+        mx2.store(new_x - sx2.load(Ordering::Relaxed), Ordering::Relaxed);
+        my2.store(new_y - sy2.load(Ordering::Relaxed), Ordering::Relaxed);
     });
 
-    // After drag: detect window position change via margin query.
-    // gtk4-layer-shell provides get_margin(Edge) to read current margins.
+    // Clear dragging flag and save position on drag end.
     let win_for_release = window.clone();
-    // Store position on drag end (connect_drag_end is the correct GestureDrag signal).
+    let dragging_end = Rc::clone(is_dragging);
     gesture.connect_drag_end(move |_, _offset_x, _offset_y| {
+        dragging_end.set(false);
         let x = win_for_release.margin(Edge::Left);
         let y = win_for_release.margin(Edge::Top);
         eprintln!("info: overlay dragged to ({x}, {y})");
@@ -403,6 +637,8 @@ mod tests {
             text_color: "#00ff00".to_string(),
             font_size: 24.0,
             max_lines: 5,
+            width: 800,
+            height: 0,
         };
         let css = build_css(&appearance);
 

@@ -299,8 +299,8 @@ fn create_capture_stream<'a>(
         *pw::keys::MEDIA_TYPE => "Audio",
         *pw::keys::MEDIA_CATEGORY => "Capture",
         *pw::keys::MEDIA_ROLE => "Communication",
-        *pw::keys::APP_NAME => "live-captions",
-        *pw::keys::NODE_NAME => "live-captions-capture",
+        *pw::keys::APP_NAME => "subtidal",
+        *pw::keys::NODE_NAME => "subtidal-capture",
     };
 
     if let Some(target) = &target_node {
@@ -310,7 +310,7 @@ fn create_capture_stream<'a>(
         stream_props.insert(*pw::keys::STREAM_CAPTURE_SINK, "true");
     }
 
-    let stream = pw::stream::StreamBox::new(core, "live-captions-capture", stream_props)
+    let stream = pw::stream::StreamBox::new(core, "subtidal-capture", stream_props)
         .context("creating PipeWire stream")?;
 
     // Build SPA format parameters: F32LE, 48kHz, stereo.

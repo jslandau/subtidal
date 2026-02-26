@@ -37,8 +37,10 @@ pub fn set_empty_input_region(window: &ApplicationWindow) {
 
 /// Restore the default (full) input region: window accepts all pointer events.
 ///
-/// Creates a region covering the full window bounds and sets it on the GDK surface.
-/// Called when unlocking the floating overlay.
+/// Sets a very large input region on the GDK surface so the entire window
+/// accepts pointer input regardless of its current size. This is necessary
+/// because at `connect_map` time, `window.width()/height()` may return 0
+/// before layout completes.
 pub fn clear_input_region(window: &ApplicationWindow) {
     use gtk4::prelude::SurfaceExt;
 
@@ -46,10 +48,10 @@ pub fn clear_input_region(window: &ApplicationWindow) {
         return;
     };
 
-    // A region covering the full window dimensions restores normal pointer handling.
-    let width = window.width();
-    let height = window.height();
-    let full_rect = cairo::RectangleInt::new(0, 0, width, height);
+    // Use a very large rectangle rather than window dimensions, because at map
+    // time the window may not have been laid out yet (width/height == 0).
+    // The compositor clips to the actual surface bounds automatically.
+    let full_rect = cairo::RectangleInt::new(0, 0, 16384, 16384);
     let full_region = cairo::Region::create_rectangle(&full_rect);
     surface.set_input_region(&full_region);
 }
