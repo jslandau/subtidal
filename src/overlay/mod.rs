@@ -89,9 +89,10 @@ impl CaptionBuffer {
                     self.add_new_line(format!("{}{}", partial_word, fragment));
                 } else {
                     // Entire line is one word with no space: start fresh on new line.
-                    let old_text = self.lines[idx].text.clone();
+                    // Remove the old line before calling add_new_line to avoid stale index
+                    // if add_new_line shifts (when buffer is at max_lines capacity).
+                    let old_text = self.lines.remove(idx).text;
                     self.add_new_line(format!("{}{}", old_text, fragment));
-                    self.lines[idx].text.clear();
                 }
             }
         } else {
@@ -838,44 +839,137 @@ mod tests {
 
     /// AC1.5: When a continuation fragment would cause the combined word to overflow
     /// the current line, the partial word moves to the next line and joins there.
+    /// Tests the "with space" branch where we split at last space.
     #[test]
     fn ac1_5_partial_word_overflow() {
-        let mut buf = CaptionBuffer::new(3, 15, 8);
+        let mut buf = CaptionBuffer::new(3, 10, 8);
 
-        // Fill line 1 with "Hello world" (11 chars, fits in 15).
+        // Set up: Line 1: "Hello" (5), Line 2: "world" (5)
         buf.push(" Hello".to_string());
         buf.push(" world".to_string());
 
-        // Current line: "Hello world" (11 chars). If we add continuation "del ve" (6 chars),
-        // combined would be "world" + "del ve" = "worlddel ve" (11 chars, but we need
-        // to append to last word "world"). So "world" + "del ve" = 10 chars, fits!
-        // Let's instead create overflow: line has 9 chars left, add 6 char continuation won't fit.
+        // Line 2 is now "world" (5 chars). Add another word " more" (5 chars).
+        // "world more" = 10 chars, exactly fits.
+        buf.push(" more".to_string());
 
-        // Reset for clearer test: fill most of line 1.
-        buf = CaptionBuffer::new(3, 15, 8);
-        buf.push(" Helloworld".to_string());
+        assert_eq!(buf.lines.len(), 2, "Should have 2 lines before overflow");
+        assert_eq!(buf.lines[1].text, "world more");
 
-        // Current line: "Helloworld" (10 chars). Next word can't fit.
-        buf.push(" test".to_string());
-
-        // Now current line 2 is "test" (4 chars). Add continuation that doesn't fit:
-        // "test" + "something" = 13 chars, but split at last space (none in "test"),
-        // so entire line moves to next. Actually, let's be more careful:
-
-        buf = CaptionBuffer::new(3, 12, 8);
-        buf.push(" Hello".to_string()); // "Hello" = 5 chars
-        buf.push(" world".to_string()); // "Hello world" = 11 chars (fits)
-        buf.push(" long".to_string()); // Won't fit, goes to line 2: "long" = 4 chars
-
-        // Current line 2: "long" (4 chars). Continuation "continuation" (12 chars)
-        // won't fit: 4 + 12 = 16 > 12. Last space in "long"? None.
-        // So: keep old line "long", start new line with "longcontinuation".
-        buf.push("continuation".to_string());
+        // Current line 2: "world more" (10 chars). Push continuation "text" (4 chars).
+        // Appending "text" to last word "more": "moretext" (8 chars).
+        // Adding to current line: 10 + 8 = 18 > 10, overflow!
+        // Last space in "world more" at position 5.
+        // Split: keep "world", move "more" to new line.
+        // New line 3: "more" + "text" = "moretext" (8 chars).
+        buf.push("text".to_string());
 
         let display = buf.display_text();
         let lines: Vec<&str> = display.split('\n').collect();
-        assert_eq!(lines.len(), 3, "Should have 3 lines after overflow");
-        assert_eq!(lines[2], "longcontinuation", "Partial word should join continuation on next line");
+        assert_eq!(lines.len(), 3, "Should have 3 lines after split");
+        assert_eq!(lines[0], "Hello", "Line 1 should have 'Hello'");
+        assert_eq!(lines[1], "world", "Line 2 should have 'world' (split off)");
+        assert_eq!(lines[2], "moretext", "Line 3 should have 'more' + 'text' joined");
+    }
+
+    /// AC1.5 extended: "no space" branch at full max_lines capacity.
+    /// When last line is a single word and continuation overflows with no space,
+    /// the old line is removed and replaced with the joined word.
+    /// This tests the critical bug fix where stale index could clear the wrong line.
+    #[test]
+    fn ac1_5_continuation_no_space_at_full_capacity() {
+        let mut buf = CaptionBuffer::new(3, 7, 8); // max_lines=3, max_chars=7
+
+        // Create three single-word lines to fill buffer to max_lines.
+        buf.push(" one".to_string());   // Line 1: "one" (3 chars)
+        buf.push(" two".to_string());   // Line 1: "one two" = 7, fits exactly
+        buf.push(" three".to_string()); // "one two three" = 13 > 7, goes to line 2: "three" (5 chars)
+        buf.push(" four".to_string());  // "three four" = 10 > 7, goes to line 3: "four" (4 chars)
+
+        assert_eq!(buf.lines.len(), 3, "Buffer should be full at max_lines=3");
+        assert_eq!(buf.lines[0].text, "one two");
+        assert_eq!(buf.lines[1].text, "three");
+        assert_eq!(buf.lines[2].text, "four");
+
+        // Now buffer is full and all 3 lines exist. Push continuation on last line that overflows.
+        // Current line 3: "four" (4 chars). Continuation "more" (4 chars).
+        // Combined: "fourmore" (8 chars) > 7. No space in "four", so the whole line moves.
+        // add_new_line will remove line 0 and add new line, resulting in:
+        // ["three", "four", "fourmore"]
+        buf.push("more".to_string());
+
+        // Verify: no empty lines and correct content.
+        assert_eq!(buf.lines.len(), 3, "Should still have max_lines=3");
+        assert_eq!(buf.lines[0].text, "one two", "Line 1 unchanged");
+        assert_eq!(buf.lines[1].text, "three", "Line 2 unchanged");
+        assert_eq!(buf.lines[2].text, "fourmore", "Line 3 has joined word replacing old 'four'");
+
+        let display = buf.display_text();
+        assert!(display.contains("one two"), "Should contain 'one two'");
+        assert!(display.contains("three"), "Should contain 'three'");
+        assert!(display.contains("fourmore"), "Should contain 'fourmore'");
+        assert_eq!(display.lines().count(), 3, "Display should have 3 lines");
+    }
+
+    /// AC1.5 extended: "with space" continuation overflow branch.
+    /// When last line has multiple words and continuation overflows, the partial word
+    /// after the last space moves to next line and joins the continuation.
+    #[test]
+    fn ac1_5_continuation_with_space_overflow() {
+        let mut buf = CaptionBuffer::new(3, 20, 8);
+
+        // Set up line 1: "Hello world" (11 chars, fits in 20)
+        buf.push(" Hello".to_string());
+        buf.push(" world".to_string());
+        assert_eq!(buf.lines[0].text, "Hello world");
+
+        // Current line: "Hello world" (11 chars). Push continuation "ly" (2 chars).
+        // Combined: "world" + "ly" = 7 chars, fits in 20. ✓
+        buf.push("ly".to_string());
+        assert_eq!(buf.lines[0].text, "Hello worldly");
+
+        // Now make line nearly full and overflow. Reset for clearer setup.
+        buf = CaptionBuffer::new(3, 18, 8);
+        buf.push(" Hello".to_string());         // Line 1: "Hello" (5 chars)
+        buf.push(" world".to_string());         // Line 1: "Hello world" (11 chars)
+
+        // Current line: "Hello world" (11 chars). Push continuation "ly" (2 chars) that fits.
+        buf.push("ly".to_string());             // Line 1: "Hello worldly" (13 chars)
+
+        // Now push word that forces split. Current line: "Hello worldly" (13 chars).
+        // Word " test" (5 chars): 13 + 1 + 5 = 19 > 18, doesn't fit.
+        // Goes to line 2.
+        buf.push(" test".to_string());          // Line 2: "test" (4 chars)
+
+        // Current line 2: "test" (4 chars). Push continuation that overflows.
+        // "test" + "something" = 13 chars > 18? No, 13 < 18, fits. Let's use longer continuation.
+        // "test" + "ingsomething" = 16 chars, fits in 18. Hmm, still fits.
+        // Let's be more aggressive: use continuation that definitely overflows.
+        // "test" + "verylongcontinuation" = too long.
+        buf.push("verylongcontinuation".to_string()); // "test" + "verylongcontinuation" = 24 > 18
+
+        // This overflows. Line 2 is "test" (no space). Last space in "test"? None.
+        // So the "no space" branch triggers, which just moves entire line to new line.
+        // That's not the "with space" branch.
+
+        // Let's retest more carefully to exercise "with space" branch:
+        buf = CaptionBuffer::new(3, 18, 8);
+        buf.push(" Hello".to_string());         // Line 1: "Hello" (5 chars)
+        buf.push(" world".to_string());         // Line 1: "Hello world" (11 chars)
+        buf.push(" more".to_string());          // Line 1: "Hello world more" (16 chars, fits)
+
+        // Current line 1: "Hello world more" (16 chars, 2 chars left before max).
+        // Push continuation "text" (4 chars).
+        // "more" + "text" = 8 chars. 16 + 8 = 24 > 18. Overflow!
+        // Last space in "Hello world more"? Yes, at position 11 (after "world").
+        // Split: keep "Hello world " (12 chars), move "more" to next line.
+        // New line: "moretext" (8 chars).
+        buf.push("text".to_string());
+
+        let display = buf.display_text();
+        let lines: Vec<&str> = display.split('\n').collect();
+        assert_eq!(lines.len(), 2, "Should have 2 lines after split");
+        assert_eq!(lines[0], "Hello world", "First line should be trimmed to 'Hello world'");
+        assert_eq!(lines[1], "moretext", "Second line should have partial word + continuation joined");
     }
 
     /// AC1.6: RNNT decoder overlap is deduplicated (4+ char matches).
