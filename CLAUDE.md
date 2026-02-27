@@ -2,7 +2,7 @@
 
 Real-time speech-to-text overlay for Linux/Wayland.
 
-Freshness: 2026-02-26
+Freshness: 2026-02-27
 
 ## Purpose
 
