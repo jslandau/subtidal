@@ -756,4 +756,224 @@ mod tests {
         assert!(css.contains("#ffffff"), "CSS should contain default text_color");
         assert!(css.contains("16"), "CSS should contain default font_size");
     }
+
+    // CaptionBuffer line-fill tests
+
+    /// AC1.1: Text fills line 1 left-to-right, word by word, up to max_chars_per_line.
+    #[test]
+    fn ac1_1_fill_single_line() {
+        let mut buf = CaptionBuffer::new(3, 20, 8);
+
+        // Push words with leading spaces (word boundaries).
+        buf.push(" Hello".to_string());
+        buf.push(" world".to_string());
+        buf.push(" this".to_string());
+
+        let display = buf.display_text();
+        assert_eq!(display, "Hello world this", "Words should fill single line");
+        assert!(!display.contains('\n'), "Should not have newline separator");
+    }
+
+    /// AC1.2: When line 1 is full, text continues on line 2 (up to max_lines).
+    #[test]
+    fn ac1_2_overflow_to_second_line() {
+        let mut buf = CaptionBuffer::new(3, 15, 8);
+
+        // Fill line 1 with "Hello world" (11 chars).
+        buf.push(" Hello".to_string());
+        buf.push(" world".to_string());
+
+        // Next word "this" (4 chars) won't fit (11 + 1 + 4 = 16 > 15).
+        buf.push(" this".to_string());
+
+        let display = buf.display_text();
+        let lines: Vec<&str> = display.split('\n').collect();
+        assert_eq!(lines.len(), 2, "Should have 2 lines");
+        assert_eq!(lines[0], "Hello world");
+        assert_eq!(lines[1], "this");
+    }
+
+    /// AC1.3: When all lines are full and new text arrives, line 1 is removed,
+    /// all lines shift up, and new text fills the freed bottom line.
+    #[test]
+    fn ac1_3_shift_when_all_lines_full() {
+        let mut buf = CaptionBuffer::new(2, 7, 8);
+
+        // Fill line 1: " Hello" (5 chars, fits in 7).
+        buf.push(" Hello".to_string());
+
+        // Add word that goes to line 2: "Hello world" = 11 chars > 7, so "world" goes to line 2 (5 chars).
+        buf.push(" world".to_string());
+
+        assert_eq!(buf.lines.len(), 2, "Should have 2 lines filled");
+        assert_eq!(buf.lines[0].text, "Hello");
+        assert_eq!(buf.lines[1].text, "world");
+
+        // Add third word: "Hello world test" = " test" (4 chars) won't fit on line 2 (5+1+4=10 > 7),
+        // so it goes to new line. Since we're at max_lines=2, oldest line (line 1: "Hello") shifts off.
+        buf.push(" test".to_string());
+
+        let display = buf.display_text();
+        let lines: Vec<&str> = display.split('\n').collect();
+        assert_eq!(lines.len(), 2, "Should still have max_lines=2 after shift");
+        assert_eq!(lines[0], "world", "Line 1 should be old line 2");
+        assert_eq!(lines[1], "test", "Line 2 should be new content");
+    }
+
+    /// AC1.4: Continuation fragments (no leading space) join the previous word
+    /// on the same line without inserting a space.
+    #[test]
+    fn ac1_4_continuation_no_space() {
+        let mut buf = CaptionBuffer::new(3, 20, 8);
+
+        // Push " Hel" (word boundary).
+        buf.push(" Hel".to_string());
+        // Push "lo" (continuation, no leading space).
+        buf.push("lo".to_string());
+
+        let display = buf.display_text();
+        assert_eq!(display, "Hello", "Continuation should join without space");
+    }
+
+    /// AC1.5: When a continuation fragment would cause the combined word to overflow
+    /// the current line, the partial word moves to the next line and joins there.
+    #[test]
+    fn ac1_5_partial_word_overflow() {
+        let mut buf = CaptionBuffer::new(3, 15, 8);
+
+        // Fill line 1 with "Hello world" (11 chars, fits in 15).
+        buf.push(" Hello".to_string());
+        buf.push(" world".to_string());
+
+        // Current line: "Hello world" (11 chars). If we add continuation "del ve" (6 chars),
+        // combined would be "world" + "del ve" = "worlddel ve" (11 chars, but we need
+        // to append to last word "world"). So "world" + "del ve" = 10 chars, fits!
+        // Let's instead create overflow: line has 9 chars left, add 6 char continuation won't fit.
+
+        // Reset for clearer test: fill most of line 1.
+        buf = CaptionBuffer::new(3, 15, 8);
+        buf.push(" Helloworld".to_string());
+
+        // Current line: "Helloworld" (10 chars). Next word can't fit.
+        buf.push(" test".to_string());
+
+        // Now current line 2 is "test" (4 chars). Add continuation that doesn't fit:
+        // "test" + "something" = 13 chars, but split at last space (none in "test"),
+        // so entire line moves to next. Actually, let's be more careful:
+
+        buf = CaptionBuffer::new(3, 12, 8);
+        buf.push(" Hello".to_string()); // "Hello" = 5 chars
+        buf.push(" world".to_string()); // "Hello world" = 11 chars (fits)
+        buf.push(" long".to_string()); // Won't fit, goes to line 2: "long" = 4 chars
+
+        // Current line 2: "long" (4 chars). Continuation "continuation" (12 chars)
+        // won't fit: 4 + 12 = 16 > 12. Last space in "long"? None.
+        // So: keep old line "long", start new line with "longcontinuation".
+        buf.push("continuation".to_string());
+
+        let display = buf.display_text();
+        let lines: Vec<&str> = display.split('\n').collect();
+        assert_eq!(lines.len(), 3, "Should have 3 lines after overflow");
+        assert_eq!(lines[2], "longcontinuation", "Partial word should join continuation on next line");
+    }
+
+    /// AC1.6: RNNT decoder overlap is deduplicated (4+ char matches).
+    #[test]
+    fn ac1_6_overlap_deduplication() {
+        let mut buf = CaptionBuffer::new(3, 50, 8);
+
+        buf.push(" The quick brown".to_string());
+        // Simulating RNNT decoder re-emitting "brown fox" where "brown" already output.
+        buf.push(" brown fox".to_string());
+
+        let display = buf.display_text();
+        assert_eq!(display, "The quick brown fox", "Overlap should be deduplicated");
+        assert!(!display.contains("brownbrown"), "Should not duplicate 'brown'");
+    }
+
+    /// AC2.1: When no new text arrives for expire_secs, the oldest (top) line is removed
+    /// and remaining lines shift up.
+    #[test]
+    fn ac2_1_oldest_line_expires() {
+        let mut buf = CaptionBuffer::new(2, 7, 1); // expire_secs = 1, max_chars = 7
+
+        buf.push(" line1".to_string()); // Creates line 1: "line1" (5 chars)
+        buf.push(" line2".to_string()); // "line1 line2" = 11 chars > 7, so creates line 2: "line2" (5 chars)
+
+        assert_eq!(buf.lines.len(), 2, "Should have 2 lines");
+
+        // Manually expire the oldest line by setting its timestamp to the past.
+        let now = Instant::now();
+        if !buf.lines.is_empty() {
+            buf.lines[0].last_active = now - std::time::Duration::from_secs(2);
+        }
+
+        let expired = buf.expire();
+        assert!(expired, "expire() should return true when a line is removed");
+
+        let display = buf.display_text();
+        assert_eq!(display, "line2", "Oldest line should be removed");
+        assert_eq!(buf.lines.len(), 1, "Should have 1 line after expiry");
+    }
+
+    /// AC2.2: Expiry continues once per second until all lines are cleared during silence.
+    #[test]
+    fn ac2_2_expiry_gradual_drain() {
+        let mut buf = CaptionBuffer::new(3, 5, 1); // max_chars = 5 to force separate lines
+
+        buf.push(" one".to_string());   // Line 1: "one" (3 chars)
+        buf.push(" two".to_string());   // Won't fit on line 1 (3+1+3=7 > 5), goes to line 2: "two" (3 chars)
+        buf.push(" three".to_string()); // Won't fit on line 2 (3+1+5=9 > 5), goes to line 3: "three" (5 chars)
+
+        assert_eq!(buf.lines.len(), 3, "Should have 3 separate lines");
+
+        // Set all lines to expired state.
+        let now = Instant::now();
+        let expired_time = now - std::time::Duration::from_secs(2);
+        for line in &mut buf.lines {
+            line.last_active = expired_time;
+        }
+
+        // First expire call should remove one line.
+        assert!(buf.expire(), "First expire should remove a line");
+        assert_eq!(buf.lines.len(), 2, "Should have 2 lines after first expire");
+
+        // Second expire call should remove another line.
+        assert!(buf.expire(), "Second expire should remove another line");
+        assert_eq!(buf.lines.len(), 1, "Should have 1 line after second expire");
+
+        // Third expire call should remove the last line.
+        assert!(buf.expire(), "Third expire should remove the last line");
+        assert_eq!(buf.lines.len(), 0, "Should have 0 lines after third expire");
+
+        // Fourth expire call should return false (no lines to expire).
+        assert!(!buf.expire(), "expire() should return false when buffer is empty");
+    }
+
+    /// AC2.3: Active lines (receiving new text) do not expire — last_active resets on each push.
+    #[test]
+    fn ac2_3_active_lines_dont_expire() {
+        let now = Instant::now();
+        let mut buf = CaptionBuffer::new(2, 20, 1);
+
+        // Manually construct two lines: one expired and one active.
+        buf.lines.push(CaptionLine {
+            text: "old_content".to_string(),
+            last_active: now - std::time::Duration::from_secs(2),
+        });
+        buf.lines.push(CaptionLine {
+            text: "recent_content".to_string(),
+            last_active: Instant::now(),
+        });
+
+        assert_eq!(buf.lines.len(), 2, "Should have 2 lines");
+
+        // Expire should only remove the first (expired) line.
+        assert!(buf.expire(), "Should remove the expired first line");
+        assert_eq!(buf.lines.len(), 1, "Should have 1 line after expiry");
+        assert_eq!(buf.lines[0].text, "recent_content");
+
+        // The remaining line should have recent last_active and not expire on next call.
+        assert!(!buf.expire(), "Active line should not expire");
+    }
 }
