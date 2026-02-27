@@ -523,7 +523,8 @@ fn estimate_max_chars(width_px: i32, font_size_pt: f32) -> i32 {
     // Subtract padding (8px + 12px = 20px per side from CSS).
     let usable_width = (width_px - 24).max(100) as f32;
     let avg_char_width = font_size_pt * 0.6;
-    (usable_width / avg_char_width).floor() as i32
+    // Apply 0.85× conservative multiplier for visual padding with proportional fonts.
+    (usable_width / avg_char_width * 0.85).floor() as i32
 }
 
 fn find_caption_label(window: &ApplicationWindow) -> Label {
@@ -975,5 +976,29 @@ mod tests {
 
         // The remaining line should have recent last_active and not expire on next call.
         assert!(!buf.expire(), "Active line should not expire");
+    }
+
+    /// AC4.1: estimate_max_chars applies 0.85× conservative multiplier for visual padding.
+    #[test]
+    fn ac4_1_conservative_multiplier() {
+        let width_px = 800;
+        let font_size_pt = 24.0;
+
+        // Old formula: (usable_width / avg_char_width)
+        // usable_width = (800 - 24).max(100) = 776
+        // avg_char_width = 24.0 * 0.6 = 14.4
+        // old_result = 776 / 14.4 = 53.88... → floor = 53
+        // new_result = 53 * 0.85 = 45.05 → floor = 45
+        let result = estimate_max_chars(width_px, font_size_pt);
+        let expected_old = ((776.0_f32 / 14.4).floor()) as i32; // 53
+        let expected_new = ((776.0_f32 / 14.4 * 0.85).floor()) as i32; // 45
+
+        assert_eq!(expected_old, 53, "Sanity check: old formula should give 53");
+        assert_eq!(expected_new, 45, "Sanity check: new formula should give 45");
+        assert_eq!(result, 45, "Result should be approximately 85% of old formula");
+        assert!(
+            result < expected_old,
+            "Conservative multiplier should make result smaller than old formula"
+        );
     }
 }
