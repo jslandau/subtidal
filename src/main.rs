@@ -112,11 +112,7 @@ fn main() {
     }
 
     // Log CUDA availability (Nemotron runs on CPU when CUDA is unavailable).
-    if stt::cuda_available() {
-        eprintln!("info: CUDA available, Nemotron will use GPU acceleration");
-    } else {
-        eprintln!("info: CUDA not available, Nemotron will use CPU");
-    }
+    eprintln!("{}", cuda_status_message(stt::cuda_available()));
 
     // Create audio chunk channel (connects Phase 3 ring buffer drain to inference).
     // Wrap the SyncSender in Arc<Mutex<>> so Phase 8 engine switching can replace it
@@ -340,4 +336,33 @@ fn main() {
 
     // Run GTK4 main loop (blocks until application exits).
     overlay::run_gtk_app(cfg, caption_rx_from_inference, cmd_rx, Arc::clone(&captions_enabled));
+}
+
+/// Returns the appropriate CUDA status message based on availability.
+/// AC3.1 and AC3.2: Testable CUDA status logging.
+fn cuda_status_message(cuda_available: bool) -> &'static str {
+    if cuda_available {
+        "info: CUDA available, Nemotron will use GPU acceleration"
+    } else {
+        "info: CUDA not available, Nemotron will use CPU"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cuda_status_message_when_available() {
+        let msg = cuda_status_message(true);
+        assert!(msg.contains("GPU acceleration"));
+        assert!(msg.contains("CUDA available"));
+    }
+
+    #[test]
+    fn cuda_status_message_when_unavailable() {
+        let msg = cuda_status_message(false);
+        assert!(msg.contains("CPU"));
+        assert!(msg.contains("CUDA not available"));
+    }
 }
