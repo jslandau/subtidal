@@ -6,7 +6,7 @@ Freshness: 2026-02-26
 
 ## Purpose
 
-Captures system or per-application audio via PipeWire, runs local STT inference (Nemotron GPU or Moonshine CPU), and displays live captions in a GTK4 layer-shell overlay with system tray controls.
+Captures system or per-application audio via PipeWire, runs local STT inference (Nemotron GPU or CPU), and displays live captions in a GTK4 layer-shell overlay with system tray controls.
 
 ## Architecture
 
@@ -18,7 +18,6 @@ audio/mod.rs      — PipeWire capture thread, node enumeration, source switchin
 audio/resampler.rs — rubato 48kHz stereo -> 16kHz mono resampler
 stt/mod.rs        — SttEngine trait + inference thread management
 stt/nemotron.rs   — Nemotron RNNT engine (ort + parakeet-rs, CUDA)
-stt/moonshine.rs  — Moonshine encoder-decoder engine (ort, CPU)
 overlay/mod.rs    — GTK4 layer-shell overlay window (docked/floating)
 overlay/input_region.rs — Wayland input region for click-through
 tray/mod.rs       — ksni StatusNotifierItem system tray
@@ -42,8 +41,8 @@ The system tray runs on the tokio runtime (required by ksni).
 - **Audio pipeline**: PipeWire captures 48kHz stereo F32LE -> ring buffer -> resampler produces 16kHz mono -> 160ms (2560 sample) chunks to inference.
 - **Engine switching**: Arc<Mutex<SyncSender<Vec<f32>>>> is atomically replaced; old inference thread exits when its Receiver is dropped.
 - **Config**: TOML at `~/.config/subtidal/config.toml`. Hot-reload only sends SetMode/SetLocked/UpdateAppearance when values actually changed (prevents drag feedback loop). Malformed TOML is warned and ignored.
-- **Models**: Downloaded from HuggingFace to `~/.local/share/subtidal/models/{nemotron,moonshine}/`. Hardlinked from HF cache when possible.
-- **Nemotron engine**: 600M param RNNT model using parakeet-rs::Nemotron. Requires CUDA. Internally buffers 160ms chunks and emits results on 560ms boundaries.
+- **Models**: Downloaded from HuggingFace to `~/.local/share/subtidal/models/nemotron/`. Hardlinked from HF cache when possible.
+- **Nemotron engine**: 600M param RNNT model using parakeet-rs::Nemotron. Uses CUDA when available, falls back to CPU. Internally buffers 160ms chunks and emits results on 560ms boundaries.
 - **Caption fragments**: Engine whitespace is preserved for word boundary detection; fragments are not trimmed/joined with spaces (fixes split words like "del ve" -> "delve").
 - **Overlay drag**: Uses accumulated offset tracking to compensate for layer-shell coordinate system shift. During drag, all GTK mutations (captions, CSS, commands) are suppressed via is_dragging flag to prevent relayout jitter.
 - **Audio source fallback**: When a captured PipeWire node disappears, automatically falls back to SystemOutput with desktop notification.
@@ -63,7 +62,7 @@ The system tray runs on the tokio runtime (required by ksni).
 
 - PipeWire stream callback is real-time safe: no allocation, no blocking, try_lock only.
 - GTK4 calls happen only on the main thread; channels bridge other threads.
-- CUDA unavailability triggers automatic fallback from Nemotron to Moonshine.
+- CUDA unavailability triggers automatic fallback to CPU execution (Nemotron runs on both GPU and CPU).
 - Config save failures are warned but never fatal.
 - Ring buffer overflow drops samples silently (preferred over blocking RT callback).
 
@@ -71,7 +70,7 @@ The system tray runs on the tokio runtime (required by ksni).
 
 ```bash
 cargo build --release
-./target/release/subtidal [--engine nemotron|moonshine] [--config path] [--reset-config]
+./target/release/subtidal [--engine nemotron|parakeet] [--config path] [--reset-config]
 ```
 
-Requires: PipeWire running, Wayland compositor with wlr-layer-shell support. CUDA optional (for Nemotron).
+Requires: PipeWire running, Wayland compositor with wlr-layer-shell support. CUDA optional (GPU acceleration for Nemotron).

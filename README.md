@@ -6,7 +6,7 @@ All processing happens locally — no cloud services, no network requests (excep
 
 ## Features
 
-- **Two STT engines**: Nemotron (GPU, CUDA) for high accuracy, Moonshine (CPU, experimental)
+- **STT engine**: Nemotron (GPU via CUDA, or CPU fallback) for real-time speech recognition
 - **Per-application audio capture** via PipeWire — caption any app, not just the mic
 - **Overlay modes**: docked (edge-anchored, click-through) or floating (draggable, resizable via tray)
 - **System tray** for toggling captions, switching audio source/engine, adjusting overlay size
@@ -30,7 +30,7 @@ Models are downloaded automatically on first run from HuggingFace to `~/.local/s
 ## Usage
 
 ```bash
-subtidal [--engine nemotron|moonshine] [--config path] [--reset-config]
+subtidal [--engine nemotron|parakeet] [--config path] [--reset-config]
 ```
 
 The system tray icon provides controls for:
@@ -46,7 +46,7 @@ The system tray icon provides controls for:
 Config lives at `~/.config/subtidal/config.toml` and is hot-reloaded on save.
 
 ```toml
-engine = "nemotron"           # or "moonshine"
+engine = "nemotron"           # or "parakeet" (alias)
 overlay_mode = "floating"     # or "docked"
 locked = true                 # click-through when true
 

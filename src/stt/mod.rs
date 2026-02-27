@@ -27,7 +27,7 @@ pub trait SttEngine: Send + 'static {
 /// Spawn the inference thread.
 ///
 /// Parameters:
-/// - `engine`: boxed SttEngine (Parakeet or Moonshine)
+/// - `engine`: boxed SttEngine (Nemotron via parakeet-rs)
 /// - `audio_rx`: receives 160ms chunks from the audio processing thread
 /// - `caption_tx`: sends recognized text to the GTK4 main thread
 ///
@@ -141,7 +141,7 @@ mod tests {
         assert_eq!(received, vec!["hi"]);
     }
 
-    /// AC5.3: CUDA unavailable triggers Moonshine fallback.
+    /// AC5.3: CUDA unavailable triggers CPU fallback.
     /// Test that cuda_available() returns a bool without panicking.
     /// (The actual fallback logic is in main.rs and is inherently hard to unit test.)
     #[test]
