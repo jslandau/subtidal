@@ -76,10 +76,17 @@ pub struct AppearanceConfig {
     /// Caption area height in pixels (0 = auto/natural size).
     #[serde(default)]
     pub height: i32,
+    /// Seconds before an idle caption line expires and is removed.
+    #[serde(default = "default_expire_secs")]
+    pub expire_secs: u64,
 }
 
 fn default_width() -> i32 {
     600
+}
+
+fn default_expire_secs() -> u64 {
+    8
 }
 
 impl Default for AppearanceConfig {
@@ -91,6 +98,18 @@ impl Default for AppearanceConfig {
             max_lines: 3,
             width: 600,
             height: 0,
+            expire_secs: 8,
+        }
+    }
+}
+
+impl AppearanceConfig {
+    /// Returns the effective expire_secs value, using default if the configured value is 0.
+    pub fn effective_expire_secs(&self) -> u64 {
+        if self.expire_secs == 0 {
+            default_expire_secs()
+        } else {
+            self.expire_secs
         }
     }
 }
