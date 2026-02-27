@@ -10,23 +10,33 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Instant;
 
-/// Buffer that accumulates recent caption fragments with timestamps for expiry.
+/// Represents one line of caption text with a timestamp for expiry.
+struct CaptionLine {
+    text: String,
+    last_active: Instant,
+}
+
+/// Buffer that accumulates caption text in lines with fill-and-shift model.
+/// Lines are filled word-by-word up to max_chars_per_line. When all lines are full
+/// and new text arrives, the oldest line is removed, all lines shift up, and new
+/// text fills the freed bottom line. Individual lines expire after idle_secs of silence.
 struct CaptionBuffer {
-    /// Each entry is (timestamp, fragment_text). Fragments are displayed as
-    /// continuous flowing text separated by spaces.
-    fragments: Vec<(Instant, String)>,
-    max_fragments: usize,
+    /// Ordered lines from oldest (top, shown first) to newest (bottom, shown last).
+    lines: Vec<CaptionLine>,
+    max_lines: usize,
+    max_chars_per_line: usize,
     expire_secs: u64,
     /// Track the last few words to detect and skip repeated output from the RNNT decoder.
     last_tail: String,
 }
 
 impl CaptionBuffer {
-    fn new(max_fragments: usize) -> Self {
+    fn new(max_lines: usize, max_chars_per_line: usize, expire_secs: u64) -> Self {
         CaptionBuffer {
-            fragments: Vec::new(),
-            max_fragments,
-            expire_secs: 8,
+            lines: Vec::new(),
+            max_lines,
+            max_chars_per_line,
+            expire_secs,
             last_tail: String::new(),
         }
     }
@@ -55,15 +65,90 @@ impl CaptionBuffer {
             deduped.clone()
         };
 
-        self.fragments.push((Instant::now(), fragment));
-        if self.fragments.len() > self.max_fragments {
-            self.fragments.remove(0);
+        // Determine if this is a continuation fragment (no leading space and lines are not empty).
+        let is_continuation = !fragment.starts_with(char::is_whitespace) && !self.lines.is_empty();
+
+        if is_continuation {
+            // Continuation: join with the last word on the current line.
+            let idx = self.lines.len() - 1;
+            let combined = format!("{}{}", self.lines[idx].text.clone(), fragment);
+
+            if combined.len() <= self.max_chars_per_line {
+                // Fits on current line: append directly.
+                self.lines[idx].text = combined;
+                self.lines[idx].last_active = Instant::now();
+            } else {
+                // Would overflow current line: move partial word to next line.
+                if let Some(last_space_pos) = self.lines[idx].text.rfind(' ') {
+                    // Split at last space: keep everything up to and including the space,
+                    // move the partial word after the space.
+                    let partial_word = self.lines[idx].text[last_space_pos + 1..].to_string();
+                    self.lines[idx].text = self.lines[idx].text[..=last_space_pos].trim_end().to_string();
+
+                    // Add new line with partial + continuation joined.
+                    self.add_new_line(format!("{}{}", partial_word, fragment));
+                } else {
+                    // Entire line is one word with no space: start fresh on new line.
+                    let old_text = self.lines[idx].text.clone();
+                    self.add_new_line(format!("{}{}", old_text, fragment));
+                    self.lines[idx].text.clear();
+                }
+            }
+        } else {
+            // Not a continuation: split into words and fill lines normally.
+            let words: Vec<&str> = fragment.split_whitespace().collect();
+            for word in words {
+                if word.is_empty() {
+                    continue;
+                }
+
+                if self.lines.is_empty() {
+                    // Start a new line with this word.
+                    self.add_new_line(word.to_string());
+                } else {
+                    let idx = self.lines.len() - 1;
+
+                    if self.lines[idx].text.is_empty() {
+                        // Current line is empty: place word directly (no space prefix).
+                        self.lines[idx].text = word.to_string();
+                    } else if self.lines[idx].text.len() + 1 + word.len() <= self.max_chars_per_line {
+                        // Room on current line: append with space.
+                        self.lines[idx].text.push(' ');
+                        self.lines[idx].text.push_str(word);
+                    } else {
+                        // Overflow: start new line (shifts if at max_lines).
+                        self.add_new_line(word.to_string());
+                    }
+                }
+            }
         }
 
-        // Update tail: keep last ~60 chars for overlap detection.
-        let display = self.display_text();
+        // Update last_active on the last line (most recent text).
+        if !self.lines.is_empty() {
+            let idx = self.lines.len() - 1;
+            self.lines[idx].last_active = Instant::now();
+        }
+
+        // Rebuild tail for overlap detection.
+        let display = self.all_text();
         let tail_start = display.len().saturating_sub(60);
         self.last_tail = display[tail_start..].to_string();
+    }
+
+    /// Add a new line, shifting off the oldest line if at max_lines capacity.
+    fn add_new_line(&mut self, text: String) {
+        if self.lines.len() >= self.max_lines {
+            self.lines.remove(0); // Remove oldest (top) line.
+        }
+        self.lines.push(CaptionLine {
+            text,
+            last_active: Instant::now(),
+        });
+    }
+
+    /// Join all line text with empty string. Each line's text is properly spaced already.
+    fn all_text(&self) -> String {
+        self.lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("")
     }
 
     /// Remove overlapping prefix between existing tail and new text.
@@ -91,14 +176,18 @@ impl CaptionBuffer {
         new.to_string()
     }
 
-    /// Remove fragments older than expire_secs. Returns true if any were removed.
+    /// Remove the oldest line if its last_active timestamp is older than expire_secs.
+    /// Only removes one line per call (gradual drain). Returns true if a line was removed.
     fn expire(&mut self) -> bool {
+        if self.lines.is_empty() {
+            return false;
+        }
+
         let cutoff = Instant::now() - std::time::Duration::from_secs(self.expire_secs);
-        let before = self.fragments.len();
-        self.fragments.retain(|(ts, _)| *ts > cutoff);
-        if self.fragments.len() != before {
-            // Rebuild tail after expiry.
-            let display = self.display_text();
+        if self.lines[0].last_active <= cutoff {
+            self.lines.remove(0);
+            // Rebuild tail after removal.
+            let display = self.all_text();
             let tail_start = display.len().saturating_sub(60);
             self.last_tail = display[tail_start..].to_string();
             true
@@ -107,16 +196,9 @@ impl CaptionBuffer {
         }
     }
 
-    /// Join all buffered fragments into a single display string.
-    /// Fragments carry their own leading whitespace from the engine's tokenizer:
-    /// " Hello" = new word, "llo" = mid-word continuation. So we concatenate directly.
+    /// Join all lines with newline separators for display.
     fn display_text(&self) -> String {
-        let mut result = String::new();
-        for (_, frag) in &self.fragments {
-            result.push_str(frag);
-        }
-        // Trim leading whitespace from the combined result.
-        result.trim_start().to_string()
+        self.lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n")
     }
 }
 
@@ -193,7 +275,12 @@ pub fn run_gtk_app(
         let window_clone = window.clone();
         let enabled = Arc::clone(&captions_enabled_clone);
         let caption_rx_clone = Arc::clone(&caption_rx);
-        let caption_buffer = Rc::new(RefCell::new(CaptionBuffer::new(cfg.appearance.max_lines as usize)));
+        let max_chars_per_line = estimate_max_chars(cfg.appearance.width, cfg.appearance.font_size) as usize;
+        let caption_buffer = Rc::new(RefCell::new(CaptionBuffer::new(
+            cfg.appearance.max_lines as usize,
+            max_chars_per_line,
+            8, // expire_secs
+        )));
 
         // Poll for new captions and append to buffer.
         let buf_for_poll = Rc::clone(&caption_buffer);
