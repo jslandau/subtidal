@@ -393,4 +393,48 @@ mod tests {
         assert!(!overlay_submenu.is_empty(), "Overlay submenu should not be empty");
         assert!(tray.overlay_mode.eq(&OverlayMode::Floating), "Tray should be in Floating mode");
     }
+
+    /// AC4.1: Verify that menu() output excludes "STT Engine" submenu.
+    /// The tray menu should NOT contain an "STT Engine" submenu item since
+    /// only Nemotron is available and switching is hidden.
+    #[test]
+    fn menu_excludes_stt_engine_submenu() {
+        // Create channels for the test
+        let (overlay_tx, _overlay_rx) = std::sync::mpsc::channel();
+        let (audio_tx, _audio_rx) = std::sync::mpsc::sync_channel(1);
+        let (engine_tx, _engine_rx) = std::sync::mpsc::sync_channel(1);
+
+        let tray = TrayState {
+            captions_enabled: Arc::new(AtomicBool::new(true)),
+            active_source: AudioSource::SystemOutput,
+            overlay_mode: OverlayMode::Docked,
+            locked: true,
+            active_engine: Engine::Nemotron,
+            overlay_tx,
+            audio_tx,
+            engine_tx,
+            node_list: Arc::new(std::sync::Mutex::new(vec![])),
+        };
+
+        let menu_items = tray.menu();
+
+        // Iterate through menu items and check that none have label "STT Engine"
+        for item in &menu_items {
+            match item {
+                MenuItem::SubMenu(submenu) => {
+                    assert_ne!(
+                        submenu.label, "STT Engine",
+                        "Menu should not contain 'STT Engine' submenu"
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        // Additional verification: the menu should have at least Captions, Separator, Audio Source, Overlay, Separator, Settings, Quit
+        assert!(
+            menu_items.len() >= 7,
+            "Menu should have expected items (Captions, separators, submenus, Settings, Quit)"
+        );
+    }
 }

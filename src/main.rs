@@ -46,10 +46,10 @@ fn main() {
 
     // CLI engine override
     if let Some(engine_str) = args.engine {
-        cfg.engine = match engine_str.to_lowercase().as_str() {
-            "nemotron" | "parakeet" => config::Engine::Nemotron,
-            other => {
-                eprintln!("Unknown engine '{other}'. Valid engines: nemotron, parakeet.");
+        match Config::parse_engine(&engine_str) {
+            Some(engine) => cfg.engine = engine,
+            None => {
+                eprintln!("Unknown engine '{}'. Valid engines: nemotron, parakeet.", engine_str);
                 std::process::exit(1);
             }
         };

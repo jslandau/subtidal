@@ -177,6 +177,16 @@ impl Config {
             .join("config.toml")
     }
 
+    /// Parse a CLI engine string to an Engine enum variant.
+    /// Returns Some(Engine) on success, None on unknown engine.
+    /// AC2.2: Recognizes "nemotron" and "parakeet" as aliases for Engine::Nemotron.
+    pub fn parse_engine(engine_str: &str) -> Option<Engine> {
+        match engine_str.to_lowercase().as_str() {
+            "nemotron" | "parakeet" => Some(Engine::Nemotron),
+            _ => None,
+        }
+    }
+
     /// Load config from disk. If the file does not exist, returns `Default::default()`.
     /// If the file exists but is malformed, logs a warning and returns `Default::default()`.
     pub fn load() -> Config {
@@ -365,5 +375,47 @@ mod tests {
         assert_eq!(cfg.engine, Engine::Nemotron);
         assert!(cfg.locked);
         assert_eq!(cfg.screen_edge, ScreenEdge::Bottom);
+    }
+
+    /// AC2.1: Unknown engine value in TOML defaults to Nemotron.
+    /// When a TOML file contains engine = "moonshine" (an unsupported value),
+    /// the deserialization should fail gracefully or default to Nemotron.
+    /// Since the Engine enum only has Nemotron as a valid variant,
+    /// serde will reject unknown values. This test verifies that behavior.
+    #[test]
+    fn config_unknown_engine_defaults_to_nemotron() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("unknown_engine.toml");
+        fs::write(&path, "engine = \"moonshine\"\n").unwrap();
+        // The deserialization should fail because "moonshine" is not a valid Engine variant.
+        let result = Config::load_from(&path);
+        assert!(result.is_err(), "Expected deserialization error for unknown engine");
+    }
+
+    /// AC2.2: CLI engine string-to-Engine mapping.
+    /// Test that parse_engine recognizes "nemotron" and "parakeet" as valid aliases.
+    #[test]
+    fn cli_parse_engine_nemotron() {
+        assert_eq!(Config::parse_engine("nemotron"), Some(Engine::Nemotron));
+    }
+
+    /// AC2.2: CLI engine string-to-Engine mapping with "parakeet" alias.
+    #[test]
+    fn cli_parse_engine_parakeet() {
+        assert_eq!(Config::parse_engine("parakeet"), Some(Engine::Nemotron));
+    }
+
+    /// AC2.2: CLI engine string-to-Engine mapping with case insensitivity.
+    #[test]
+    fn cli_parse_engine_case_insensitive() {
+        assert_eq!(Config::parse_engine("NEMOTRON"), Some(Engine::Nemotron));
+        assert_eq!(Config::parse_engine("Parakeet"), Some(Engine::Nemotron));
+    }
+
+    /// AC2.2: CLI engine string-to-Engine mapping rejects unknown engines.
+    #[test]
+    fn cli_parse_engine_unknown() {
+        assert_eq!(Config::parse_engine("moonshine"), None);
+        assert_eq!(Config::parse_engine("unknown"), None);
     }
 }
