@@ -100,14 +100,6 @@ impl Tray for TrayState {
             }
             .into(),
 
-            // --- STT Engine submenu ---
-            SubMenu {
-                label: "STT Engine".to_string(),
-                submenu: build_engine_submenu(&self.active_engine),
-                ..Default::default()
-            }
-            .into(),
-
             MenuItem::Separator,
 
             // --- Settings ---
@@ -299,6 +291,7 @@ fn build_overlay_submenu(tray: &TrayState) -> Vec<MenuItem<TrayState>> {
     ]
 }
 
+#[allow(dead_code)]
 fn build_engine_submenu(_active: &Engine) -> Vec<MenuItem<TrayState>> {
     vec![RadioGroup {
         selected: 0, // Only Nemotron is available
