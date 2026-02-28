@@ -79,6 +79,10 @@ pub struct AppearanceConfig {
     /// Seconds before an idle caption line expires and is removed.
     #[serde(default = "default_expire_secs")]
     pub expire_secs: u64,
+    /// Fraction of estimated max characters to use per line (0.0–1.0).
+    /// Lower values add more visual padding. Default 0.95 (5% padding).
+    #[serde(default = "default_char_width_fraction")]
+    pub char_width_fraction: f32,
 }
 
 fn default_width() -> i32 {
@@ -87,6 +91,10 @@ fn default_width() -> i32 {
 
 fn default_expire_secs() -> u64 {
     8
+}
+
+fn default_char_width_fraction() -> f32 {
+    0.95
 }
 
 impl Default for AppearanceConfig {
@@ -99,6 +107,7 @@ impl Default for AppearanceConfig {
             width: 600,
             height: 0,
             expire_secs: 8,
+            char_width_fraction: 0.95,
         }
     }
 }
@@ -110,6 +119,15 @@ impl AppearanceConfig {
             default_expire_secs()
         } else {
             self.expire_secs
+        }
+    }
+
+    /// Returns the effective char_width_fraction, clamped to (0.0, 1.0] with default fallback.
+    pub fn effective_char_width_fraction(&self) -> f32 {
+        if self.char_width_fraction <= 0.0 || self.char_width_fraction > 1.0 {
+            default_char_width_fraction()
+        } else {
+            self.char_width_fraction
         }
     }
 }

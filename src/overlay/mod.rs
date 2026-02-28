@@ -204,7 +204,8 @@ impl CaptionBuffer {
 
     /// Update the buffer's configuration (max_chars_per_line and expire_secs).
     /// Called when appearance config changes via hot-reload.
-    fn update_config(&mut self, max_chars_per_line: usize, expire_secs: u64) {
+    fn update_config(&mut self, max_lines: usize, max_chars_per_line: usize, expire_secs: u64) {
+        self.max_lines = max_lines;
         self.max_chars_per_line = max_chars_per_line;
         self.expire_secs = expire_secs;
     }
@@ -283,7 +284,7 @@ pub fn run_gtk_app(
         let window_clone = window.clone();
         let enabled = Arc::clone(&captions_enabled_clone);
         let caption_rx_clone = Arc::clone(&caption_rx);
-        let max_chars_per_line = estimate_max_chars(cfg.appearance.width, cfg.appearance.font_size) as usize;
+        let max_chars_per_line = estimate_max_chars(cfg.appearance.width, cfg.appearance.font_size, cfg.appearance.effective_char_width_fraction()) as usize;
         let caption_buffer = Rc::new(RefCell::new(CaptionBuffer::new(
             cfg.appearance.max_lines as usize,
             max_chars_per_line,
@@ -372,7 +373,7 @@ fn build_overlay_window(app: &Application, cfg: &Config) -> ApplicationWindow {
     // Build caption label with wrapping.
     // max_width_chars caps the label's natural width, forcing GTK to wrap text
     // instead of expanding the label/window to fit one long line.
-    let max_chars = estimate_max_chars(cfg.appearance.width, cfg.appearance.font_size);
+    let max_chars = estimate_max_chars(cfg.appearance.width, cfg.appearance.font_size, cfg.appearance.effective_char_width_fraction());
     let label = Label::builder()
         .label("")
         .wrap(true)
@@ -524,7 +525,7 @@ pub fn apply_appearance(appearance: &AppearanceConfig) {
 
 /// Estimate the number of characters that fit in the given pixel width at the given font size.
 /// Uses an approximate average character width of 0.6 × font_size (reasonable for proportional fonts).
-fn estimate_max_chars(width_px: i32, font_size_pt: f32) -> i32 {
+fn estimate_max_chars(width_px: i32, font_size_pt: f32, char_width_fraction: f32) -> i32 {
     if width_px <= 0 || font_size_pt <= 0.0 {
         return 80; // fallback
     }
@@ -532,8 +533,7 @@ fn estimate_max_chars(width_px: i32, font_size_pt: f32) -> i32 {
     // Subtract padding (8px + 12px = 20px per side from CSS).
     let usable_width = (width_px - 24).max(100) as f32;
     let avg_char_width = font_size_pt * 0.6;
-    // Apply 0.85× conservative multiplier for visual padding with proportional fonts.
-    (usable_width / avg_char_width * 0.85).floor() as i32
+    (usable_width / avg_char_width * char_width_fraction).floor() as i32
 }
 
 fn find_caption_label(window: &ApplicationWindow) -> Label {
@@ -618,13 +618,13 @@ fn handle_overlay_command(
         OverlayCommand::UpdateAppearance(appearance) => {
             apply_appearance(&appearance);
             let label = find_caption_label(window);
-            let max_chars = estimate_max_chars(appearance.width, appearance.font_size);
+            let max_chars = estimate_max_chars(appearance.width, appearance.font_size, appearance.effective_char_width_fraction());
             label.set_max_width_chars(max_chars);
             label.set_lines(appearance.max_lines as i32);
             window.set_width_request(appearance.width);
             // Update buffer config for hot-reload
             let mut buf = caption_buffer.borrow_mut();
-            buf.update_config(max_chars as usize, appearance.effective_expire_secs());
+            buf.update_config(appearance.max_lines as usize, max_chars as usize, appearance.effective_expire_secs());
         }
         OverlayCommand::SetCaption(text) => {
             let label = find_caption_label(window);
@@ -748,6 +748,7 @@ mod tests {
             width: 800,
             height: 0,
             expire_secs: 8,
+            char_width_fraction: 0.95,
         };
         let css = build_css(&appearance);
 
@@ -1096,17 +1097,17 @@ mod tests {
         // usable_width = (800 - 24).max(100) = 776
         // avg_char_width = 24.0 * 0.6 = 14.4
         // old_result = 776 / 14.4 = 53.88... → floor = 53
-        // new_result = 53 * 0.85 = 45.05 → floor = 45
-        let result = estimate_max_chars(width_px, font_size_pt);
-        let expected_old = ((776.0_f32 / 14.4).floor()) as i32; // 53
-        let expected_new = ((776.0_f32 / 14.4 * 0.85).floor()) as i32; // 45
+        // With fraction=0.95: 53 * 0.95 = 51.11 → floor = 51
+        let result = estimate_max_chars(width_px, font_size_pt, 0.95);
+        let expected_full = ((776.0_f32 / 14.4).floor()) as i32; // 53
+        let expected_95 = ((776.0_f32 / 14.4 * 0.95).floor()) as i32; // 51
 
-        assert_eq!(expected_old, 53, "Sanity check: old formula should give 53");
-        assert_eq!(expected_new, 45, "Sanity check: new formula should give 45");
-        assert_eq!(result, 45, "Result should be approximately 85% of old formula");
+        assert_eq!(expected_full, 53, "Sanity check: full formula should give 53");
+        assert_eq!(expected_95, 51, "Sanity check: 0.95 formula should give 51");
+        assert_eq!(result, 51, "Result with 0.95 fraction");
         assert!(
-            result < expected_old,
-            "Conservative multiplier should make result smaller than old formula"
+            result < expected_full,
+            "Fraction should make result smaller than full formula"
         );
     }
 
@@ -1124,10 +1125,11 @@ mod tests {
         assert_eq!(buf.max_chars_per_line, 20, "Initial max_chars_per_line should be 20");
         assert_eq!(buf.expire_secs, 8, "Initial expire_secs should be 8");
 
-        // Update config to smaller max_chars_per_line and different expire_secs
-        buf.update_config(10, 5);
+        // Update config to smaller max_chars_per_line, different max_lines, and expire_secs
+        buf.update_config(2, 10, 5);
 
         // Verify updated values
+        assert_eq!(buf.max_lines, 2, "max_lines should be updated to 2");
         assert_eq!(buf.max_chars_per_line, 10, "max_chars_per_line should be updated to 10");
         assert_eq!(buf.expire_secs, 5, "expire_secs should be updated to 5");
 
