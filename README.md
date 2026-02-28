@@ -56,6 +56,7 @@ text_color = "#ffffff"
 font_size = 16.0
 max_lines = 3
 width = 600
+expire_secs = 8                # seconds before idle caption lines clear
 
 [position]
 x = 100
