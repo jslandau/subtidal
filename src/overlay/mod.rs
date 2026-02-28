@@ -201,6 +201,13 @@ impl CaptionBuffer {
     fn display_text(&self) -> String {
         self.lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n")
     }
+
+    /// Update the buffer's configuration (max_chars_per_line and expire_secs).
+    /// Called when appearance config changes via hot-reload.
+    fn update_config(&mut self, max_chars_per_line: usize, expire_secs: u64) {
+        self.max_chars_per_line = max_chars_per_line;
+        self.expire_secs = expire_secs;
+    }
 }
 
 pub mod input_region;
@@ -280,7 +287,7 @@ pub fn run_gtk_app(
         let caption_buffer = Rc::new(RefCell::new(CaptionBuffer::new(
             cfg.appearance.max_lines as usize,
             max_chars_per_line,
-            8, // expire_secs
+            cfg.appearance.effective_expire_secs(),
         )));
 
         // Poll for new captions and append to buffer.
@@ -323,12 +330,13 @@ pub fn run_gtk_app(
         let config_for_cmd = Arc::clone(&config_clone);
         let cmd_rx_clone = Arc::clone(&cmd_rx);
         let dragging_for_cmd = Rc::clone(&is_dragging);
+        let buf_for_cmd = Rc::clone(&caption_buffer);
 
         glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
             if let Ok(rx) = cmd_rx_clone.try_lock() {
                 while let Ok(cmd) = rx.try_recv() {
                     if !dragging_for_cmd.get() {
-                        handle_overlay_command(&window_clone2, cmd, &config_for_cmd, &dragging_for_cmd);
+                        handle_overlay_command(&window_clone2, cmd, &config_for_cmd, &dragging_for_cmd, &buf_for_cmd);
                     }
                 }
             }
@@ -553,6 +561,7 @@ fn handle_overlay_command(
     cmd: OverlayCommand,
     config: &Arc<std::sync::Mutex<Config>>,
     is_dragging: &Rc<Cell<bool>>,
+    caption_buffer: &Rc<RefCell<CaptionBuffer>>,
 ) {
     match cmd {
         OverlayCommand::SetVisible(v) => window.set_visible(v),
@@ -609,9 +618,13 @@ fn handle_overlay_command(
         OverlayCommand::UpdateAppearance(appearance) => {
             apply_appearance(&appearance);
             let label = find_caption_label(window);
-            label.set_max_width_chars(estimate_max_chars(appearance.width, appearance.font_size));
+            let max_chars = estimate_max_chars(appearance.width, appearance.font_size);
+            label.set_max_width_chars(max_chars);
             label.set_lines(appearance.max_lines as i32);
             window.set_width_request(appearance.width);
+            // Update buffer config for hot-reload
+            let mut buf = caption_buffer.borrow_mut();
+            buf.update_config(max_chars as usize, appearance.effective_expire_secs());
         }
         OverlayCommand::SetCaption(text) => {
             let label = find_caption_label(window);
@@ -1095,5 +1108,40 @@ mod tests {
             result < expected_old,
             "Conservative multiplier should make result smaller than old formula"
         );
+    }
+
+    /// AC3.2: CaptionBuffer configuration can be updated via update_config for hot-reload.
+    /// Verifies that expire_secs and max_chars_per_line can be changed after creation.
+    #[test]
+    fn ac3_2_update_config_hot_reload() {
+        let mut buf = CaptionBuffer::new(3, 20, 8);
+
+        // Add initial text with the original max_chars_per_line (20).
+        buf.push(" Hello".to_string());
+        buf.push(" world".to_string());
+
+        // Verify initial values
+        assert_eq!(buf.max_chars_per_line, 20, "Initial max_chars_per_line should be 20");
+        assert_eq!(buf.expire_secs, 8, "Initial expire_secs should be 8");
+
+        // Update config to smaller max_chars_per_line and different expire_secs
+        buf.update_config(10, 5);
+
+        // Verify updated values
+        assert_eq!(buf.max_chars_per_line, 10, "max_chars_per_line should be updated to 10");
+        assert_eq!(buf.expire_secs, 5, "expire_secs should be updated to 5");
+
+        // Verify that existing content is preserved
+        let display = buf.display_text();
+        assert_eq!(display, "Hello world", "Existing content should be preserved");
+
+        // Add more text with the new max_chars_per_line to verify it's applied
+        buf.push(" this".to_string());
+
+        // With max_chars_per_line=10, "Hello world this" won't fit on one line
+        // "Hello world" is 11 chars, so with max_chars=10, "world" would go to line 2
+        let display = buf.display_text();
+        let lines: Vec<&str> = display.split('\n').collect();
+        assert!(lines.len() >= 2, "New text should respect updated max_chars_per_line");
     }
 }
