@@ -76,10 +76,25 @@ pub struct AppearanceConfig {
     /// Caption area height in pixels (0 = auto/natural size).
     #[serde(default)]
     pub height: i32,
+    /// Seconds before an idle caption line expires and is removed.
+    #[serde(default = "default_expire_secs")]
+    pub expire_secs: u64,
+    /// Fraction of estimated max characters to use per line (0.0–1.0).
+    /// Lower values add more visual padding. Default 0.95 (5% padding).
+    #[serde(default = "default_char_width_fraction")]
+    pub char_width_fraction: f32,
 }
 
 fn default_width() -> i32 {
     600
+}
+
+fn default_expire_secs() -> u64 {
+    8
+}
+
+fn default_char_width_fraction() -> f32 {
+    0.95
 }
 
 impl Default for AppearanceConfig {
@@ -91,6 +106,28 @@ impl Default for AppearanceConfig {
             max_lines: 3,
             width: 600,
             height: 0,
+            expire_secs: 8,
+            char_width_fraction: 0.95,
+        }
+    }
+}
+
+impl AppearanceConfig {
+    /// Returns the effective expire_secs value, using default if the configured value is 0.
+    pub fn effective_expire_secs(&self) -> u64 {
+        if self.expire_secs == 0 {
+            default_expire_secs()
+        } else {
+            self.expire_secs
+        }
+    }
+
+    /// Returns the effective char_width_fraction, clamped to (0.0, 1.0] with default fallback.
+    pub fn effective_char_width_fraction(&self) -> f32 {
+        if self.char_width_fraction <= 0.0 || self.char_width_fraction > 1.0 {
+            default_char_width_fraction()
+        } else {
+            self.char_width_fraction
         }
     }
 }
@@ -417,5 +454,70 @@ mod tests {
     fn cli_parse_engine_unknown() {
         assert_eq!(Config::parse_engine("moonshine"), None);
         assert_eq!(Config::parse_engine("unknown"), None);
+    }
+
+    /// AC3.1: expire_secs field exists in AppearanceConfig with default value of 8.
+    #[test]
+    fn appearance_config_default_expire_secs() {
+        let config = AppearanceConfig::default();
+        assert_eq!(config.expire_secs, 8, "Default expire_secs should be 8");
+    }
+
+    /// AC3.1: expire_secs survives TOML roundtrip serialization.
+    #[test]
+    fn appearance_config_expire_secs_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        // Create a config with custom expire_secs value
+        let mut original = Config::default();
+        original.appearance.expire_secs = 10;
+        original.config_file_path = Some(path.clone());
+
+        // Serialize to TOML
+        let text = toml::to_string_pretty(&original).unwrap();
+        fs::write(&path, &text).unwrap();
+
+        // Deserialize and verify
+        let loaded = Config::load_from(&path).unwrap();
+        assert_eq!(loaded.appearance.expire_secs, 10, "expire_secs should survive roundtrip");
+    }
+
+    /// AC3.3: Deserializing expire_secs = 0 and calling effective_expire_secs() returns default.
+    #[test]
+    fn appearance_config_zero_expire_secs_uses_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config_zero.toml");
+
+        // Write TOML with expire_secs = 0
+        let toml_content = "[appearance]\nbackground_color = \"rgba(0,0,0,0.7)\"\ntext_color = \"#ffffff\"\nfont_size = 16.0\nmax_lines = 3\nwidth = 600\nheight = 0\nexpire_secs = 0\n";
+        fs::write(&path, toml_content).unwrap();
+
+        let cfg = Config::load_from(&path).unwrap();
+        assert_eq!(cfg.appearance.expire_secs, 0, "expire_secs should be 0 as read from TOML");
+        assert_eq!(
+            cfg.appearance.effective_expire_secs(),
+            8,
+            "effective_expire_secs() should return default (8) when expire_secs is 0"
+        );
+    }
+
+    /// AC3.3: Missing expire_secs field results in default value of 8.
+    #[test]
+    fn appearance_config_missing_expire_secs_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config_partial.toml");
+
+        // Write TOML without expire_secs field
+        let toml_content = "[appearance]\nbackground_color = \"rgba(0,0,0,0.7)\"\ntext_color = \"#ffffff\"\nfont_size = 16.0\nmax_lines = 3\nwidth = 600\nheight = 0\n";
+        fs::write(&path, toml_content).unwrap();
+
+        let cfg = Config::load_from(&path).unwrap();
+        assert_eq!(cfg.appearance.expire_secs, 8, "Missing expire_secs should default to 8");
+        assert_eq!(
+            cfg.appearance.effective_expire_secs(),
+            8,
+            "effective_expire_secs() should return 8 for default value"
+        );
     }
 }

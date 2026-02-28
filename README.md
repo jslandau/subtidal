@@ -56,6 +56,8 @@ text_color = "#ffffff"
 font_size = 16.0
 max_lines = 3
 width = 600
+expire_secs = 8                # seconds before idle caption lines clear
+char_width_fraction = 0.95     # fraction of line width to use (0.0-1.0)
 
 [position]
 x = 100

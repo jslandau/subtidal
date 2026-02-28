@@ -22,7 +22,12 @@ impl NemotronEngine {
     /// Load the Nemotron model from the given directory.
     /// Directory must contain: encoder.onnx, encoder.onnx.data, decoder_joint.onnx, tokenizer.model
     pub fn new(model_dir: &Path) -> Result<Self> {
-        let exec_config = parakeet_rs::ExecutionConfig::new();
+        let exec_config = parakeet_rs::ExecutionConfig::new()
+            .with_execution_provider(if super::cuda_available() {
+                parakeet_rs::ExecutionProvider::Cuda
+            } else {
+                parakeet_rs::ExecutionProvider::Cpu
+            });
 
         let inner = parakeet_rs::Nemotron::from_pretrained(model_dir, Some(exec_config))
             .with_context(|| format!("loading Nemotron from {}", model_dir.display()))?;
