@@ -734,6 +734,7 @@ mod tests {
             max_lines: 5,
             width: 800,
             height: 0,
+            expire_secs: 8,
         };
         let css = build_css(&appearance);
 
