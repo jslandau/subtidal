@@ -28,6 +28,11 @@ struct Args {
 }
 
 fn main() {
+    // If we're a CUDA probe subprocess, run the probe and exit immediately.
+    if std::env::var_os("__SUBTIDAL_CUDA_PROBE").is_some() {
+        stt::run_cuda_probe();
+    }
+
     let args = Args::parse();
 
     // Load or reset config. --config overrides the default XDG path.

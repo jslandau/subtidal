@@ -69,10 +69,54 @@ pub fn restart_inference_thread(
     (chunk_tx, handle)
 }
 
-/// Detect CUDA availability via ort.
-/// Returns true if a CUDA-capable GPU is accessible.
+/// Detect CUDA availability by probing in a forked child process.
+///
+/// The ort CUDA provider can segfault during dlopen if there's a version mismatch
+/// between the provider .so and the system CUDA libraries. By forking first, we
+/// isolate the probe so a crash in the child doesn't take down the main process.
+///
+/// Returns true only if the child process exits successfully with a "cuda:ok" signal.
 pub fn cuda_available() -> bool {
-    ort::execution_providers::CUDAExecutionProvider::default().is_available().unwrap_or(false)
+    use std::io::Read as _;
+    use std::process::{Command, Stdio};
+
+    // Spawn ourselves with a special env var that triggers the probe-and-exit path.
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+
+    let result = Command::new(exe)
+        .env("__SUBTIDAL_CUDA_PROBE", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .and_then(|mut child| {
+            let mut output = String::new();
+            if let Some(ref mut stdout) = child.stdout {
+                let _ = stdout.read_to_string(&mut output);
+            }
+            let status = child.wait()?;
+            Ok((status, output))
+        });
+
+    match result {
+        Ok((status, output)) => status.success() && output.trim() == "cuda:ok",
+        Err(_) => false,
+    }
+}
+
+/// Called when __SUBTIDAL_CUDA_PROBE env var is set.
+/// Attempts to check CUDA via ort, prints "cuda:ok" on success, then exits.
+/// If this segfaults, the parent process sees a non-zero/signal exit and falls back to CPU.
+pub fn run_cuda_probe() -> ! {
+    let available = ort::execution_providers::CUDAExecutionProvider::default()
+        .is_available()
+        .unwrap_or(false);
+    if available {
+        print!("cuda:ok");
+    }
+    std::process::exit(0);
 }
 
 #[cfg(test)]
@@ -141,14 +185,20 @@ mod tests {
         assert_eq!(received, vec!["hi"]);
     }
 
-    /// AC5.3: CUDA unavailable triggers CPU fallback.
-    /// Test that cuda_available() returns a bool without panicking.
-    /// (The actual fallback logic is in main.rs and is inherently hard to unit test.)
+    /// AC5.3: CUDA probe subprocess returns a bool without crashing the parent.
+    ///
+    /// Note: This test spawns the release binary (not the test binary) as a subprocess.
+    /// The test binary doesn't have the probe entry point, so we can't test the
+    /// subprocess mechanism in unit tests. Integration testing requires the full binary.
     #[test]
-    fn cuda_available_detection_does_not_panic() {
-        // This should not panic. The result depends on the system,
-        // so we only verify the function completes successfully.
-        let _result = cuda_available();
-        // Test passes if we reach this point without panicking.
+    fn cuda_probe_returns_bool_without_crashing() {
+        // cuda_available() spawns the main binary as a subprocess.
+        // In the test environment, current_exe() returns the test runner,
+        // which doesn't have the __SUBTIDAL_CUDA_PROBE handler — so it will
+        // return false (child exits without printing "cuda:ok").
+        // We just verify the parent doesn't crash or hang.
+        let result = cuda_available();
+        // Result depends on system — we only verify the parent survived.
+        let _ = result;
     }
 }
