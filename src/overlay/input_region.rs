@@ -11,6 +11,20 @@ use gtk4::prelude::*;
 use gtk4::ApplicationWindow;
 use gtk4::cairo;
 use gtk4_layer_shell::{KeyboardMode, LayerShell};
+use std::sync::OnceLock;
+
+/// Niri doesn't honor oversized input regions set via `set_input_region()`.
+/// Passing `None` (unset) works on Niri but may not on all compositors.
+/// KDE/Sway work with an explicit large rectangle.
+pub fn is_niri() -> bool {
+    static RESULT: OnceLock<bool> = OnceLock::new();
+    *RESULT.get_or_init(|| {
+        std::env::var("XDG_CURRENT_DESKTOP")
+            .unwrap_or_default()
+            .to_lowercase()
+            .contains("niri")
+    })
+}
 
 /// Make the window click-through: set an empty GDK surface input region.
 ///
@@ -37,10 +51,8 @@ pub fn set_empty_input_region(window: &ApplicationWindow) {
 
 /// Restore the default (full) input region: window accepts all pointer events.
 ///
-/// Sets a very large input region on the GDK surface so the entire window
-/// accepts pointer input regardless of its current size. This is necessary
-/// because at `connect_map` time, `window.width()/height()` may return 0
-/// before layout completes.
+/// On Niri: passes `None` to unset the region entirely (Niri doesn't honor explicit large regions).
+/// On KDE/Sway/others: sets a large explicit rectangle (known working behavior).
 pub fn clear_input_region(window: &ApplicationWindow) {
     use gtk4::prelude::SurfaceExt;
 
@@ -48,10 +60,17 @@ pub fn clear_input_region(window: &ApplicationWindow) {
         return;
     };
 
-    // Use a very large rectangle rather than window dimensions, because at map
-    // time the window may not have been laid out yet (width/height == 0).
-    // The compositor clips to the actual surface bounds automatically.
-    let full_rect = cairo::RectangleInt::new(0, 0, 16384, 16384);
-    let full_region = cairo::Region::create_rectangle(&full_rect);
-    surface.set_input_region(&full_region);
+    if is_niri() {
+        // On Niri, use actual window dimensions — Niri clips input regions to the
+        // surface bounds and doesn't honor oversized rectangles.
+        let w = window.width().max(1);
+        let h = window.height().max(1);
+        let region = cairo::Region::create_rectangle(&cairo::RectangleInt::new(0, 0, w, h));
+        surface.set_input_region(&region);
+    } else {
+        // KDE/Sway: large rectangle works and avoids races with layout.
+        let full_rect = cairo::RectangleInt::new(0, 0, 16384, 16384);
+        let full_region = cairo::Region::create_rectangle(&full_rect);
+        surface.set_input_region(&full_region);
+    }
 }

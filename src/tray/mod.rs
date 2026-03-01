@@ -43,11 +43,35 @@ impl TrayState {
 }
 
 impl Tray for TrayState {
+    fn icon_theme_path(&self) -> String {
+        // Resolve the icon theme path relative to the executable location.
+        // In development: target/release/../assets/icons/hicolor or target/debug/../assets/icons/hicolor
+        // Installed: alongside the binary or in a standard location.
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+        if let Some(dir) = exe_dir {
+            // Check relative to exe (installed layout): <dir>/../share/subtidal/icons
+            let installed = dir.join("../share/subtidal/icons");
+            if installed.join("hicolor").exists() {
+                return installed.canonicalize().unwrap_or(installed).to_string_lossy().to_string();
+            }
+            // Check development layout: <dir>/../../assets/icons
+            let dev = dir.join("../../assets/icons");
+            if dev.join("hicolor").exists() {
+                return dev.canonicalize().unwrap_or(dev).to_string_lossy().to_string();
+            }
+        }
+        // Fallback: empty string uses system theme only.
+        eprintln!("warn: could not find subtidal icon theme directory");
+        String::new()
+    }
+
     fn icon_name(&self) -> String {
         if self.captions_enabled.load(Ordering::Relaxed) {
-            "microphone-sensitivity-high-symbolic".to_string()
+            "subtidal-captions-on-symbolic".to_string()
         } else {
-            "microphone-disabled-symbolic".to_string()
+            "subtidal-captions-off-symbolic".to_string()
         }
     }
 

@@ -8,7 +8,21 @@ use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use std::sync::{Arc, atomic::{AtomicBool, AtomicI32, Ordering}};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::OnceLock;
 use std::time::Instant;
+
+/// Whether the compositor shifts widget-local coordinates when layer-shell margins change mid-drag.
+/// KDE, Sway, and Hyprland do this (GTK's drag offset shrinks as the surface moves), requiring
+/// accumulated compensation. Niri (smithay-based) does not, so raw `start + offset` works directly.
+fn compositor_shifts_coords_on_margin_change() -> bool {
+    static RESULT: OnceLock<bool> = OnceLock::new();
+    *RESULT.get_or_init(|| {
+        let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default().to_lowercase();
+        // Niri is the known compositor that does NOT shift coords.
+        // Default to compensation (safe fallback — worst case drag is sluggish, not flung off-screen).
+        !desktop.contains("niri")
+    })
+}
 
 /// Represents one line of caption text with a timestamp for expiry.
 struct CaptionLine {
@@ -397,6 +411,16 @@ fn build_overlay_window(app: &Application, cfg: &Config) -> ApplicationWindow {
         }
     });
 
+    // On Niri, window dimensions may be 0 at map time (width()==0), so the
+    // region set in connect_map may be too small. Re-apply after a short delay
+    // to ensure layout has completed. Only needed on Niri.
+    if !is_locked && input_region::is_niri() {
+        let win_for_timer = window.clone();
+        glib::timeout_add_local_once(std::time::Duration::from_millis(100), move || {
+            input_region::clear_input_region(&win_for_timer);
+        });
+    }
+
     window
 }
 
@@ -673,11 +697,7 @@ fn add_drag_handler(window: &ApplicationWindow, is_dragging: &Rc<Cell<bool>>) {
     // suppressed to prevent relayout-induced jitter on the layer-shell surface.
     let start_x = Arc::new(AtomicI32::new(0));
     let start_y = Arc::new(AtomicI32::new(0));
-    // How much we've moved the window so far (cumulative).
-    // GestureDrag reports offsets in widget-local coords. When set_margin() moves
-    // the window, the coordinate system shifts by the same amount, so GTK's reported
-    // offset becomes: real_mouse_movement - accumulated_window_movement.
-    // Therefore: true_total = accumulated + reported_offset.
+    // Accumulated movement — only used on compositors that shift widget-local coords.
     let moved_x = Arc::new(AtomicI32::new(0));
     let moved_y = Arc::new(AtomicI32::new(0));
 
@@ -696,21 +716,38 @@ fn add_drag_handler(window: &ApplicationWindow, is_dragging: &Rc<Cell<bool>>) {
     });
 
     // Update margins on each drag update.
+    //
+    // GestureDrag reports cumulative offset from the drag start point. However,
+    // calling set_margin() repositions the layer-shell surface, and some compositors
+    // (KDE, Sway, Hyprland) shift the widget-local coordinate origin accordingly —
+    // making GTK's reported offset shrink by the amount the window moved. On these
+    // compositors we must accumulate the real movement separately.
+    //
+    // Niri (smithay-based) does NOT shift coords, so raw start + offset works.
     let sx2 = Arc::clone(&start_x);
     let sy2 = Arc::clone(&start_y);
     let mx2 = Arc::clone(&moved_x);
     let my2 = Arc::clone(&moved_y);
     let win_update = window.clone();
+    let needs_compensation = compositor_shifts_coords_on_margin_change();
     gesture.connect_drag_update(move |_, dx, dy| {
-        let total_x = mx2.load(Ordering::Relaxed) + dx as i32;
-        let total_y = my2.load(Ordering::Relaxed) + dy as i32;
-        let new_x = (sx2.load(Ordering::Relaxed) + total_x).max(0);
-        let new_y = (sy2.load(Ordering::Relaxed) + total_y).max(0);
+        let (new_x, new_y) = if needs_compensation {
+            // KDE/Sway/Hyprland: offset is reduced by surface movement, so add accumulated delta.
+            let total_x = mx2.load(Ordering::Relaxed) + dx as i32;
+            let total_y = my2.load(Ordering::Relaxed) + dy as i32;
+            let nx = (sx2.load(Ordering::Relaxed) + total_x).max(0);
+            let ny = (sy2.load(Ordering::Relaxed) + total_y).max(0);
+            mx2.store(nx - sx2.load(Ordering::Relaxed), Ordering::Relaxed);
+            my2.store(ny - sy2.load(Ordering::Relaxed), Ordering::Relaxed);
+            (nx, ny)
+        } else {
+            // Niri: offset is the true cumulative mouse delta.
+            let nx = (sx2.load(Ordering::Relaxed) + dx as i32).max(0);
+            let ny = (sy2.load(Ordering::Relaxed) + dy as i32).max(0);
+            (nx, ny)
+        };
         win_update.set_margin(Edge::Left, new_x);
         win_update.set_margin(Edge::Top, new_y);
-        // Record how much we actually moved (clamped position - start position).
-        mx2.store(new_x - sx2.load(Ordering::Relaxed), Ordering::Relaxed);
-        my2.store(new_y - sy2.load(Ordering::Relaxed), Ordering::Relaxed);
     });
 
     // Clear dragging flag and save position on drag end.
