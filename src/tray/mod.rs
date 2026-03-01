@@ -42,29 +42,62 @@ impl TrayState {
     }
 }
 
-impl Tray for TrayState {
-    fn icon_theme_path(&self) -> String {
-        // Resolve the icon theme path relative to the executable location.
-        // In development: target/release/../assets/icons/hicolor or target/debug/../assets/icons/hicolor
-        // Installed: alongside the binary or in a standard location.
+/// Ensure tray icons exist on disk at an XDG-standard location.
+/// Embeds the SVGs at compile time and writes them to ~/.local/share/icons/hicolor/
+/// on first run (or if missing). Returns the icon base path for ksni's icon_theme_path.
+fn ensure_icons_installed() -> String {
+    use std::sync::OnceLock;
+    static PATH: OnceLock<String> = OnceLock::new();
+    PATH.get_or_init(|| {
+        // 1. Check development layout first (avoids writing to XDG during dev).
         let exe_dir = std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|d| d.to_path_buf()));
-        if let Some(dir) = exe_dir {
-            // Check relative to exe (installed layout): <dir>/../share/subtidal/icons
-            let installed = dir.join("../share/subtidal/icons");
-            if installed.join("hicolor").exists() {
-                return installed.canonicalize().unwrap_or(installed).to_string_lossy().to_string();
-            }
-            // Check development layout: <dir>/../../assets/icons
+        if let Some(dir) = &exe_dir {
             let dev = dir.join("../../assets/icons");
-            if dev.join("hicolor").exists() {
+            if dev.join("hicolor/scalable/status/subtidal-captions-on-symbolic.svg").exists() {
                 return dev.canonicalize().unwrap_or(dev).to_string_lossy().to_string();
             }
         }
-        // Fallback: empty string uses system theme only.
-        eprintln!("warn: could not find subtidal icon theme directory");
-        String::new()
+
+        // 2. Install to ~/.local/share/icons/ (XDG standard).
+        let icons_base = dirs::data_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("~/.local/share"))
+            .join("icons");
+        let status_dir = icons_base.join("hicolor/scalable/status");
+
+        static ICON_ON: &[u8] = include_bytes!("../../assets/icons/hicolor/scalable/status/subtidal-captions-on-symbolic.svg");
+        static ICON_OFF: &[u8] = include_bytes!("../../assets/icons/hicolor/scalable/status/subtidal-captions-off-symbolic.svg");
+
+        let files = [
+            (status_dir.join("subtidal-captions-on-symbolic.svg"), ICON_ON),
+            (status_dir.join("subtidal-captions-off-symbolic.svg"), ICON_OFF),
+        ];
+
+        // Only write if any file is missing or differs in size.
+        let needs_install = files.iter().any(|(path, data)| {
+            !path.exists() || path.metadata().map(|m| m.len() != data.len() as u64).unwrap_or(true)
+        });
+
+        if needs_install {
+            if let Err(e) = std::fs::create_dir_all(&status_dir) {
+                eprintln!("warn: failed to create icon directory: {e}");
+                return String::new();
+            }
+            for (path, data) in &files {
+                if let Err(e) = std::fs::write(path, data) {
+                    eprintln!("warn: failed to write icon {}: {e}", path.display());
+                }
+            }
+        }
+
+        icons_base.to_string_lossy().to_string()
+    }).clone()
+}
+
+impl Tray for TrayState {
+    fn icon_theme_path(&self) -> String {
+        ensure_icons_installed()
     }
 
     fn icon_name(&self) -> String {
