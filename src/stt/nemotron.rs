@@ -21,9 +21,9 @@ pub struct NemotronEngine {
 impl NemotronEngine {
     /// Load the Nemotron model from the given directory.
     /// Directory must contain: encoder.onnx, encoder.onnx.data, decoder_joint.onnx, tokenizer.model
-    pub fn new(model_dir: &Path) -> Result<Self> {
+    pub fn new(model_dir: &Path, use_cuda: bool) -> Result<Self> {
         let exec_config = parakeet_rs::ExecutionConfig::new()
-            .with_execution_provider(if super::cuda_available() {
+            .with_execution_provider(if use_cuda {
                 parakeet_rs::ExecutionProvider::Cuda
             } else {
                 parakeet_rs::ExecutionProvider::Cpu

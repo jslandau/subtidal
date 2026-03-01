@@ -69,18 +69,19 @@ pub fn restart_inference_thread(
     (chunk_tx, handle)
 }
 
-/// Detect CUDA availability by probing in a forked child process.
+/// Detect CUDA usability by loading the model with CUDA in a subprocess.
 ///
-/// The ort CUDA provider can segfault during dlopen if there's a version mismatch
-/// between the provider .so and the system CUDA libraries. By forking first, we
-/// isolate the probe so a crash in the child doesn't take down the main process.
+/// The ort CUDA provider can segfault during dlopen or session creation if there's
+/// a version mismatch between the provider .so and the system CUDA libraries. By
+/// doing the full model load in a subprocess, we ensure that if CUDA causes a
+/// segfault at any point (probe, session creation, or kernel load), the parent
+/// process survives and falls back to CPU.
 ///
 /// Returns true only if the child process exits successfully with a "cuda:ok" signal.
-pub fn cuda_available() -> bool {
+pub fn cuda_available(model_dir: &std::path::Path) -> bool {
     use std::io::Read as _;
     use std::process::{Command, Stdio};
 
-    // Spawn ourselves with a special env var that triggers the probe-and-exit path.
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(_) => return false,
@@ -88,6 +89,7 @@ pub fn cuda_available() -> bool {
 
     let result = Command::new(exe)
         .env("__SUBTIDAL_CUDA_PROBE", "1")
+        .env("__SUBTIDAL_CUDA_PROBE_MODEL_DIR", model_dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
@@ -107,15 +109,29 @@ pub fn cuda_available() -> bool {
 }
 
 /// Called when __SUBTIDAL_CUDA_PROBE env var is set.
-/// Attempts to check CUDA via ort, prints "cuda:ok" on success, then exits.
-/// If this segfaults, the parent process sees a non-zero/signal exit and falls back to CPU.
+/// Attempts to load the Nemotron model with CUDA EP, prints "cuda:ok" on success,
+/// then exits. If this segfaults at any stage (EP probe, session creation, kernel
+/// load), the parent process sees a non-zero/signal exit and falls back to CPU.
 pub fn run_cuda_probe() -> ! {
+    // First check if CUDA EP is even available.
     let available = ort::execution_providers::CUDAExecutionProvider::default()
         .is_available()
         .unwrap_or(false);
-    if available {
-        print!("cuda:ok");
+    if !available {
+        std::process::exit(0);
     }
+
+    // Actually attempt to load the model with CUDA — this is where the segfault
+    // typically occurs due to CUDA version mismatches during session creation.
+    if let Some(model_dir) = std::env::var_os("__SUBTIDAL_CUDA_PROBE_MODEL_DIR") {
+        let config = parakeet_rs::ExecutionConfig::new()
+            .with_execution_provider(parakeet_rs::ExecutionProvider::Cuda);
+        if parakeet_rs::Nemotron::from_pretrained(std::path::Path::new(&model_dir), Some(config)).is_err() {
+            std::process::exit(1);
+        }
+    }
+
+    print!("cuda:ok");
     std::process::exit(0);
 }
 
@@ -197,7 +213,7 @@ mod tests {
         // which doesn't have the __SUBTIDAL_CUDA_PROBE handler — so it will
         // return false (child exits without printing "cuda:ok").
         // We just verify the parent doesn't crash or hang.
-        let result = cuda_available();
+        let result = cuda_available(std::path::Path::new("/nonexistent"));
         // Result depends on system — we only verify the parent survived.
         let _ = result;
     }

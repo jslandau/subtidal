@@ -116,8 +116,11 @@ fn main() {
         let _ = audio_cmd_tx.send(audio::AudioCommand::SwitchSource(validated_source));
     }
 
-    // Log CUDA availability (Nemotron runs on CPU when CUDA is unavailable).
-    eprintln!("{}", cuda_status_message(stt::cuda_available()));
+    // Probe CUDA availability by attempting a full model load in a subprocess.
+    // This catches segfaults from CUDA version mismatches during session creation.
+    let model_dir = models::nemotron_model_dir();
+    let use_cuda = stt::cuda_available(&model_dir);
+    eprintln!("{}", cuda_status_message(use_cuda));
 
     // Create audio chunk channel (connects Phase 3 ring buffer drain to inference).
     // Wrap the SyncSender in Arc<Mutex<>> so Phase 8 engine switching can replace it
@@ -167,9 +170,8 @@ fn main() {
 
     // Instantiate the STT engine.
     let engine: Box<dyn stt::SttEngine> = {
-        let model_dir = models::nemotron_model_dir();
         Box::new(
-            stt::nemotron::NemotronEngine::new(&model_dir)
+            stt::nemotron::NemotronEngine::new(&model_dir, use_cuda)
                 .unwrap_or_else(|e| {
                     eprintln!("error: failed to load Nemotron model: {e:#}");
                     std::process::exit(1);
@@ -204,7 +206,9 @@ fn main() {
 
                         let new_engine: Box<dyn stt::SttEngine> = match new_engine_choice {
                             config::Engine::Nemotron => {
-                                match stt::nemotron::NemotronEngine::new(&models::nemotron_model_dir()) {
+                                let dir = models::nemotron_model_dir();
+                                let cuda = stt::cuda_available(&dir);
+                                match stt::nemotron::NemotronEngine::new(&dir, cuda) {
                                     Ok(e) => Box::new(e),
                                     Err(e) => {
                                         eprintln!("error: failed to load Nemotron: {e:#}");

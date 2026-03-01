@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg height="16px" viewBox="0 0 16 16" width="16px" xmlns="http://www.w3.org/2000/svg">
+  <style id="current-color-scheme" type="text/css">.ColorScheme-Text { color: #fcfcfc; }</style>
+  <g class="ColorScheme-Text" fill="currentColor">
+    <!-- Rounded rectangle frame (filled outline with cutout) -->
+    <path d="M 3 1 C 1.356 1 0 2.356 0 4 v 8 c 0 1.644 1.356 3 3 3 h 10 c 1.644 0 3-1.356 3-3 V 4 c 0-1.644-1.356-3-3-3 Z m 0 2 h 10 c 0.555 0 1 0.445 1 1 v 8 c 0 0.555-0.445 1-1 1 H 3 c-0.555 0-1-0.445-1-1 V 4 c 0-0.555 0.445-1 1-1 Z" opacity="0.35"/>
+    <!-- "C" left (dimmed) -->
+    <path d="M 6.1 5.8 C 5.0 5.8 4.0 6.6 4.0 8.0 c 0 1.4 1.0 2.2 2.1 2.2 c 0.7 0 1.2-0.3 1.5-0.8 L 6.8 9.0 C 6.6 9.3 6.4 9.4 6.1 9.4 c-0.6 0-1.1-0.5-1.1-1.4 c 0-0.9 0.5-1.4 1.1-1.4 c 0.3 0 0.5 0.1 0.7 0.4 l 0.8-0.4 C 7.3 6.1 6.8 5.8 6.1 5.8 Z" opacity="0.35"/>
+    <!-- "C" right (dimmed) -->
+    <path d="M 11.1 5.8 C 10.0 5.8 9.0 6.6 9.0 8.0 c 0 1.4 1.0 2.2 2.1 2.2 c 0.7 0 1.2-0.3 1.5-0.8 L 11.8 9.0 C 11.6 9.3 11.4 9.4 11.1 9.4 c-0.6 0-1.1-0.5-1.1-1.4 c 0-0.9 0.5-1.4 1.1-1.4 c 0.3 0 0.5 0.1 0.7 0.4 l 0.8-0.4 C 12.3 6.1 11.8 5.8 11.1 5.8 Z" opacity="0.35"/>
+    <!-- Diagonal strike-through -->
+    <path d="M 2.5 13.5 L 13.5 2.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"/>
+  </g>
+</svg>
