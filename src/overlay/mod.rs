@@ -411,16 +411,6 @@ fn build_overlay_window(app: &Application, cfg: &Config) -> ApplicationWindow {
         }
     });
 
-    // On Niri, window dimensions may be 0 at map time (width()==0), so the
-    // region set in connect_map may be too small. Re-apply after a short delay
-    // to ensure layout has completed. Only needed on Niri.
-    if !is_locked && input_region::is_niri() {
-        let win_for_timer = window.clone();
-        glib::timeout_add_local_once(std::time::Duration::from_millis(100), move || {
-            input_region::clear_input_region(&win_for_timer);
-        });
-    }
-
     window
 }
 
