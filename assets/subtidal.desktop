@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Subtidal
+GenericName=Live Captions
+Comment=Real-time speech-to-text overlay for Wayland
+Exec=subtidal
+Icon=subtidal
+Terminal=false
+Categories=Utility;Accessibility;Audio;
+Keywords=captions;subtitles;speech;transcription;accessibility;

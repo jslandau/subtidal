@@ -11,6 +11,40 @@ use ringbuf::traits::Consumer;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+/// Install the .desktop file and app icon to XDG standard locations on first run.
+fn ensure_desktop_entry_installed() {
+    static APP_ICON: &[u8] = include_bytes!("../assets/icons/hicolor/scalable/apps/subtidal.svg");
+    static DESKTOP_ENTRY: &[u8] = include_bytes!("../assets/subtidal.desktop");
+
+    let data_dir = match dirs::data_dir() {
+        Some(d) => d,
+        None => return,
+    };
+
+    let icon_path = data_dir.join("icons/hicolor/scalable/apps/subtidal.svg");
+    let desktop_path = data_dir.join("applications/subtidal.desktop");
+
+    let files: &[(&std::path::Path, &[u8])] = &[
+        (&icon_path, APP_ICON),
+        (&desktop_path, DESKTOP_ENTRY),
+    ];
+
+    let needs_install = files.iter().any(|(path, data)| {
+        !path.exists() || path.metadata().map(|m| m.len() != data.len() as u64).unwrap_or(true)
+    });
+
+    if needs_install {
+        for (path, data) in files {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Err(e) = std::fs::write(path, data) {
+                eprintln!("warn: failed to write {}: {e}", path.display());
+            }
+        }
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "subtidal", about = "Real-time speech-to-text overlay for Linux/Wayland")]
 struct Args {
@@ -34,6 +68,8 @@ fn main() {
     }
 
     let args = Args::parse();
+
+    ensure_desktop_entry_installed();
 
     // Load or reset config. --config overrides the default XDG path.
     let mut cfg = if args.reset_config {
@@ -132,12 +168,17 @@ fn main() {
     // Create shutdown flag for audio bridge thread.
     let bridge_shutdown = Arc::new(AtomicBool::new(false));
 
+    // Shared captions-enabled flag — used by bridge thread to skip inference when disabled,
+    // and by tray/overlay for UI state.
+    let captions_enabled = Arc::new(std::sync::atomic::AtomicBool::new(true));
+
     // Spawn the audio→chunk bridge thread.
     // Drains the ring buffer, resamples, and sends 160ms chunks to the inference thread.
     // Locks chunk_tx on each send so Phase 8 can atomically swap the inner SyncSender.
     let mut ring_consumer_arc = ring_consumer;
     let chunk_tx_for_bridge = std::sync::Arc::clone(&chunk_tx);
     let bridge_shutdown_for_thread = Arc::clone(&bridge_shutdown);
+    let captions_enabled_for_bridge = Arc::clone(&captions_enabled);
     std::thread::spawn(move || {
         let mut resampler = audio::resampler::AudioResampler::new()
             .expect("creating resampler");
@@ -148,6 +189,11 @@ fn main() {
             }
             let n = ring_consumer_arc.pop_slice(&mut raw);
             if n > 0 {
+                // When captions are disabled, drain the ring buffer but skip
+                // resampling and inference to save CPU/GPU. The model stays loaded.
+                if !captions_enabled_for_bridge.load(Ordering::Relaxed) {
+                    continue;
+                }
                 match resampler.push_interleaved(&raw[..n]) {
                     Ok(chunks) => {
                         for chunk in chunks {
@@ -257,9 +303,6 @@ fn main() {
             }
         }
     });
-
-    // Shared captions-enabled flag (also used by tray in Phase 6).
-    let captions_enabled = Arc::new(std::sync::atomic::AtomicBool::new(true));
 
     // Spawn the system tray (Phase 6).
     let tray_state = tray::TrayState {
