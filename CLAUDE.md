@@ -52,7 +52,7 @@ The system tray runs on the tokio runtime (required by ksni).
 - gtk4 0.10 + gtk4-layer-shell 0.7 — Wayland overlay
 - pipewire 0.9 — audio capture
 - rubato 1.0 — sample rate conversion
-- ort 2.0.0-rc.11 (cuda feature) — ONNX Runtime inference
+- ort 2.0.0-rc.12 (cuda feature) — ONNX Runtime inference
 - parakeet-rs 0.3 — Nemotron RNNT decoder
 - ksni 0.3 — D-Bus StatusNotifierItem tray
 - hf-hub 0.5 — model download

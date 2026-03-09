@@ -4,6 +4,7 @@ pub mod nemotron;
 
 use anyhow::Result;
 use ort::ep::ExecutionProvider as _;
+use ort::ep::CUDA;
 use std::sync::mpsc;
 use std::thread;
 
@@ -114,7 +115,7 @@ pub fn cuda_available(model_dir: &std::path::Path) -> bool {
 /// load), the parent process sees a non-zero/signal exit and falls back to CPU.
 pub fn run_cuda_probe() -> ! {
     // First check if CUDA EP is even available.
-    let available = ort::execution_providers::CUDAExecutionProvider::default()
+    let available = CUDA::default()
         .is_available()
         .unwrap_or(false);
     if !available {
