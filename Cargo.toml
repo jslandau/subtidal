@@ -59,6 +59,9 @@ dirs = "5"
 # Signal handling
 ctrlc = "3"
 
+# Process exit without atexit handlers (avoids CUDA cleanup race)
+libc = "0.2"
+
 [profile.release]
 opt-level = 3
 lto = true

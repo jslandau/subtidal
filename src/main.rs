@@ -474,6 +474,12 @@ fn main() {
 
     // Run GTK4 main loop (blocks until application exits).
     overlay::run_gtk_app(cfg, caption_rx_from_inference, cmd_rx, Arc::clone(&captions_enabled));
+
+    // Use libc::_exit to skip all atexit handlers (both Rust and C++).
+    // ORT's C++ atexit destructors call cudaFreeHost after the CUDA driver has
+    // already shut down, causing SIGABRT. std::process::exit still runs atexit
+    // handlers; _exit does not.
+    unsafe { libc::_exit(0) }
 }
 
 /// Returns the appropriate CUDA status message based on availability.

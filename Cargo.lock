@@ -3327,6 +3327,7 @@ dependencies = [
  "gtk4-layer-shell",
  "hf-hub",
  "ksni",
+ "libc",
  "ndarray 0.16.1",
  "notify",
  "notify-debouncer-mini",
