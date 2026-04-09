@@ -61,7 +61,79 @@ struct Args {
     reset_config: bool,
 }
 
+/// Returns the ORT provider lib directory if CUDA providers are available.
+///
+/// ORT uses dladdr to locate provider .so files, but when statically linked it
+/// resolves to the CWD instead of the exe directory. Callers use this to chdir
+/// to the provider directory before ORT session creation.
+fn find_provider_dir() -> Option<std::path::PathBuf> {
+    // Check CWD first (handles cargo run from project dir with target/ symlinks)
+    if let Ok(cwd) = std::env::current_dir() {
+        if cwd.join("libonnxruntime_providers_cuda.so").exists() {
+            return Some(cwd);
+        }
+    }
+
+    // Check next to the binary (cargo run with symlinks in target/release/)
+    if let Some(exe_dir) = std::env::current_exe().ok()
+        .and_then(|p| std::fs::canonicalize(p).ok())
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+    {
+        if exe_dir.join("libonnxruntime_providers_cuda.so").exists() {
+            return Some(exe_dir);
+        }
+    }
+
+    // Use the provider directory embedded at compile time by build.rs
+    if let Some(dir) = option_env!("ORT_PROVIDER_LIB_DIR") {
+        let p = std::path::PathBuf::from(dir);
+        if p.join("libonnxruntime_providers_cuda.so").exists() {
+            return Some(p);
+        }
+    }
+
+    // Fallback: scan ort cache at runtime
+    find_ort_cache_dir()
+}
+
+/// Scan ~/.cache/ort.pyke.io/dfbin/ for the most recent provider directory.
+fn find_ort_cache_dir() -> Option<std::path::PathBuf> {
+    let cache_dir = dirs::cache_dir()?.join("ort.pyke.io/dfbin");
+    if !cache_dir.is_dir() {
+        return None;
+    }
+    // Find architecture subdirs, then find hash dirs with CUDA provider
+    let mut best: Option<(std::path::PathBuf, std::time::SystemTime)> = None;
+    for arch_entry in std::fs::read_dir(&cache_dir).ok()?.flatten() {
+        let arch_path = arch_entry.path();
+        if !arch_path.is_dir() {
+            continue;
+        }
+        for hash_entry in std::fs::read_dir(&arch_path).ok().into_iter().flatten().flatten() {
+            let hash_path = hash_entry.path();
+            let provider = hash_path.join("libonnxruntime_providers_cuda.so");
+            if provider.exists() {
+                if let Ok(meta) = provider.metadata() {
+                    if let Ok(modified) = meta.modified() {
+                        if best.as_ref().map_or(true, |(_, t)| modified > *t) {
+                            best = Some((hash_path, modified));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    best.map(|(p, _)| p)
+}
+
 fn main() {
+    // ORT resolves provider .so paths relative to CWD when statically linked.
+    // Temporarily chdir to the provider directory for the CUDA probe and engine init.
+    let original_cwd = std::env::current_dir().ok();
+    if let Some(provider_dir) = find_provider_dir() {
+        let _ = std::env::set_current_dir(&provider_dir);
+    }
+
     // If we're a CUDA probe subprocess, run the probe and exit immediately.
     if std::env::var_os("__SUBTIDAL_CUDA_PROBE").is_some() {
         stt::run_cuda_probe();
@@ -225,6 +297,11 @@ fn main() {
         )
     };
 
+    // Restore original CWD now that ORT session is created.
+    if let Some(ref cwd) = original_cwd {
+        let _ = std::env::set_current_dir(cwd);
+    }
+
     // Clone caption_tx for engine switching before spawning the inference thread.
     let caption_tx_for_switch = caption_tx.clone();
 
@@ -253,8 +330,17 @@ fn main() {
                         let new_engine: Box<dyn stt::SttEngine> = match new_engine_choice {
                             config::Engine::Nemotron => {
                                 let dir = models::nemotron_model_dir();
+                                // chdir to provider dir for ORT provider resolution
+                                let prev_cwd = std::env::current_dir().ok();
+                                if let Some(ref pd) = find_provider_dir() {
+                                    let _ = std::env::set_current_dir(pd);
+                                }
                                 let cuda = stt::cuda_available(&dir);
-                                match stt::nemotron::NemotronEngine::new(&dir, cuda) {
+                                let result = stt::nemotron::NemotronEngine::new(&dir, cuda);
+                                if let Some(ref cwd) = prev_cwd {
+                                    let _ = std::env::set_current_dir(cwd);
+                                }
+                                match result {
                                     Ok(e) => Box::new(e),
                                     Err(e) => {
                                         eprintln!("error: failed to load Nemotron: {e:#}");
