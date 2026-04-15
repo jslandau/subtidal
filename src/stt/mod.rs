@@ -114,26 +114,31 @@ pub fn cuda_available(model_dir: &std::path::Path) -> bool {
 /// then exits. If this segfaults at any stage (EP probe, session creation, kernel
 /// load), the parent process sees a non-zero/signal exit and falls back to CPU.
 pub fn run_cuda_probe() -> ! {
-    // First check if CUDA EP is even available.
-    let available = CUDA::default()
-        .is_available()
-        .unwrap_or(false);
+    use std::io::Write as _;
+
+    let available = CUDA::default().is_available().unwrap_or(false);
     if !available {
-        std::process::exit(0);
+        unsafe { libc::_exit(0) };
     }
 
-    // Actually attempt to load the model with CUDA — this is where the segfault
-    // typically occurs due to CUDA version mismatches during session creation.
     if let Some(model_dir) = std::env::var_os("__SUBTIDAL_CUDA_PROBE_MODEL_DIR") {
         let config = parakeet_rs::ExecutionConfig::new()
             .with_execution_provider(parakeet_rs::ExecutionProvider::Cuda);
-        if parakeet_rs::Nemotron::from_pretrained(std::path::Path::new(&model_dir), Some(config)).is_err() {
-            std::process::exit(1);
+        let loaded = parakeet_rs::Nemotron::from_pretrained(std::path::Path::new(&model_dir), Some(config));
+        if loaded.is_err() {
+            unsafe { libc::_exit(1) };
         }
+        // Signal success BEFORE the model is dropped — CUDA destructors can hang
+        // or crash during cleanup, and we must not let that race eat our stdout write.
+        let _ = std::io::stdout().write_all(b"cuda:ok");
+        let _ = std::io::stdout().flush();
+        std::mem::forget(loaded);
+        unsafe { libc::_exit(0) };
     }
 
-    print!("cuda:ok");
-    std::process::exit(0);
+    let _ = std::io::stdout().write_all(b"cuda:ok");
+    let _ = std::io::stdout().flush();
+    unsafe { libc::_exit(0) };
 }
 
 #[cfg(test)]

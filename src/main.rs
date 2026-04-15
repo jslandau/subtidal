@@ -59,21 +59,13 @@ struct Args {
     /// Reset config to defaults before starting
     #[arg(long)]
     reset_config: bool,
+
+    /// Start with captions disabled (model still loads; toggle from tray). Useful for autostart.
+    #[arg(long)]
+    start_disabled: bool,
 }
 
-/// Returns the ORT provider lib directory if CUDA providers are available.
-///
-/// ORT uses dladdr to locate provider .so files, but when statically linked it
-/// resolves to the CWD instead of the exe directory. Callers use this to chdir
-/// to the provider directory before ORT session creation.
 fn find_provider_dir() -> Option<std::path::PathBuf> {
-    // Check CWD first (handles cargo run from project dir with target/ symlinks)
-    if let Ok(cwd) = std::env::current_dir() {
-        if cwd.join("libonnxruntime_providers_cuda.so").exists() {
-            return Some(cwd);
-        }
-    }
-
     // Check next to the binary (cargo run with symlinks in target/release/)
     if let Some(exe_dir) = std::env::current_exe().ok()
         .and_then(|p| std::fs::canonicalize(p).ok())
@@ -94,6 +86,42 @@ fn find_provider_dir() -> Option<std::path::PathBuf> {
 
     // Fallback: scan ort cache at runtime
     find_ort_cache_dir()
+}
+
+/// Ensure the CUDA provider .so files live next to the installed binary.
+///
+/// ORT's provider discovery uses dladdr on its own static code, which resolves to
+/// the binary's directory (not CWD, not LD_LIBRARY_PATH). We symlink the provider
+/// .so files from the ORT build cache into the exe dir so ORT's GetRuntimePath
+/// finds them regardless of how subtidal was launched (CLI, app launcher, systemd).
+fn ensure_provider_libs_next_to_exe() {
+    let exe_dir = match std::env::current_exe().ok()
+        .and_then(|p| std::fs::canonicalize(p).ok())
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+    {
+        Some(d) => d,
+        None => return,
+    };
+
+    if exe_dir.join("libonnxruntime_providers_cuda.so").exists() {
+        return;
+    }
+
+    let source_dir = match find_provider_dir() {
+        Some(d) => d,
+        None => return,
+    };
+
+    if source_dir == exe_dir {
+        return;
+    }
+
+    for name in ["libonnxruntime_providers_cuda.so", "libonnxruntime_providers_shared.so"] {
+        let src = source_dir.join(name);
+        let dst = exe_dir.join(name);
+        if !src.exists() || dst.exists() { continue; }
+        let _ = std::os::unix::fs::symlink(&src, &dst);
+    }
 }
 
 /// Scan ~/.cache/ort.pyke.io/dfbin/ for the most recent provider directory.
@@ -126,13 +154,45 @@ fn find_ort_cache_dir() -> Option<std::path::PathBuf> {
     best.map(|(p, _)| p)
 }
 
-fn main() {
-    // ORT resolves provider .so paths relative to CWD when statically linked.
-    // Temporarily chdir to the provider directory for the CUDA probe and engine init.
-    let original_cwd = std::env::current_dir().ok();
-    if let Some(provider_dir) = find_provider_dir() {
-        let _ = std::env::set_current_dir(&provider_dir);
+/// ORT's `GetRuntimePath` locates provider .so files relative to argv[0]'s parent
+/// directory. When launched by bare name from a shell (e.g. `subtidal`), argv[0]
+/// has no directory component and the runtime path becomes empty, so the CUDA
+/// provider library is not found and CUDA EP registration silently falls back to
+/// CPU. Re-exec ourselves with the absolute path from `current_exe()` so argv[0]
+/// always has a directory component matching the real binary location.
+fn reexec_with_absolute_argv0_if_needed() {
+    use std::os::unix::process::CommandExt as _;
+
+    if std::env::var_os("__SUBTIDAL_REEXECED").is_some() {
+        return;
     }
+    // Probe subprocess is already spawned with an absolute path by cuda_available().
+    if std::env::var_os("__SUBTIDAL_CUDA_PROBE").is_some() {
+        return;
+    }
+    let argv0 = match std::env::args_os().next() {
+        Some(a) => a,
+        None => return,
+    };
+    if std::path::Path::new(&argv0).parent().map(|p| !p.as_os_str().is_empty()).unwrap_or(false) {
+        return; // already has a directory component
+    }
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let rest: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    let err = std::process::Command::new(&exe)
+        .args(&rest)
+        .env("__SUBTIDAL_REEXECED", "1")
+        .arg0(&exe)
+        .exec();
+    eprintln!("warn: failed to re-exec with absolute path ({err}); continuing. GPU acceleration may be unavailable.");
+}
+
+fn main() {
+    reexec_with_absolute_argv0_if_needed();
+    ensure_provider_libs_next_to_exe();
 
     // If we're a CUDA probe subprocess, run the probe and exit immediately.
     if std::env::var_os("__SUBTIDAL_CUDA_PROBE").is_some() {
@@ -242,7 +302,7 @@ fn main() {
 
     // Shared captions-enabled flag — used by bridge thread to skip inference when disabled,
     // and by tray/overlay for UI state.
-    let captions_enabled = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let captions_enabled = Arc::new(std::sync::atomic::AtomicBool::new(!args.start_disabled));
 
     // Spawn the audio→chunk bridge thread.
     // Drains the ring buffer, resamples, and sends 160ms chunks to the inference thread.
@@ -297,11 +357,6 @@ fn main() {
         )
     };
 
-    // Restore original CWD now that ORT session is created.
-    if let Some(ref cwd) = original_cwd {
-        let _ = std::env::set_current_dir(cwd);
-    }
-
     // Clone caption_tx for engine switching before spawning the inference thread.
     let caption_tx_for_switch = caption_tx.clone();
 
@@ -330,16 +385,8 @@ fn main() {
                         let new_engine: Box<dyn stt::SttEngine> = match new_engine_choice {
                             config::Engine::Nemotron => {
                                 let dir = models::nemotron_model_dir();
-                                // chdir to provider dir for ORT provider resolution
-                                let prev_cwd = std::env::current_dir().ok();
-                                if let Some(ref pd) = find_provider_dir() {
-                                    let _ = std::env::set_current_dir(pd);
-                                }
                                 let cuda = stt::cuda_available(&dir);
                                 let result = stt::nemotron::NemotronEngine::new(&dir, cuda);
-                                if let Some(ref cwd) = prev_cwd {
-                                    let _ = std::env::set_current_dir(cwd);
-                                }
                                 match result {
                                     Ok(e) => Box::new(e),
                                     Err(e) => {
@@ -473,6 +520,10 @@ fn main() {
     .expect("setting Ctrl-C handler");
 
     // Run GTK4 main loop (blocks until application exits).
+    if args.start_disabled {
+        let _ = cmd_tx_to_gtk.send(overlay::OverlayCommand::SetVisible(false));
+    }
+
     overlay::run_gtk_app(cfg, caption_rx_from_inference, cmd_rx, Arc::clone(&captions_enabled));
 
     // Use libc::_exit to skip all atexit handlers (both Rust and C++).
