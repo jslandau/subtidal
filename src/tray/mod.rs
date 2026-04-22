@@ -3,10 +3,11 @@
 use crate::audio::{AudioCommand, AudioNode, NodeList};
 use crate::config::{AudioSource, Engine, OverlayMode};
 use crate::overlay::OverlayCommand;
+use arc_swap::ArcSwap;
 use ksni::{menu::*, Tray, TrayMethods};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    mpsc::{Sender, SyncSender},
+    mpsc::SyncSender,
     Arc,
 };
 
@@ -17,19 +18,18 @@ pub struct TrayState {
     pub overlay_mode: OverlayMode,
     pub locked: bool,
     pub active_engine: Engine,
+    pub using_gpu: bool,
     /// Channel to send OverlayCommand to the GTK4 main thread.
-    pub overlay_tx: Sender<OverlayCommand>,
+    pub overlay_tx: async_channel::Sender<OverlayCommand>,
     /// Channel to send AudioCommand to the PipeWire thread.
     pub audio_tx: SyncSender<AudioCommand>,
-    /// Channel to send engine-switch command to the inference thread.
-    pub engine_tx: SyncSender<EngineCommand>,
+    /// Lock-free engine selector; STT thread reads this on each chunk boundary.
+    /// Currently only Nemotron is available; retained so a future engine submenu
+    /// can call `engine_choice.store(...)` without further plumbing.
+    #[allow(dead_code)]
+    pub engine_choice: Arc<ArcSwap<Engine>>,
     /// Shared node list from audio thread.
     pub node_list: NodeList,
-}
-
-/// Commands for switching the STT engine at runtime.
-pub enum EngineCommand {
-    Switch(Engine),
 }
 
 impl TrayState {
@@ -38,7 +38,7 @@ impl TrayState {
     fn toggle_captions(&mut self) {
         let prev = self.captions_enabled.load(Ordering::Relaxed);
         self.captions_enabled.store(!prev, Ordering::Relaxed);
-        let _ = self.overlay_tx.send(OverlayCommand::SetVisible(!prev));
+        let _ = self.overlay_tx.send_blocking(OverlayCommand::SetVisible(!prev));
     }
 }
 
@@ -110,22 +110,24 @@ fn ensure_icons_installed() -> String {
 /// - Optional diagonal strikethrough for the "off" state
 ///
 /// The `opacity` parameter (0.0–1.0) scales alpha for the off-state dimming.
-fn render_cc_icon(opacity: f32, strikethrough: bool) -> ksni::Icon {
+fn render_cc_icon(opacity: f32, strikethrough: bool, gpu: bool) -> ksni::Icon {
     const S: i32 = 64;
     const SF: f32 = S as f32;
     let mut data = vec![0u8; (S * S * 4) as usize];
+
+    let (r, g, b) = if gpu { (100u8, 255u8, 100u8) } else { (255u8, 255u8, 255u8) };
 
     // Blend a pixel with anti-aliased alpha (SDF coverage).
     let blend = |data: &mut Vec<u8>, x: i32, y: i32, coverage: f32, op: f32| {
         if x < 0 || x >= S || y < 0 || y >= S { return; }
         let idx = ((y * S + x) * 4) as usize;
         let a = (coverage.clamp(0.0, 1.0) * op * 255.0) as u8;
-        // Composite: max alpha wins (all shapes are the same white color).
+        // Composite: max alpha wins (all shapes are the same color).
         if a > data[idx] {
             data[idx] = a;
-            data[idx + 1] = 255;
-            data[idx + 2] = 255;
-            data[idx + 3] = 255;
+            data[idx + 1] = b;
+            data[idx + 2] = g;
+            data[idx + 3] = r;
         }
     };
 
@@ -281,9 +283,9 @@ impl Tray for TrayState {
 
     fn icon_pixmap(&self) -> Vec<ksni::Icon> {
         if self.captions_enabled.load(Ordering::Relaxed) {
-            vec![render_cc_icon(1.0, false)]
+            vec![render_cc_icon(1.0, false, self.using_gpu)]
         } else {
-            vec![render_cc_icon(0.35, true)]
+            vec![render_cc_icon(0.35, true, false)]
         }
     }
 
@@ -357,9 +359,8 @@ impl Tray for TrayState {
                 label: "Quit".to_string(),
                 icon_name: "application-exit-symbolic".to_string(),
                 activate: Box::new(|tray: &mut TrayState| {
-                    // Send shutdown to audio thread first, then tell GTK to quit cleanly.
                     let _ = tray.audio_tx.send(AudioCommand::Shutdown);
-                    let _ = tray.overlay_tx.send(OverlayCommand::Quit);
+                    let _ = tray.overlay_tx.send_blocking(OverlayCommand::Quit);
                 }),
                 ..Default::default()
             }
@@ -458,7 +459,7 @@ fn build_overlay_submenu(tray: &TrayState) -> Vec<MenuItem<TrayState>> {
             select: Box::new(|tray: &mut TrayState, idx: usize| {
                 let mode = if idx == 0 { OverlayMode::Docked } else { OverlayMode::Floating };
                 tray.overlay_mode = mode.clone();
-                let _ = tray.overlay_tx.send(OverlayCommand::SetMode(mode.clone()));
+                let _ = tray.overlay_tx.send_blocking(OverlayCommand::SetMode(mode.clone()));
                 let mut cfg = crate::config::Config::load();
                 cfg.overlay_mode = tray.overlay_mode.clone();
                 if let Err(e) = cfg.save() {
@@ -487,7 +488,7 @@ fn build_overlay_submenu(tray: &TrayState) -> Vec<MenuItem<TrayState>> {
                     if let Err(e) = cfg.save() {
                         eprintln!("warn: failed to save config: {e}");
                     }
-                    let _ = tray.overlay_tx.send(OverlayCommand::UpdateAppearance(appearance));
+                    let _ = tray.overlay_tx.send_blocking(OverlayCommand::UpdateAppearance(appearance));
                 }),
                 options: SIZE_PRESETS
                     .iter()
@@ -513,7 +514,7 @@ fn build_overlay_submenu(tray: &TrayState) -> Vec<MenuItem<TrayState>> {
             activate: Box::new(|tray: &mut TrayState| {
                 if tray.overlay_mode == OverlayMode::Floating {
                     tray.locked = !tray.locked;
-                    let _ = tray.overlay_tx.send(OverlayCommand::SetLocked(tray.locked));
+                    let _ = tray.overlay_tx.send_blocking(OverlayCommand::SetLocked(tray.locked));
                     let mut cfg = crate::config::Config::load();
                     cfg.locked = tray.locked;
                     if let Err(e) = cfg.save() {
@@ -525,32 +526,6 @@ fn build_overlay_submenu(tray: &TrayState) -> Vec<MenuItem<TrayState>> {
         }
         .into(),
     ]
-}
-
-#[allow(dead_code)]
-fn build_engine_submenu(_active: &Engine) -> Vec<MenuItem<TrayState>> {
-    vec![RadioGroup {
-        selected: 0, // Only Nemotron is available
-        select: Box::new(|tray: &mut TrayState, _idx: usize| {
-            let engine = Engine::Nemotron;
-            tray.active_engine = engine.clone();
-            let _ = tray.engine_tx.send(EngineCommand::Switch(engine.clone()));
-            // Note: load-modify-save pattern has a theoretical race if multiple tray actions fire simultaneously. Acceptable for single-user desktop app.
-            let mut cfg = crate::config::Config::load();
-            cfg.engine = tray.active_engine.clone();
-            if let Err(e) = cfg.save() {
-                eprintln!("warn: failed to save config: {e}");
-            }
-        }),
-        options: vec![
-            RadioItem {
-                label: "Nemotron (GPU)".to_string(),
-                enabled: true,
-                ..Default::default()
-            },
-        ],
-    }
-    .into()]
 }
 
 /// Spawn the system tray on the Tokio runtime.
@@ -572,10 +547,9 @@ mod tests {
     /// Test that the "Lock Overlay Position" menu item is disabled when overlay_mode is Docked.
     #[test]
     fn lock_item_disabled_in_docked_mode() {
-        // Create channels for the test
-        let (overlay_tx, _overlay_rx) = std::sync::mpsc::channel();
+        let (overlay_tx, _overlay_rx) = async_channel::unbounded();
         let (audio_tx, _audio_rx) = std::sync::mpsc::sync_channel(1);
-        let (engine_tx, _engine_rx) = std::sync::mpsc::sync_channel(1);
+        let engine_choice = Arc::new(ArcSwap::from_pointee(Engine::Nemotron));
 
         let tray = TrayState {
             captions_enabled: Arc::new(AtomicBool::new(true)),
@@ -583,9 +557,10 @@ mod tests {
             overlay_mode: OverlayMode::Docked,
             locked: false,
             active_engine: Engine::Nemotron,
+            using_gpu: false,
             overlay_tx,
             audio_tx,
-            engine_tx,
+            engine_choice,
             node_list: Arc::new(std::sync::Mutex::new(vec![])),
         };
 
@@ -604,10 +579,9 @@ mod tests {
     /// Test that the "Lock Overlay Position" menu item is enabled when overlay_mode is Floating.
     #[test]
     fn lock_item_enabled_in_floating_mode() {
-        // Create channels for the test
-        let (overlay_tx, _overlay_rx) = std::sync::mpsc::channel();
+        let (overlay_tx, _overlay_rx) = async_channel::unbounded();
         let (audio_tx, _audio_rx) = std::sync::mpsc::sync_channel(1);
-        let (engine_tx, _engine_rx) = std::sync::mpsc::sync_channel(1);
+        let engine_choice = Arc::new(ArcSwap::from_pointee(Engine::Nemotron));
 
         let tray = TrayState {
             captions_enabled: Arc::new(AtomicBool::new(true)),
@@ -615,9 +589,10 @@ mod tests {
             overlay_mode: OverlayMode::Floating,
             locked: false,
             active_engine: Engine::Nemotron,
+            using_gpu: false,
             overlay_tx,
             audio_tx,
-            engine_tx,
+            engine_choice,
             node_list: Arc::new(std::sync::Mutex::new(vec![])),
         };
 
@@ -635,10 +610,9 @@ mod tests {
     /// only Nemotron is available and switching is hidden.
     #[test]
     fn menu_excludes_stt_engine_submenu() {
-        // Create channels for the test
-        let (overlay_tx, _overlay_rx) = std::sync::mpsc::channel();
+        let (overlay_tx, _overlay_rx) = async_channel::unbounded();
         let (audio_tx, _audio_rx) = std::sync::mpsc::sync_channel(1);
-        let (engine_tx, _engine_rx) = std::sync::mpsc::sync_channel(1);
+        let engine_choice = Arc::new(ArcSwap::from_pointee(Engine::Nemotron));
 
         let tray = TrayState {
             captions_enabled: Arc::new(AtomicBool::new(true)),
@@ -646,9 +620,10 @@ mod tests {
             overlay_mode: OverlayMode::Docked,
             locked: true,
             active_engine: Engine::Nemotron,
+            using_gpu: false,
             overlay_tx,
             audio_tx,
-            engine_tx,
+            engine_choice,
             node_list: Arc::new(std::sync::Mutex::new(vec![])),
         };
 

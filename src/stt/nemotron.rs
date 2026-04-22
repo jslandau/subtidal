@@ -40,10 +40,6 @@ impl NemotronEngine {
 }
 
 impl SttEngine for NemotronEngine {
-    fn sample_rate(&self) -> u32 {
-        16_000
-    }
-
     fn process_chunk(&mut self, pcm: &[f32]) -> Result<Option<String>> {
         self.chunk_buf.extend_from_slice(pcm);
 

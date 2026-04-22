@@ -62,6 +62,12 @@ ctrlc = "3"
 # Process exit without atexit handlers (avoids CUDA cleanup race)
 libc = "0.2"
 
+# Lock-free atomic swap for engine selection
+arc-swap = "1"
+
+# Async channels for glib main-loop consumption
+async-channel = "2"
+
 [profile.release]
 opt-level = 3
 lto = true

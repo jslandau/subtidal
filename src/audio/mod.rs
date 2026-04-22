@@ -63,18 +63,14 @@ const RING_BUF_CAPACITY: usize = 48_000 * 2;
 /// Exits the process if PipeWire is unavailable (AC1.5).
 pub fn start_audio_thread(
     initial_source: crate::config::AudioSource,
+    wake: Arc<crate::stt::AudioWake>,
 ) -> Result<(
     std::sync::mpsc::SyncSender<AudioCommand>,
     ringbuf::HeapCons<f32>,
     NodeList,
     std::sync::mpsc::Receiver<FallbackEvent>,
 )> {
-    // Initialize PipeWire library (must be called before any PW objects).
     pw::init();
-
-    // Test PipeWire availability by attempting to create a MainLoop.
-    // If this fails, PipeWire is unavailable (AC1.5).
-    // The actual MainLoop is created on the PipeWire thread below.
 
     let (ring_producer, ring_consumer) = HeapRb::<f32>::new(RING_BUF_CAPACITY).split();
     let ring_producer = Arc::new(Mutex::new(ring_producer));
@@ -86,6 +82,7 @@ pub fn start_audio_thread(
     let (fallback_tx, fallback_rx) = std::sync::mpsc::sync_channel::<FallbackEvent>(4);
 
     let ring_producer_thread = Arc::clone(&ring_producer);
+    let wake_for_thread = Arc::clone(&wake);
 
     thread::Builder::new()
         .name("pipewire-audio".to_string())
@@ -93,6 +90,7 @@ pub fn start_audio_thread(
             if let Err(e) = run_pipewire_loop(
                 initial_source,
                 ring_producer_thread,
+                wake_for_thread,
                 node_list_clone,
                 rx_cmd,
                 fallback_tx,
@@ -116,6 +114,7 @@ pub fn list_nodes(node_list: &NodeList) -> Vec<AudioNode> {
 fn run_pipewire_loop(
     initial_source: crate::config::AudioSource,
     ring_producer: Arc<Mutex<ringbuf::HeapProd<f32>>>,
+    wake: Arc<crate::stt::AudioWake>,
     node_list: NodeList,
     rx_cmd: std::sync::mpsc::Receiver<AudioCommand>,
     fallback_tx: std::sync::mpsc::SyncSender<FallbackEvent>,
@@ -176,7 +175,12 @@ fn run_pipewire_loop(
         .register();
 
     // Create the capture stream for the initial source.
-    let mut _capture = Some(create_capture_stream(&core, &initial_source, Arc::clone(&ring_producer))?);
+    let mut _capture = Some(create_capture_stream(
+        &core,
+        &initial_source,
+        Arc::clone(&ring_producer),
+        Arc::clone(&wake),
+    )?);
     let mut current_source = initial_source.clone(); // track for fallback check (AC1.4)
 
     // Poll for AudioCommands and run the PipeWire event loop.
@@ -192,7 +196,7 @@ fn run_pipewire_loop(
                 // Drop the current capture (stream and listener) to disconnect it from PipeWire.
                 _capture = None;
                 // Reconnect to the new source.
-                match create_capture_stream(&core, &new_source, Arc::clone(&ring_producer)) {
+                match create_capture_stream(&core, &new_source, Arc::clone(&ring_producer), Arc::clone(&wake)) {
                     Ok(c) => {
                         _capture = Some(c);
                         eprintln!("info: audio source switched to {:?}", new_source);
@@ -204,6 +208,7 @@ fn run_pipewire_loop(
                             &core,
                             &crate::config::AudioSource::SystemOutput,
                             Arc::clone(&ring_producer),
+                            Arc::clone(&wake),
                         ) {
                             Ok(c) => {
                                 _capture = Some(c);
@@ -259,7 +264,7 @@ fn run_pipewire_loop(
             // Perform reconnect outside the closure
             if should_reconnect {
                 _capture = None;
-                match create_capture_stream(&core, &crate::config::AudioSource::SystemOutput, Arc::clone(&ring_producer)) {
+                match create_capture_stream(&core, &crate::config::AudioSource::SystemOutput, Arc::clone(&ring_producer), Arc::clone(&wake)) {
                     Ok(s) => {
                         _capture = Some(s);
                     }
@@ -285,6 +290,7 @@ fn create_capture_stream<'a>(
     core: &'a pw::core::CoreRc,
     source: &crate::config::AudioSource,
     ring_producer: Arc<Mutex<ringbuf::HeapProd<f32>>>,
+    wake: Arc<crate::stt::AudioWake>,
 ) -> Result<CaptureStream<'a>> {
     use pw::spa::pod::Pod;
     use pw::spa::param::audio::{AudioFormat, AudioInfoRaw};
@@ -336,10 +342,12 @@ fn create_capture_stream<'a>(
     let mut params = [Pod::from_bytes(&values).context("creating SPA Pod")?];
 
     // Register the process callback (real-time — no allocation, no blocking).
-    let ring_producer_cb = Arc::clone(&ring_producer);
+    // User data is (ring_producer, wake) so the callback can signal the consumer
+    // after each push without holding extra state.
+    let cb_state = (Arc::clone(&ring_producer), Arc::clone(&wake));
     let _listener = stream
-        .add_local_listener_with_user_data(ring_producer_cb)
-        .process(|stream, ring_producer| {
+        .add_local_listener_with_user_data(cb_state)
+        .process(|stream, (ring_producer, wake)| {
             if let Some(mut buf) = stream.dequeue_buffer() {
                 let datas = buf.datas_mut();
                 if let Some(data) = datas.first_mut() {
@@ -348,11 +356,14 @@ fn create_capture_stream<'a>(
                     let size = chunk.size() as usize;
                     if let Some(bytes) = data.data() {
                         let float_bytes = &bytes[offset..offset + size];
-                        // Convert bytes to f32 slice (F32LE, native endian on x86).
                         let samples = bytemuck::cast_slice::<u8, f32>(float_bytes);
-                        // Push to ring buffer — never block in RT context.
+                        let mut pushed = false;
                         if let Ok(mut prod) = ring_producer.try_lock() {
-                            let _ = prod.push_slice(samples); // drop samples if ring full
+                            let n = prod.push_slice(samples);
+                            pushed = n > 0;
+                        }
+                        if pushed {
+                            wake.notify();
                         }
                     }
                 }

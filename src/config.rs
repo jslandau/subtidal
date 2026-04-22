@@ -180,6 +180,11 @@ pub struct Config {
     #[serde(default)]
     pub appearance: AppearanceConfig,
 
+    /// Seconds after captions are disabled before the model is unloaded from VRAM.
+    /// Set to 0 to never unload. Default: 300 (5 minutes).
+    #[serde(default = "default_vram_unload_secs")]
+    pub vram_unload_secs: u64,
+
     /// Path to config file, set by load_from(). Used by save().
     #[serde(skip)]
     pub config_file_path: Option<PathBuf>,
@@ -187,6 +192,10 @@ pub struct Config {
 
 fn default_locked() -> bool {
     true
+}
+
+fn default_vram_unload_secs() -> u64 {
+    300
 }
 
 impl Default for Config {
@@ -200,6 +209,7 @@ impl Default for Config {
             locked: true,
             dock_position: DockPosition::default(),
             appearance: AppearanceConfig::default(),
+            vram_unload_secs: default_vram_unload_secs(),
             config_file_path: None,
         }
     }
@@ -278,7 +288,7 @@ impl Config {
 /// causing a redundant but harmless reload cycle. The updates are idempotent,
 /// so this is accepted as a trade-off for simplicity.
 pub fn start_hot_reload(
-    overlay_tx: std::sync::mpsc::Sender<crate::overlay::OverlayCommand>,
+    overlay_tx: async_channel::Sender<crate::overlay::OverlayCommand>,
     tray_handle: ksni::Handle<crate::tray::TrayState>,
     tokio_handle: tokio::runtime::Handle,
 ) -> anyhow::Result<notify_debouncer_mini::Debouncer<notify::RecommendedWatcher>> {
@@ -309,7 +319,7 @@ pub fn start_hot_reload(
                         // commands, as CSS reloads and relayouts during a drag cause jitter.
                         if let Ok(mut prev) = prev_appearance.lock() {
                             if *prev != new_cfg.appearance {
-                                let _ = overlay_tx.send(
+                                let _ = overlay_tx.send_blocking(
                                     crate::overlay::OverlayCommand::UpdateAppearance(new_cfg.appearance.clone())
                                 );
                                 *prev = new_cfg.appearance.clone();
@@ -317,7 +327,7 @@ pub fn start_hot_reload(
                         }
                         if let Ok(mut prev) = prev_mode.lock() {
                             if *prev != new_cfg.overlay_mode {
-                                let _ = overlay_tx.send(
+                                let _ = overlay_tx.send_blocking(
                                     crate::overlay::OverlayCommand::SetMode(new_cfg.overlay_mode.clone())
                                 );
                                 *prev = new_cfg.overlay_mode.clone();
@@ -325,7 +335,7 @@ pub fn start_hot_reload(
                         }
                         if let Ok(mut prev) = prev_locked.lock() {
                             if *prev != new_cfg.locked {
-                                let _ = overlay_tx.send(
+                                let _ = overlay_tx.send_blocking(
                                     crate::overlay::OverlayCommand::SetLocked(new_cfg.locked)
                                 );
                                 *prev = new_cfg.locked;

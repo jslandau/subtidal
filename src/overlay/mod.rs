@@ -260,8 +260,8 @@ pub type CaptionsEnabled = Arc<AtomicBool>;
 /// - `captions_enabled`: shared bool for left-click tray toggle
 pub fn run_gtk_app(
     config: Config,
-    caption_rx: std::sync::mpsc::Receiver<String>,
-    cmd_rx: std::sync::mpsc::Receiver<OverlayCommand>,
+    caption_rx: async_channel::Receiver<String>,
+    cmd_rx: async_channel::Receiver<OverlayCommand>,
     captions_enabled: CaptionsEnabled,
 ) {
     let app = Application::builder()
@@ -272,91 +272,100 @@ pub fn run_gtk_app(
     let config_clone = Arc::clone(&config);
     let captions_enabled_clone = Arc::clone(&captions_enabled);
 
-    // Wrap channels in Arc so they can be shared with closures
-    let caption_rx = Arc::new(std::sync::Mutex::new(caption_rx));
-    let cmd_rx = Arc::new(std::sync::Mutex::new(cmd_rx));
+    // async-channel Receivers are Send + Clone; we move them into the activate
+    // closure and then into per-task futures. No Mutex needed.
+    let caption_rx_outer = std::sync::Mutex::new(Some(caption_rx));
+    let cmd_rx_outer = std::sync::Mutex::new(Some(cmd_rx));
 
     app.connect_activate(move |app| {
         let cfg = config_clone.lock().unwrap().clone();
         let window = build_overlay_window(app, &cfg);
 
-        // Apply initial appearance.
         apply_appearance(&cfg.appearance);
 
-        // Dragging flag: when true, suppress all GTK mutations except margin updates.
-        // Any relayout (caption text, CSS reload, widget resize) during a drag causes
-        // the compositor to momentarily reposition the layer-shell surface, producing jitter.
+        // Dragging flag: when true, suppress layout-changing mutations to avoid
+        // relayout jitter of the layer-shell surface.
         let is_dragging = Rc::new(Cell::new(false));
 
-        // Initial drag handler for floating + unlocked.
         if cfg.overlay_mode == OverlayMode::Floating && !cfg.locked {
             add_drag_handler(&window, &is_dragging);
         }
 
-        // Wire up caption receiver using glib timeout_add to poll.
         let label = find_caption_label(&window);
-        let window_clone = window.clone();
-        let enabled = Arc::clone(&captions_enabled_clone);
-        let caption_rx_clone = Arc::clone(&caption_rx);
-        let max_chars_per_line = estimate_max_chars(cfg.appearance.width, cfg.appearance.font_size, cfg.appearance.effective_char_width_fraction()) as usize;
+        let max_chars_per_line = estimate_max_chars(
+            cfg.appearance.width,
+            cfg.appearance.font_size,
+            cfg.appearance.effective_char_width_fraction(),
+        ) as usize;
         let caption_buffer = Rc::new(RefCell::new(CaptionBuffer::new(
             cfg.appearance.max_lines as usize,
             max_chars_per_line,
             cfg.appearance.effective_expire_secs(),
         )));
 
-        // Poll for new captions and append to buffer.
-        let buf_for_poll = Rc::clone(&caption_buffer);
-        let label_for_poll = label.clone();
-        let window_for_poll = window_clone.clone();
-        let dragging_for_caption = Rc::clone(&is_dragging);
-        glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-            if let Ok(rx) = caption_rx_clone.try_lock() {
-                let mut buf = buf_for_poll.borrow_mut();
-                while let Ok(text) = rx.try_recv() {
-                    if enabled.load(Ordering::Relaxed) {
-                        buf.push(text);
-                        if !dragging_for_caption.get() {
-                            label_for_poll.set_text(&buf.display_text());
-                            window_for_poll.set_visible(true);
-                        }
+        // connect_activate may fire more than once (e.g. on second instance
+        // activation). Pull the channels out the first time and no-op after.
+        let Some(caption_rx) = caption_rx_outer.lock().unwrap().take() else { return };
+        let Some(cmd_rx) = cmd_rx_outer.lock().unwrap().take() else { return };
+
+        // Caption consumer future — driven by the glib main context, wakes
+        // only when a caption arrives.
+        {
+            let buf = Rc::clone(&caption_buffer);
+            let label = label.clone();
+            let window = window.clone();
+            let enabled = Arc::clone(&captions_enabled_clone);
+            let dragging = Rc::clone(&is_dragging);
+            glib::MainContext::default().spawn_local(async move {
+                while let Ok(text) = caption_rx.recv().await {
+                    if !enabled.load(Ordering::Relaxed) {
+                        continue;
+                    }
+                    buf.borrow_mut().push(text);
+                    if !dragging.get() {
+                        label.set_text(&buf.borrow().display_text());
+                        window.set_visible(true);
                     }
                 }
-            }
-            glib::ControlFlow::Continue
-        });
+            });
+        }
 
-        // Timer to expire old caption lines every second.
-        let buf_for_expire = Rc::clone(&caption_buffer);
-        let label_for_expire = label.clone();
-        let dragging_for_expire = Rc::clone(&is_dragging);
-        glib::timeout_add_local(std::time::Duration::from_secs(1), move || {
-            if !dragging_for_expire.get() {
-                let mut buf = buf_for_expire.borrow_mut();
-                if buf.expire() {
-                    label_for_expire.set_text(&buf.display_text());
-                }
-            }
-            glib::ControlFlow::Continue
-        });
-
-        // Wire up command receiver using glib timeout_add to poll.
-        let window_clone2 = window.clone();
-        let config_for_cmd = Arc::clone(&config_clone);
-        let cmd_rx_clone = Arc::clone(&cmd_rx);
-        let dragging_for_cmd = Rc::clone(&is_dragging);
-        let buf_for_cmd = Rc::clone(&caption_buffer);
-
-        glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-            if let Ok(rx) = cmd_rx_clone.try_lock() {
-                while let Ok(cmd) = rx.try_recv() {
-                    if !dragging_for_cmd.get() {
-                        handle_overlay_command(&window_clone2, cmd, &config_for_cmd, &dragging_for_cmd, &buf_for_cmd);
+        // Expire timer — still a 1Hz tick since expiry is wall-clock-driven,
+        // not event-driven.
+        {
+            let buf = Rc::clone(&caption_buffer);
+            let label = label.clone();
+            let dragging = Rc::clone(&is_dragging);
+            glib::timeout_add_local(std::time::Duration::from_secs(1), move || {
+                if !dragging.get() {
+                    let mut b = buf.borrow_mut();
+                    if b.expire() {
+                        label.set_text(&b.display_text());
                     }
                 }
-            }
-            glib::ControlFlow::Continue
-        });
+                glib::ControlFlow::Continue
+            });
+        }
+
+        // Command consumer future. Quit and SetVisible bypass the drag-suppression
+        // gate; only layout-changing commands are deferred during a drag.
+        {
+            let window = window.clone();
+            let config = Arc::clone(&config_clone);
+            let dragging = Rc::clone(&is_dragging);
+            let buf = Rc::clone(&caption_buffer);
+            glib::MainContext::default().spawn_local(async move {
+                while let Ok(cmd) = cmd_rx.recv().await {
+                    let bypass_drag = matches!(
+                        cmd,
+                        OverlayCommand::Quit | OverlayCommand::SetVisible(_)
+                    );
+                    if bypass_drag || !dragging.get() {
+                        handle_overlay_command(&window, cmd, &config, &dragging, &buf);
+                    }
+                }
+            });
+        }
 
         window.present();
     });

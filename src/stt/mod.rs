@@ -1,84 +1,240 @@
-//! STT engine abstraction and inference thread management.
+//! STT engine abstraction and the combined audio-resample-inference thread.
 
 pub mod nemotron;
 
 use anyhow::Result;
+use arc_swap::ArcSwap;
 use ort::ep::ExecutionProvider as _;
 use ort::ep::CUDA;
-use std::sync::mpsc;
+use ringbuf::HeapCons;
+use ringbuf::traits::Consumer;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
+
+use crate::audio::resampler::AudioResampler;
+use crate::config::Engine;
 
 /// Trait implemented by all STT backends.
-///
-/// Both methods are called from the inference thread. Implementors must be `Send + 'static`.
 pub trait SttEngine: Send + 'static {
-    /// The sample rate this engine expects. Both engines return 16000.
-    /// Note: Currently unused but will be used in future phases for runtime validation.
-    #[allow(dead_code)]
-    fn sample_rate(&self) -> u32;
-
-    /// Process one 160ms chunk of 16kHz mono PCM.
-    ///
-    /// Returns `Ok(Some(text))` when a complete utterance has been recognized,
-    /// `Ok(None)` when more audio is needed, or an error if inference failed
-    /// (caller should log and skip the chunk).
     fn process_chunk(&mut self, pcm: &[f32]) -> Result<Option<String>>;
 }
 
-/// Spawn the inference thread.
+/// Cross-thread wake primitive: the PipeWire RT callback calls `notify()` after
+/// pushing to the ring buffer; the STT consumer thread calls `wait_timeout()`.
 ///
-/// Parameters:
-/// - `engine`: boxed SttEngine (Nemotron via parakeet-rs)
-/// - `audio_rx`: receives 160ms chunks from the audio processing thread
-/// - `caption_tx`: sends recognized text to the GTK4 main thread
+/// `data_ready` is the boolean predicate the Condvar protects; the RT side sets
+/// it with SeqCst and signals without holding the mutex (a missed wakeup is
+/// harmless because the consumer re-checks the flag on every timeout).
+pub struct AudioWake {
+    data_ready: AtomicBool,
+    shutdown: AtomicBool,
+    mutex: Mutex<()>,
+    condvar: Condvar,
+}
+
+impl AudioWake {
+    pub fn new() -> Self {
+        Self {
+            data_ready: AtomicBool::new(false),
+            shutdown: AtomicBool::new(false),
+            mutex: Mutex::new(()),
+            condvar: Condvar::new(),
+        }
+    }
+
+    /// Called from the PipeWire real-time callback. Sets the ready flag and
+    /// signals the consumer. Does not lock the mutex (notify_one is safe to call
+    /// without holding it; the consumer's timeout closes the missed-wakeup race).
+    #[inline]
+    pub fn notify(&self) {
+        self.data_ready.store(true, Ordering::Release);
+        self.condvar.notify_one();
+    }
+
+    pub fn shutdown(&self) {
+        self.shutdown.store(true, Ordering::Release);
+        self.condvar.notify_all();
+    }
+
+    pub fn is_shutdown(&self) -> bool {
+        self.shutdown.load(Ordering::Acquire)
+    }
+
+    /// Wait for data or timeout. Returns true if data was signalled, false on timeout.
+    /// On return, `data_ready` is cleared so the caller should drain whatever is
+    /// available.
+    fn wait_timeout(&self, timeout: Duration) -> bool {
+        if self.data_ready.swap(false, Ordering::AcqRel) {
+            return true;
+        }
+        let guard = self.mutex.lock().unwrap();
+        let (_guard, _wait_result) = self
+            .condvar
+            .wait_timeout_while(guard, timeout, |_| {
+                !self.data_ready.load(Ordering::Acquire) && !self.shutdown.load(Ordering::Acquire)
+            })
+            .unwrap();
+        self.data_ready.swap(false, Ordering::AcqRel)
+    }
+}
+
+/// Parameters for the combined STT pipeline thread.
+pub struct PipelineConfig {
+    pub engine_choice: Arc<ArcSwap<Engine>>,
+    pub captions_enabled: Arc<AtomicBool>,
+    pub unload_after: Option<Duration>,
+    pub model_dir: std::path::PathBuf,
+    pub use_cuda: bool,
+}
+
+/// Spawn the combined audio→resample→inference thread.
 ///
-/// Returns the thread JoinHandle for clean shutdown.
-pub fn spawn_inference_thread(
-    mut engine: Box<dyn SttEngine>,
-    audio_rx: mpsc::Receiver<Vec<f32>>,
-    caption_tx: mpsc::SyncSender<String>,
+/// Replaces the old pair (bridge thread + inference thread) and their channel.
+/// Reads directly from the ring buffer, resamples, dispatches to the current
+/// engine (read lock-free via `ArcSwap`), and sends recognised text via
+/// `async-channel` to the GTK main loop.
+///
+/// Engine swap is handled by swapping the `ArcSwap<Engine>` from the tray; this
+/// thread notices on each chunk boundary and rebuilds its local engine.
+pub fn spawn_stt_thread(
+    mut ring_consumer: HeapCons<f32>,
+    wake: Arc<AudioWake>,
+    caption_tx: async_channel::Sender<String>,
+    cfg: PipelineConfig,
 ) -> thread::JoinHandle<()> {
     thread::Builder::new()
-        .name("stt-inference".to_string())
+        .name("stt-pipeline".to_string())
         .spawn(move || {
-            for chunk in audio_rx.iter() {
-                match engine.process_chunk(&chunk) {
-                    Ok(Some(text)) if !text.trim().is_empty() => {
-                        if caption_tx.send(text).is_err() {
-                            break; // receiver dropped — shutdown
+            let mut resampler = match AudioResampler::new() {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("error: failed to create resampler: {e:#}");
+                    return;
+                }
+            };
+
+            // Local engine + tracking of the engine choice it was built from.
+            let mut engine: Option<Box<dyn SttEngine>> = None;
+            let mut engine_built_for: Option<Engine> = None;
+            let mut disabled_since: Option<Instant> = None;
+
+            // Scratch buffer for ring drain; sized generously so one wake typically
+            // drains all pending audio in a single pop.
+            let mut raw = vec![0f32; 8192];
+
+            loop {
+                if wake.is_shutdown() {
+                    break;
+                }
+
+                // Block until data arrives or we timeout (timeout needed so we can
+                // observe shutdown, captions-disabled VRAM unload, and engine swaps
+                // even when audio stops).
+                wake.wait_timeout(Duration::from_millis(250));
+
+                if wake.is_shutdown() {
+                    break;
+                }
+
+                // Drain all currently-available samples in a tight inner loop —
+                // one wake can correspond to many ring pushes.
+                loop {
+                    let n = ring_consumer.pop_slice(&mut raw);
+                    if n == 0 {
+                        break;
+                    }
+
+                    if !cfg.captions_enabled.load(Ordering::Relaxed) {
+                        // Model stays loaded; we just discard audio.
+                        continue;
+                    }
+
+                    let chunks = match resampler.push_interleaved(&raw[..n]) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            eprintln!("warn: resampler error: {e}");
+                            continue;
+                        }
+                    };
+                    if chunks.is_empty() {
+                        continue;
+                    }
+
+                    // Rebuild engine if the tray asked for a different one, or
+                    // if we're reloading after a VRAM unload.
+                    let desired = Engine::clone(&cfg.engine_choice.load());
+                    let needs_rebuild =
+                        engine.is_none() || engine_built_for.as_ref() != Some(&desired);
+                    if needs_rebuild {
+                        eprintln!("info: (re)loading STT engine: {desired:?}");
+                        match build_engine(&desired, &cfg.model_dir, cfg.use_cuda) {
+                            Ok(e) => {
+                                engine = Some(e);
+                                engine_built_for = Some(desired);
+                            }
+                            Err(err) => {
+                                eprintln!("warn: failed to build STT engine: {err:#}");
+                                // Try again on next wake; avoid a tight retry.
+                                continue;
+                            }
                         }
                     }
-                    Ok(Some(_)) | Ok(None) => {} // no output yet
-                    Err(e) => {
-                        eprintln!("warn: inference error (skipping chunk): {e}");
+
+                    let e = engine.as_mut().unwrap();
+                    disabled_since = None;
+
+                    for chunk in chunks {
+                        match e.process_chunk(&chunk) {
+                            Ok(Some(text)) if !text.trim().is_empty() => {
+                                // async-channel unbounded send never blocks; only
+                                // fails if the receiver was dropped (shutdown).
+                                if caption_tx.try_send(text).is_err() {
+                                    return;
+                                }
+                            }
+                            Ok(_) => {}
+                            Err(err) => {
+                                eprintln!("warn: inference error (skipping chunk): {err}");
+                            }
+                        }
+                    }
+                }
+
+                // Idle: maybe unload the engine to free VRAM.
+                if let Some(unload_dur) = cfg.unload_after.filter(|d| !d.is_zero()) {
+                    if cfg.captions_enabled.load(Ordering::Relaxed) {
+                        disabled_since = None;
+                    } else {
+                        let since = disabled_since.get_or_insert_with(Instant::now);
+                        if since.elapsed() >= unload_dur && engine.is_some() {
+                            eprintln!(
+                                "info: unloading STT engine from VRAM after {}s idle",
+                                unload_dur.as_secs()
+                            );
+                            engine = None;
+                            engine_built_for = None;
+                        }
                     }
                 }
             }
         })
-        .expect("spawning inference thread")
+        .expect("spawning stt-pipeline thread")
 }
 
-/// Restart the inference thread with a new engine.
-/// Drops the old chunk_rx (causing the old thread to exit when its sender is replaced).
-/// Returns new chunk_tx for the audio bridge thread.
-pub fn restart_inference_thread(
-    engine: Box<dyn SttEngine>,
-    caption_tx: mpsc::SyncSender<String>,
-) -> (mpsc::SyncSender<Vec<f32>>, thread::JoinHandle<()>) {
-    let (chunk_tx, chunk_rx) = mpsc::sync_channel::<Vec<f32>>(32);
-    let handle = spawn_inference_thread(engine, chunk_rx, caption_tx);
-    (chunk_tx, handle)
+fn build_engine(
+    choice: &Engine,
+    model_dir: &std::path::Path,
+    use_cuda: bool,
+) -> Result<Box<dyn SttEngine>> {
+    match choice {
+        Engine::Nemotron => Ok(Box::new(nemotron::NemotronEngine::new(model_dir, use_cuda)?)),
+    }
 }
 
 /// Detect CUDA usability by loading the model with CUDA in a subprocess.
-///
-/// The ort CUDA provider can segfault during dlopen or session creation if there's
-/// a version mismatch between the provider .so and the system CUDA libraries. By
-/// doing the full model load in a subprocess, we ensure that if CUDA causes a
-/// segfault at any point (probe, session creation, or kernel load), the parent
-/// process survives and falls back to CPU.
-///
-/// Returns true only if the child process exits successfully with a "cuda:ok" signal.
+/// See the comment in `run_cuda_probe` for why this is a subprocess.
 pub fn cuda_available(model_dir: &std::path::Path) -> bool {
     use std::io::Read as _;
     use std::process::{Command, Stdio};
@@ -109,10 +265,9 @@ pub fn cuda_available(model_dir: &std::path::Path) -> bool {
     }
 }
 
-/// Called when __SUBTIDAL_CUDA_PROBE env var is set.
-/// Attempts to load the Nemotron model with CUDA EP, prints "cuda:ok" on success,
-/// then exits. If this segfaults at any stage (EP probe, session creation, kernel
-/// load), the parent process sees a non-zero/signal exit and falls back to CPU.
+/// Called when `__SUBTIDAL_CUDA_PROBE` env var is set. Attempts to load the
+/// Nemotron model with CUDA; prints "cuda:ok" on success, then `_exit`s so
+/// the ORT/CUDA destructors don't run (they can hang or crash).
 pub fn run_cuda_probe() -> ! {
     use std::io::Write as _;
 
@@ -124,12 +279,13 @@ pub fn run_cuda_probe() -> ! {
     if let Some(model_dir) = std::env::var_os("__SUBTIDAL_CUDA_PROBE_MODEL_DIR") {
         let config = parakeet_rs::ExecutionConfig::new()
             .with_execution_provider(parakeet_rs::ExecutionProvider::Cuda);
-        let loaded = parakeet_rs::Nemotron::from_pretrained(std::path::Path::new(&model_dir), Some(config));
+        let loaded = parakeet_rs::Nemotron::from_pretrained(
+            std::path::Path::new(&model_dir),
+            Some(config),
+        );
         if loaded.is_err() {
             unsafe { libc::_exit(1) };
         }
-        // Signal success BEFORE the model is dropped — CUDA destructors can hang
-        // or crash during cleanup, and we must not let that race eat our stdout write.
         let _ = std::io::stdout().write_all(b"cuda:ok");
         let _ = std::io::stdout().flush();
         std::mem::forget(loaded);
@@ -144,83 +300,42 @@ pub fn run_cuda_probe() -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::mpsc;
-
-    struct MockEngine {
-        responses: Vec<Option<String>>,
-        call_index: usize,
-    }
-
-    impl SttEngine for MockEngine {
-        fn sample_rate(&self) -> u32 { 16_000 }
-        fn process_chunk(&mut self, _pcm: &[f32]) -> Result<Option<String>> {
-            let resp = self.responses.get(self.call_index).cloned().flatten();
-            self.call_index += 1;
-            Ok(resp)
-        }
-    }
 
     #[test]
-    fn inference_thread_forwards_recognized_text() {
-        let engine = Box::new(MockEngine {
-            responses: vec![Some("hello world".to_string())],
-            call_index: 0,
+    fn audio_wake_notify_wakes_waiter() {
+        let w = Arc::new(AudioWake::new());
+        let w2 = Arc::clone(&w);
+        let handle = thread::spawn(move || {
+            let start = Instant::now();
+            w2.wait_timeout(Duration::from_secs(2));
+            start.elapsed()
         });
-        let (chunk_tx, chunk_rx) = mpsc::sync_channel(4);
-        let (caption_tx, caption_rx) = mpsc::sync_channel(4);
-        let _handle = spawn_inference_thread(engine, chunk_rx, caption_tx);
-        chunk_tx.send(vec![0.0f32; 2560]).unwrap();
-        drop(chunk_tx);
-        let received: Vec<String> = caption_rx.iter().collect();
-        assert_eq!(received, vec!["hello world"]);
+        thread::sleep(Duration::from_millis(50));
+        w.notify();
+        let elapsed = handle.join().unwrap();
+        assert!(elapsed < Duration::from_millis(500), "wait should return promptly on notify");
     }
 
     #[test]
-    fn inference_thread_suppresses_none_responses() {
-        let engine = Box::new(MockEngine {
-            responses: vec![None, Some("world".to_string())],
-            call_index: 0,
+    fn audio_wake_notify_before_wait_is_not_lost() {
+        let w = AudioWake::new();
+        w.notify();
+        let start = Instant::now();
+        let got = w.wait_timeout(Duration::from_secs(2));
+        assert!(got, "wait should see prior notify");
+        assert!(start.elapsed() < Duration::from_millis(100));
+    }
+
+    #[test]
+    fn audio_wake_shutdown_wakes_waiter() {
+        let w = Arc::new(AudioWake::new());
+        let w2 = Arc::clone(&w);
+        let handle = thread::spawn(move || {
+            w2.wait_timeout(Duration::from_secs(2));
         });
-        let (chunk_tx, chunk_rx) = mpsc::sync_channel(4);
-        let (caption_tx, caption_rx) = mpsc::sync_channel(4);
-        let _handle = spawn_inference_thread(engine, chunk_rx, caption_tx);
-        chunk_tx.send(vec![0.0f32; 2560]).unwrap(); // None
-        chunk_tx.send(vec![0.0f32; 2560]).unwrap(); // Some("world")
-        drop(chunk_tx);
-        let received: Vec<String> = caption_rx.iter().collect();
-        assert_eq!(received, vec!["world"]);
-    }
-
-    #[test]
-    fn inference_thread_suppresses_whitespace_only_text() {
-        let engine = Box::new(MockEngine {
-            responses: vec![Some("   ".to_string()), Some("hi".to_string())],
-            call_index: 0,
-        });
-        let (chunk_tx, chunk_rx) = mpsc::sync_channel(4);
-        let (caption_tx, caption_rx) = mpsc::sync_channel(4);
-        let _handle = spawn_inference_thread(engine, chunk_rx, caption_tx);
-        chunk_tx.send(vec![0.0f32; 2560]).unwrap(); // whitespace only
-        chunk_tx.send(vec![0.0f32; 2560]).unwrap(); // "hi"
-        drop(chunk_tx);
-        let received: Vec<String> = caption_rx.iter().collect();
-        assert_eq!(received, vec!["hi"]);
-    }
-
-    /// AC5.3: CUDA probe subprocess returns a bool without crashing the parent.
-    ///
-    /// Note: This test spawns the release binary (not the test binary) as a subprocess.
-    /// The test binary doesn't have the probe entry point, so we can't test the
-    /// subprocess mechanism in unit tests. Integration testing requires the full binary.
-    #[test]
-    fn cuda_probe_returns_bool_without_crashing() {
-        // cuda_available() spawns the main binary as a subprocess.
-        // In the test environment, current_exe() returns the test runner,
-        // which doesn't have the __SUBTIDAL_CUDA_PROBE handler — so it will
-        // return false (child exits without printing "cuda:ok").
-        // We just verify the parent doesn't crash or hang.
-        let result = cuda_available(std::path::Path::new("/nonexistent"));
-        // Result depends on system — we only verify the parent survived.
-        let _ = result;
+        thread::sleep(Duration::from_millis(50));
+        w.shutdown();
+        handle.join().unwrap();
+        assert!(w.is_shutdown());
     }
 }

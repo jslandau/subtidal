@@ -2,7 +2,7 @@
 
 Real-time speech-to-text overlay for Linux/Wayland.
 
-Freshness: 2026-02-27
+Freshness: 2026-04-22
 
 ## Purpose
 
@@ -16,7 +16,7 @@ config.rs         — TOML config with hot-reload (notify/debouncer)
 models/mod.rs     — HuggingFace model download (hf-hub + tokio)
 audio/mod.rs      — PipeWire capture thread, node enumeration, source switching
 audio/resampler.rs — rubato 48kHz stereo -> 16kHz mono resampler
-stt/mod.rs        — SttEngine trait + inference thread management
+stt/mod.rs        — SttEngine trait, AudioWake (condvar), combined STT pipeline thread
 stt/nemotron.rs   — Nemotron RNNT engine (ort + parakeet-rs, CUDA)
 overlay/mod.rs    — GTK4 layer-shell overlay window (docked/floating)
 overlay/input_region.rs — Wayland input region for click-through
@@ -25,21 +25,19 @@ tray/mod.rs       — ksni StatusNotifierItem system tray
 
 ## Thread Model
 
-Five long-lived threads communicate via typed channels:
+1. **Main/GTK thread** — GTK4 main loop. Consumes `async_channel::Receiver` for captions and overlay commands via `glib::MainContext::spawn_local` futures; no polling.
+2. **PipeWire thread** (`pipewire-audio`) — captures audio into the ring buffer and processes AudioCommand. After each successful push, calls `AudioWake::notify()`.
+3. **STT pipeline thread** (`stt-pipeline`) — blocks on `AudioWake::wait_timeout(250ms)`, drains the ring buffer, resamples via rubato, reads `ArcSwap<Engine>` to get the current engine choice, builds/rebuilds the engine as needed, runs `SttEngine::process_chunk`, sends captions via `async_channel::Sender`.
+4. **Tray thread** — ksni runs on the tokio runtime.
 
-1. **Main/GTK thread** — GTK4 main loop, polls caption_rx and cmd_rx via glib::timeout_add_local (100ms)
-2. **PipeWire thread** (`pipewire-audio`) — captures audio into ring buffer, processes AudioCommand
-3. **Audio bridge thread** — drains ring buffer, resamples via rubato, sends 160ms chunks to inference
-4. **Inference thread** (`stt-inference`) — runs SttEngine::process_chunk, sends caption strings
-5. **Engine switch thread** — listens for EngineCommand, atomically swaps chunk_tx in Arc<Mutex<>>
-
-The system tray runs on the tokio runtime (required by ksni).
+The old "audio bridge" and "engine switch" threads, and the `Arc<Mutex<SyncSender>>` sender-swap dance, are gone. Engine changes are a lock-free `ArcSwap::store` read at the next chunk boundary.
 
 ## Key Contracts
 
 - **SttEngine trait** (`stt/mod.rs`): `process_chunk(&mut self, pcm: &[f32]) -> Result<Option<String>>` — 160ms chunks of 16kHz mono f32 PCM. Returns Some(text) on recognized utterance, None when buffering.
-- **Audio pipeline**: PipeWire captures 48kHz stereo F32LE -> ring buffer -> resampler produces 16kHz mono -> 160ms (2560 sample) chunks to inference.
-- **Engine switching**: Arc<Mutex<SyncSender<Vec<f32>>>> is atomically replaced; old inference thread exits when its Receiver is dropped.
+- **Audio pipeline**: PipeWire captures 48kHz stereo F32LE -> ring buffer -> STT pipeline thread resamples to 16kHz mono -> 160ms (2560 sample) chunks fed directly into the engine. No inter-thread channel between resampler and engine.
+- **Audio wake**: `stt::AudioWake` is an `AtomicBool` + `Condvar` pair. RT callback calls `notify()` without holding any mutex; consumer uses `wait_timeout_while` with the flag as predicate. The timeout handles VRAM unload and shutdown observation when audio is silent.
+- **Engine switching**: `Arc<ArcSwap<Engine>>`. Tray calls `store()`, STT thread reads via `load()` on each chunk batch and rebuilds the engine if the choice changed. Only Nemotron is currently implemented.
 - **Config**: TOML at `~/.config/subtidal/config.toml`. Hot-reload only sends SetMode/SetLocked/UpdateAppearance when values actually changed (prevents drag feedback loop). Malformed TOML is warned and ignored.
 - **Models**: Downloaded from HuggingFace to `~/.local/share/subtidal/models/nemotron/`. Hardlinked from HF cache when possible.
 - **Nemotron engine**: 600M param RNNT model using parakeet-rs::Nemotron. Uses CUDA when available, falls back to CPU. Internally buffers 160ms chunks and emits results on 560ms boundaries.
