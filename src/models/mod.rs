@@ -1,6 +1,3 @@
-// Functions consumed by Phase 2+
-#![allow(dead_code)]
-
 use anyhow::{Context, Result};
 use std::path::Path;
 use std::path::PathBuf;
@@ -20,39 +17,9 @@ pub fn nemotron_model_dir() -> PathBuf {
     models_dir().join("nemotron")
 }
 
-/// Returns paths for the four Nemotron model files.
-/// Files: encoder.onnx, encoder.onnx.data, decoder_joint.onnx, tokenizer.model
-pub fn nemotron_model_files() -> [PathBuf; 4] {
-    let dir = nemotron_model_dir();
-    [
-        dir.join("encoder.onnx"),
-        dir.join("encoder.onnx.data"),
-        dir.join("decoder_joint.onnx"),
-        dir.join("tokenizer.model"),
-    ]
-}
-
-/// Returns true if all required Nemotron model files are present on disk in the given directory.
-pub fn nemotron_models_present_in(dir: &Path) -> bool {
-    let model_dir = dir.join("nemotron");
-    [
-        model_dir.join("encoder.onnx"),
-        model_dir.join("encoder.onnx.data"),
-        model_dir.join("decoder_joint.onnx"),
-        model_dir.join("tokenizer.model"),
-    ]
-    .iter()
-    .all(|p| p.exists())
-}
-
-/// Returns true if all required Nemotron model files are present on disk.
-pub fn nemotron_models_present() -> bool {
-    nemotron_models_present_in(&models_dir())
-}
-
 /// HuggingFace repo and file paths for the Nemotron streaming model.
-/// Repo: altunenes/parakeet-rs
-/// Subfolder: nemotron-speech-streaming-en-0.6b/
+/// Single source of truth: every other function that enumerates or checks for
+/// Nemotron model files derives from this list.
 const NEMOTRON_REPO: &str = "altunenes/parakeet-rs";
 const NEMOTRON_FILES: &[(&str, &str)] = &[
     ("nemotron-speech-streaming-en-0.6b/encoder.onnx", "encoder.onnx"),
@@ -60,6 +27,26 @@ const NEMOTRON_FILES: &[(&str, &str)] = &[
     ("nemotron-speech-streaming-en-0.6b/decoder_joint.onnx", "decoder_joint.onnx"),
     ("nemotron-speech-streaming-en-0.6b/tokenizer.model", "tokenizer.model"),
 ];
+
+/// Returns the local paths for every required Nemotron model file inside the
+/// given base models directory (i.e. the parent of the `nemotron/` subdir).
+pub fn nemotron_model_files_in(base_dir: &Path) -> Vec<PathBuf> {
+    let model_dir = base_dir.join("nemotron");
+    NEMOTRON_FILES
+        .iter()
+        .map(|(_, local)| model_dir.join(local))
+        .collect()
+}
+
+/// Returns true if all required Nemotron model files are present on disk in the given directory.
+pub fn nemotron_models_present_in(dir: &Path) -> bool {
+    nemotron_model_files_in(dir).iter().all(|p| p.exists())
+}
+
+/// Returns true if all required Nemotron model files are present on disk.
+pub fn nemotron_models_present() -> bool {
+    nemotron_models_present_in(&models_dir())
+}
 
 /// Download all Nemotron model files to `~/.local/share/subtidal/models/nemotron/`.
 /// Skips individual files that already exist.
@@ -125,13 +112,19 @@ mod tests {
     }
 
     #[test]
-    fn test_nemotron_model_files_have_correct_names() {
-        let files = nemotron_model_files();
-        assert_eq!(files.len(), 4);
-        assert!(files[0].ends_with("encoder.onnx"));
-        assert!(files[1].ends_with("encoder.onnx.data"));
-        assert!(files[2].ends_with("decoder_joint.onnx"));
-        assert!(files[3].ends_with("tokenizer.model"));
+    fn nemotron_model_files_match_required_set() {
+        let files = nemotron_model_files_in(Path::new("/base"));
+        let names: Vec<_> = files
+            .iter()
+            .map(|p| p.file_name().unwrap().to_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            ["encoder.onnx", "encoder.onnx.data", "decoder_joint.onnx", "tokenizer.model"]
+        );
+        for p in &files {
+            assert!(p.starts_with("/base/nemotron"));
+        }
     }
 
     #[test]

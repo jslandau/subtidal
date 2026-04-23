@@ -1,7 +1,5 @@
 //! PipeWire audio capture: stream setup, node enumeration, runtime source switching.
 
-#![allow(dead_code)]
-
 pub mod resampler;
 
 use anyhow::Context;
@@ -19,8 +17,6 @@ pub struct AudioNode {
     pub node_id: u32,
     pub name: String,
     pub description: String,
-    /// true = system sink/monitor; false = application output stream
-    pub is_monitor: bool,
 }
 
 /// Commands sent to the PipeWire thread for runtime control.
@@ -41,11 +37,13 @@ pub struct FallbackEvent {
 pub type NodeList = Arc<Mutex<Vec<AudioNode>>>;
 
 /// Wrapper holding both the PipeWire stream and its associated listener.
-/// Ensures both are dropped together when the stream is switched or disconnected,
-/// preventing listener memory leaks.
+/// Both fields exist solely to keep their objects alive for this struct's lifetime
+/// so dropping the wrapper disconnects cleanly; the listener would leak otherwise.
 struct CaptureStream<'a> {
+    #[allow(dead_code)]
     stream: pw::stream::StreamBox<'a>,
-    _listener: Box<dyn std::any::Any>,
+    #[allow(dead_code)]
+    listener: Box<dyn std::any::Any>,
 }
 
 /// Ring buffer capacity: 1 second of 48kHz stereo f32 samples.
@@ -104,12 +102,6 @@ pub fn start_audio_thread(
     Ok((tx_cmd, ring_consumer, node_list, fallback_rx))
 }
 
-/// Enumerate available audio nodes from the shared node list.
-/// Called by the tray to build the audio source submenu.
-pub fn list_nodes(node_list: &NodeList) -> Vec<AudioNode> {
-    node_list.lock().unwrap().clone()
-}
-
 /// Main PipeWire event loop (runs on dedicated thread).
 fn run_pipewire_loop(
     initial_source: crate::config::AudioSource,
@@ -156,7 +148,6 @@ fn run_pipewire_loop(
                         node_id: global.id,
                         name: node_name,
                         description,
-                        is_monitor,
                     };
                     node_list_registry.lock().unwrap().push(node);
                 }
@@ -386,7 +377,7 @@ fn create_capture_stream<'a>(
     // Return both stream and listener wrapped together to ensure proper cleanup.
     Ok(CaptureStream {
         stream,
-        _listener: Box::new(_listener),
+        listener: Box::new(_listener),
     })
 }
 

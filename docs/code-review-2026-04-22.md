@@ -9,11 +9,7 @@ Collapsed the bridge+inference threads into a single `stt-pipeline` thread drive
 by a condvar wake from the PipeWire RT callback; replaced the mpsc polling on the
 GTK side with `async_channel` + `glib::MainContext::spawn_local`.
 
-Fixed outright: **#1, #2, #7, #13, #19**.
-Partially fixed: **#4** (per-chunk channel allocation gone; internal rubato
-adapter churn remains), **#11** (coordination machinery deleted; enum + CLI
-alias retained), **#16** (`SttEngine::sample_rate` deleted; module-level
-allow-dead-code remains).
+Fixed outright: **#1, #2, #4, #7, #11, #13, #16, #19**.
 
 Remaining open: **#3, #5, #6, #8, #9, #10, #12, #14, #15, #17, #18, #20**.
 
@@ -33,7 +29,7 @@ Status: open.
 
 ### 4. `AudioResampler::push_interleaved` allocates heavily per chunk — `src/audio/resampler.rs:55-112`
 Per 160ms chunk: `drain().collect()`, two channel `Vec`s, two output `Vec`s, `Vec<Vec<f32>>` wrappers, two adapters, another `drain().collect()` per output chunk. ~8 allocations per 160ms tick.
-Status: **partially fixed (2026-04-22)** — per-chunk delivery allocation gone; internal rubato adapter churn remains.
+Status: **fixed (2026-04-22)** — all working buffers (input accumulator, deinterleaved channel vecs, rubato output vecs) are now owned fields on `AudioResampler`, pre-sized at construction and reused via `clear()`/in-place indexing. Input draining replaced with index-based consume + one trailing `drain(..consumed)`. Return type changed from `Vec<Vec<f32>>` to a `FnMut(&[f32])` callback so produced chunks are handed off by slice reference with no heap allocation at the boundary. The only remaining per-call allocations are the two `SequentialSliceOfVecs` adapter structs, which are stack-sized views over the owned vecs.
 
 ### 5. `CaptionBuffer::remove_overlap` byte-slices lowercased strings — `src/overlay/mod.rs:172-192`
 `to_lowercase()` can change byte length (ß→ss, İ→i̇); indexing across the original/lowercase boundary is unsound for non-ASCII. Latent because Nemotron is English-only.
@@ -63,7 +59,7 @@ Status: open.
 
 ### 11. `Engine` enum has one variant but full polymorphic plumbing
 Parser accepts both "nemotron" and "parakeet" → same variant; engine switch channel, handle retention vec, restart machinery all for one engine.
-Status: **partially fixed (2026-04-22)** — coordination machinery deleted as part of collapse. The enum itself and CLI alias are retained for future Parakeet reintroduction, but at near-zero ongoing cost.
+Status: **fixed (2026-04-22)** — the costly coordination machinery was deleted in the earlier collapse. The enum, CLI alias, `parse_engine`, `ArcSwap<Engine>`, and `build_engine` dispatch are intentionally retained as the seam for adding Parakeet/Whisper/etc.; their ongoing cost is negligible and they're now load-bearing scaffolding rather than cruft.
 
 ### 12. Config TOML write race
 Multiple writers: hot-reload, tray, drag-end save, fallback handler. Writes are mostly idempotent but no serialization. Mitigated by debouncer "only send on change" logic.
@@ -85,7 +81,7 @@ Status: open.
 
 ### 16. `#![allow(dead_code)]` + per-method `#[allow(dead_code)]` on `SttEngine::sample_rate` with "future phases" comment
 If unused now, delete. `git` remembers.
-Status: **partially fixed (2026-04-22)** — `sample_rate()` deleted from the trait and its impl. The module-level `#![allow(dead_code)]` in `audio/mod.rs` and `models/mod.rs` remains.
+Status: **fixed (2026-04-22)** — module-level `#![allow(dead_code)]` removed from `audio/mod.rs` and `models/mod.rs`. Fallout deleted: `AudioNode::is_monitor` (written, never read), `list_nodes`, `AudioResampler::flush`. Instead of deleting `nemotron_model_files`, the three-way filename duplication (`NEMOTRON_FILES`, the presence check, and the getter) was consolidated: `NEMOTRON_FILES` is now the single source of truth and `nemotron_model_files_in` / `nemotron_models_present_in` both derive from it. `CaptureStream::stream`/`listener` retain targeted `#[allow(dead_code)]` with a comment explaining they exist for their Drop only.
 
 ### 17. Tests over-cover trivia
 `test_models_dir_is_valid_path`, `cuda_status_message_when_available`, etc. The `CaptionBuffer` tests are genuinely valuable; the AC-prefixed tests could be collapsed.

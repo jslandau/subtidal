@@ -151,19 +151,9 @@ pub fn spawn_stt_thread(
                         continue;
                     }
 
-                    let chunks = match resampler.push_interleaved(&raw[..n]) {
-                        Ok(c) => c,
-                        Err(e) => {
-                            eprintln!("warn: resampler error: {e}");
-                            continue;
-                        }
-                    };
-                    if chunks.is_empty() {
-                        continue;
-                    }
-
                     // Rebuild engine if the tray asked for a different one, or
-                    // if we're reloading after a VRAM unload.
+                    // if we're reloading after a VRAM unload. We do this before
+                    // resampling so the closure has a live engine to call into.
                     let desired = Engine::clone(&cfg.engine_choice.load());
                     let needs_rebuild =
                         engine.is_none() || engine_built_for.as_ref() != Some(&desired);
@@ -176,7 +166,6 @@ pub fn spawn_stt_thread(
                             }
                             Err(err) => {
                                 eprintln!("warn: failed to build STT engine: {err:#}");
-                                // Try again on next wake; avoid a tight retry.
                                 continue;
                             }
                         }
@@ -185,13 +174,17 @@ pub fn spawn_stt_thread(
                     let e = engine.as_mut().unwrap();
                     disabled_since = None;
 
-                    for chunk in chunks {
-                        match e.process_chunk(&chunk) {
+                    // Track whether the caption receiver has dropped so we can exit
+                    // the thread cleanly after the current resampler call returns.
+                    let mut receiver_dropped = false;
+                    let push_result = resampler.push_interleaved(&raw[..n], |chunk| {
+                        if receiver_dropped {
+                            return;
+                        }
+                        match e.process_chunk(chunk) {
                             Ok(Some(text)) if !text.trim().is_empty() => {
-                                // async-channel unbounded send never blocks; only
-                                // fails if the receiver was dropped (shutdown).
                                 if caption_tx.try_send(text).is_err() {
-                                    return;
+                                    receiver_dropped = true;
                                 }
                             }
                             Ok(_) => {}
@@ -199,6 +192,12 @@ pub fn spawn_stt_thread(
                                 eprintln!("warn: inference error (skipping chunk): {err}");
                             }
                         }
+                    });
+                    if let Err(err) = push_result {
+                        eprintln!("warn: resampler error: {err}");
+                    }
+                    if receiver_dropped {
+                        return;
                     }
                 }
 
