@@ -18,7 +18,10 @@ audio/mod.rs      — PipeWire capture thread, node enumeration, source switchin
 audio/resampler.rs — rubato 48kHz stereo -> 16kHz mono resampler
 stt/mod.rs        — SttEngine trait, AudioWake (condvar), combined STT pipeline thread
 stt/nemotron.rs   — Nemotron RNNT engine (ort + parakeet-rs, CUDA)
-overlay/mod.rs    — GTK4 layer-shell overlay window (docked/floating)
+overlay/mod.rs    — overlay orchestration, OverlayCommand dispatch, run_gtk_app public API
+overlay/window.rs — GTK4 layer-shell window construction (docked/floating), CSS, caption label
+overlay/drag.rs   — floating-mode drag gesture with compositor-quirk coordinate compensation
+overlay/caption_buffer.rs — pure text buffer: line-fill, overlap dedup, expiry (GTK-free, well-tested)
 overlay/input_region.rs — Wayland input region for click-through
 tray/mod.rs       — ksni StatusNotifierItem system tray
 ```
