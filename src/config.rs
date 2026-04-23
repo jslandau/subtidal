@@ -272,8 +272,30 @@ impl Config {
                 .with_context(|| format!("creating config dir {}", parent.display()))?;
         }
         let text = toml::to_string_pretty(self).context("serializing config")?;
-        std::fs::write(&path, text)
-            .with_context(|| format!("writing config to {}", path.display()))?;
+
+        // Atomic write: serialize to `{path}.tmp.{pid}` then rename. On POSIX,
+        // rename within the same filesystem is atomic — readers (the hot-reload
+        // debouncer) either see the old file or the fully-written new file,
+        // never a truncated one. PID-suffixed tmp keeps concurrent writers from
+        // clobbering each other's tmp file before the rename.
+        let tmp_path = {
+            let fname = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("config");
+            let mut p = path.clone();
+            p.set_file_name(format!(".{}.tmp.{}", fname, std::process::id()));
+            p
+        };
+        std::fs::write(&tmp_path, text)
+            .with_context(|| format!("writing config tmp {}", tmp_path.display()))?;
+        std::fs::rename(&tmp_path, &path).with_context(|| {
+            format!(
+                "renaming {} -> {}",
+                tmp_path.display(),
+                path.display()
+            )
+        })?;
         Ok(())
     }
 }
