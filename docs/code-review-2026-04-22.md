@@ -9,9 +9,9 @@ Collapsed the bridge+inference threads into a single `stt-pipeline` thread drive
 by a condvar wake from the PipeWire RT callback; replaced the mpsc polling on the
 GTK side with `async_channel` + `glib::MainContext::spawn_local`.
 
-Fixed outright: **#1, #2, #4, #7, #11, #13, #16, #19**.
+Fixed outright: **#1, #2, #3, #4, #7, #11, #13, #16, #19**.
 
-Remaining open: **#3, #5, #6, #8, #9, #10, #12, #14, #15, #17, #18, #20**.
+Remaining open: **#5, #6, #8, #9, #10, #12, #14, #15, #17, #18, #20**.
 
 
 ## Correctness bugs / latent problems
@@ -25,7 +25,7 @@ Status: **fixed (2026-04-22)** — obviated by collapse; engine swap is a local 
 
 ### 3. Disappeared-node cleanup uses `try_lock` and silently skips — `src/audio/mod.rs:230-251`
 If contended, the whole disappearance-event cleanup is deferred to next iteration. Works in practice but brittle.
-Status: open.
+Status: **fixed (2026-04-22)** — `Arc<Mutex<Vec<u32>>>` swapped for `Rc<RefCell<Vec<u32>>>`. Producer (`global_remove` closure) and consumer (post-iterate sweep) both run on the pipewire-audio thread between mainloop iterations, so same-thread interior mutability is the structurally correct primitive. `add_listener_local`'s bound is `Fn + 'static` without `Send`, so the `!Send` `Rc`/`RefCell` captures cleanly; `disappeared_node_ids` is created inside the spawned thread and never crosses a thread boundary. Consumer now drains into a stack-local `Vec` before touching `node_list` (which is itself a `Mutex`), keeping the `RefCell` borrow scope minimal. Skip-on-contention is gone; an accidental double-borrow would panic loudly instead of silently dropping disappearance events.
 
 ### 4. `AudioResampler::push_interleaved` allocates heavily per chunk — `src/audio/resampler.rs:55-112`
 Per 160ms chunk: `drain().collect()`, two channel `Vec`s, two output `Vec`s, `Vec<Vec<f32>>` wrappers, two adapters, another `drain().collect()` per output chunk. ~8 allocations per 160ms tick.

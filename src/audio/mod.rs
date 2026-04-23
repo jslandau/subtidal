@@ -8,6 +8,8 @@ use pipewire as pw;
 use pw::properties::properties;
 use ringbuf::HeapRb;
 use ringbuf::traits::{Producer, Split};
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -121,8 +123,11 @@ fn run_pipewire_loop(
         .context("getting PipeWire Registry")?;
 
     // Collect disappeared node IDs from the registry global_remove callback.
-    // Phase 8's NodeDisappeared handler reads this list in the command loop below.
-    let disappeared_node_ids: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
+    // Both producer (global_remove closure, called during mainloop.iterate())
+    // and consumer (post-iterate sweep below) run on this thread, so Rc<RefCell>
+    // is the right primitive — Mutex/try_lock silently skipped the whole sweep
+    // under (impossible) contention.
+    let disappeared_node_ids: Rc<RefCell<Vec<u32>>> = Rc::new(RefCell::new(Vec::new()));
 
     // Listen for node additions/removals to populate node_list.
     let node_list_registry = Arc::clone(&node_list);
@@ -158,9 +163,9 @@ fn run_pipewire_loop(
             // We use an Arc<Mutex<Vec<u32>>> to collect disappeared node IDs
             // so the registry closure (which runs during mainloop.iterate()) can
             // communicate with the command-processing loop below without a second channel.
-            let disappeared_ids = Arc::clone(&disappeared_node_ids);
+            let disappeared_ids = Rc::clone(&disappeared_node_ids);
             move |id| {
-                disappeared_ids.lock().unwrap().push(id);
+                disappeared_ids.borrow_mut().push(id);
             }
         })
         .register();
@@ -217,39 +222,36 @@ fn run_pipewire_loop(
             Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
         }
 
-        // Phase 8: Drain disappeared nodes and check for fallback (AC1.4).
+        // Drain disappeared nodes and check for fallback.
         {
             let mut should_reconnect = false;
             let mut lost_name = String::new();
             let mut lost_id = 0u32;
 
-            if let Ok(mut ids) = disappeared_node_ids.try_lock() {
-                ids.retain(|&id| {
-                    // Remove from node list so tray doesn't show stale entries.
-                    node_list.lock().unwrap().retain(|n| n.node_id != id);
+            // Drain into a small stack-local so we release the RefCell borrow
+            // before touching node_list (which is a separate Mutex) and before
+            // mutating current_source.
+            let drained: Vec<u32> = disappeared_node_ids.borrow_mut().drain(..).collect();
+            for id in drained {
+                // Remove from node list so tray doesn't show stale entries.
+                node_list.lock().unwrap().retain(|n| n.node_id != id);
 
-                    // Check if this is our currently captured application node.
-                    // Use reference pattern (&current_source) instead of cloning to avoid
-                    // allocating on every disappeared node in the loop.
-                    if let crate::config::AudioSource::Application { node_id: active_id, ref node_name } =
-                        &current_source
-                    {
-                        if *active_id == id {
-                            eprintln!(
-                                "warn: audio node {id} ({node_name}) disappeared — falling back to system output"
-                            );
-                            should_reconnect = true;
-                            lost_name = node_name.clone();
-                            lost_id = *active_id;
-                        }
+                if let crate::config::AudioSource::Application { node_id: active_id, ref node_name } =
+                    &current_source
+                {
+                    if *active_id == id {
+                        eprintln!(
+                            "warn: audio node {id} ({node_name}) disappeared — falling back to system output"
+                        );
+                        should_reconnect = true;
+                        lost_name = node_name.clone();
+                        lost_id = *active_id;
                     }
-                    false // remove from ids list
-                });
-
-                // Update current_source after the retain closure to avoid borrow conflicts.
-                if should_reconnect {
-                    current_source = crate::config::AudioSource::SystemOutput;
                 }
+            }
+
+            if should_reconnect {
+                current_source = crate::config::AudioSource::SystemOutput;
             }
 
             // Perform reconnect outside the closure
