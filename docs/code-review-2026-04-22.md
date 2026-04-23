@@ -9,9 +9,9 @@ Collapsed the bridge+inference threads into a single `stt-pipeline` thread drive
 by a condvar wake from the PipeWire RT callback; replaced the mpsc polling on the
 GTK side with `async_channel` + `glib::MainContext::spawn_local`.
 
-Fixed outright: **#1, #2, #3, #4, #7, #11, #13, #16, #19**.
+Fixed outright: **#1, #2, #3, #4, #7, #10, #11, #13, #16, #19**.
 
-Remaining open: **#5, #6, #8, #9, #10, #12, #14, #15, #17, #18, #20**.
+Remaining open: **#5, #6, #8, #9, #12, #14, #15, #17, #18, #20**.
 
 
 ## Correctness bugs / latent problems
@@ -55,7 +55,7 @@ Status: open.
 
 ### 10. `overlay/mod.rs` is 1176 lines, mixes four concerns
 `CaptionBuffer` (pure, ~200 lines, well-tested) should live in its own module. Drag handler with compositor-quirk compensation too.
-Status: open.
+Status: **fixed (2026-04-22)** — split into four submodules along dependency-boundary lines: `caption_buffer.rs` (pure std, 200 lines of logic + 350 of tests), `drag.rs` (GTK + compositor-quirk compensation, 128 lines), `window.rs` (GTK + layer-shell construction/styling, 266 lines), and `mod.rs` (239 lines of orchestration, command dispatch, and public API). Pure movement; no behavior changes. Tests travelled with their modules: CaptionBuffer tests to `caption_buffer.rs`, CSS + `estimate_max_chars` tests to `window.rs`. `mod.rs` dropped from 1185 → 239 lines.
 
 ### 11. `Engine` enum has one variant but full polymorphic plumbing
 Parser accepts both "nemotron" and "parakeet" → same variant; engine switch channel, handle retention vec, restart machinery all for one engine.
