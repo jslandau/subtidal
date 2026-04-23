@@ -124,34 +124,26 @@ fn ensure_provider_libs_next_to_exe() {
     }
 }
 
-/// Scan ~/.cache/ort.pyke.io/dfbin/ for the most recent provider directory.
+/// Locate this binary's ORT provider dir inside `~/.cache/ort.pyke.io/dfbin/`.
+///
+/// Keys on the exact `dist.hash` that `build.rs` embedded into the binary —
+/// not mtime — so a stale sibling build of a different ORT version can't be
+/// picked up and cause ABI mismatch. If the build-time hash is unavailable
+/// (e.g. built without ORT_PROVIDER_LIB_DIR resolution), returns None and lets
+/// the other layers of `find_provider_dir` handle it.
 fn find_ort_cache_dir() -> Option<std::path::PathBuf> {
+    let expected_hash = option_env!("ORT_DIST_HASH")?;
     let cache_dir = dirs::cache_dir()?.join("ort.pyke.io/dfbin");
     if !cache_dir.is_dir() {
         return None;
     }
-    // Find architecture subdirs, then find hash dirs with CUDA provider
-    let mut best: Option<(std::path::PathBuf, std::time::SystemTime)> = None;
     for arch_entry in std::fs::read_dir(&cache_dir).ok()?.flatten() {
-        let arch_path = arch_entry.path();
-        if !arch_path.is_dir() {
-            continue;
-        }
-        for hash_entry in std::fs::read_dir(&arch_path).ok().into_iter().flatten().flatten() {
-            let hash_path = hash_entry.path();
-            let provider = hash_path.join("libonnxruntime_providers_cuda.so");
-            if provider.exists() {
-                if let Ok(meta) = provider.metadata() {
-                    if let Ok(modified) = meta.modified() {
-                        if best.as_ref().map_or(true, |(_, t)| modified > *t) {
-                            best = Some((hash_path, modified));
-                        }
-                    }
-                }
-            }
+        let candidate = arch_entry.path().join(expected_hash);
+        if candidate.join("libonnxruntime_providers_cuda.so").exists() {
+            return Some(candidate);
         }
     }
-    best.map(|(p, _)| p)
+    None
 }
 
 /// ORT's `GetRuntimePath` locates provider .so files relative to argv[0]'s parent

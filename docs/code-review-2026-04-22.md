@@ -49,7 +49,7 @@ Status: open.
 
 ### 9. `find_ort_cache_dir` picks by mtime, not ORT version
 Stale cache dirs can be picked over the correct one.
-Status: open.
+Status: **fixed (2026-04-22)** — `build.rs` now extracts the final path component of `ORT_PROVIDER_LIB_DIR` (which is ort-sys's `dist.hash` — the content hash of the upstream prebuilt tarball for this target+feature set) and emits it as `cargo:rustc-env=ORT_DIST_HASH`. The runtime scan in `src/main.rs::find_ort_cache_dir` no longer walks by mtime; it directly looks up `{cache}/{arch}/{ORT_DIST_HASH}/`. A sibling build of a different ORT version can no longer be picked. Layers 1 (next-to-exe) and 2 (`ORT_PROVIDER_LIB_DIR`) are unchanged; layer 3 retains its "binary moved, build tree gone, cache survived" rescue role but only for the exact build hash.
 
 ## Architecture / design
 
@@ -63,7 +63,7 @@ Status: **fixed (2026-04-22)** — the costly coordination machinery was deleted
 
 ### 12. Config TOML write race
 Multiple writers: hot-reload, tray, drag-end save, fallback handler. Writes are mostly idempotent but no serialization. Mitigated by debouncer "only send on change" logic.
-Status: open.
+Status: **fixed (2026-04-22)** — `Config::save` now writes to `.{filename}.tmp.{pid}` and `rename`s into place. On POSIX same-filesystem rename is atomic, so hot-reload readers can no longer observe a truncated TOML (closes race 2). PID-suffixed tmp keeps concurrent writers from clobbering each other's tmp file before the rename. Race 1 (two load-mutate-save sequences interleaving) is reduced to last-writer-wins on disjoint fields, which is acceptable given the hot-reload debouncer re-syncs on the next disk change; full `Arc<Mutex<Config>>` restructure deferred per user direction.
 
 ### 13. GTK polls two mpsc channels every 100ms via `Arc<Mutex<Receiver>>`
 `Mutex` around single-thread receiver is unnecessary. Should use glib async channels.

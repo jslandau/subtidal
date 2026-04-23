@@ -13,6 +13,13 @@ fn main() {
     let ort_lib_dir = find_ort_provider_dir(&out_dir);
     if let Some(dir) = ort_lib_dir {
         println!("cargo:rustc-env=ORT_PROVIDER_LIB_DIR={}", dir.display());
+        // The final path component of ORT_PROVIDER_LIB_DIR is ort-sys's `dist.hash`
+        // (content hash of the upstream prebuilt tarball for this target+features).
+        // Embedding it lets the runtime cache scan match the *exact* distribution
+        // this binary was linked against, rather than guessing by mtime.
+        if let Some(hash) = dir.file_name().and_then(|s| s.to_str()) {
+            println!("cargo:rustc-env=ORT_DIST_HASH={}", hash);
+        }
     }
 }
 
