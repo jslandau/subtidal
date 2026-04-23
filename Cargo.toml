@@ -1,6 +1,6 @@
 [package]
 name = "subtidal"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 description = "Real-time speech-to-text overlay for Linux/Wayland"
 license = "MIT"
