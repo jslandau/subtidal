@@ -38,8 +38,9 @@ pub enum OverlayCommand {
     #[allow(dead_code)]
     SetCaption(String),
     /// Enable or disable caption emission. On the disable edge the overlay
-    /// will (in Phase 6) clear all caption surfaces; for now the placeholder
-    /// arm just mirrors the AtomicBool stored in `CaptionsEnabled`.
+    /// clears all four caption surfaces (TranscriptLog, transcript view's
+    /// TextBuffer, CaptionBuffer, overlay label). On the enable edge no
+    /// action is needed — the prior disable already cleared everything.
     SetCaptionsEnabled(bool),
     /// Quit the application cleanly (sent by tray Quit and SIGTERM handler).
     Quit,
