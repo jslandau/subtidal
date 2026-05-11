@@ -35,7 +35,7 @@
 - [ ] **AC3.5** — Press Ctrl+A in the transcript window, then Ctrl+C. Paste into a text editor. Confirm the full transcript text (all paragraphs) is on the clipboard.
 - [ ] **AC4.5** — Switch back to Docked via tray. Confirm layer-shell overlay reappears with live line-fill display.
 - [ ] **AC4.6 (history across switches)** — Perform the sequence: Docked → Transcript → Floating → Transcript → Docked → Transcript. After each return to Transcript, confirm all accumulated captions are still present, with no truncation or duplication.
-- [ ] **AC4 (hot-reload)** — While running in Docked mode, open `~/.config/subtidal/config.toml` in an editor, change `overlay_mode = "docked"` to `overlay_mode = "transcript"`, and save. Within ~250 ms confirm the layer-shell overlay disappears and the transcript window opens. Change back to `"docked"` and save; confirm the reverse. Both directions work.
+- [ ] **AC4 (hot-reload)** — While running in Docked mode, open `~/.config/subtidal/config.toml` in an editor, change `overlay_mode = "docked"` to `overlay_mode = "transcript"`, and save. The hot-reload watcher debounces at 500 ms; wait ~1 s before judging. Confirm the layer-shell overlay disappears and the transcript window opens. Change back to `"docked"` and save; confirm the reverse. Both directions work. Note: editors that save atomically (vim, helix, VS Code) write a temp file and rename over the target, which detaches `notify`'s inode-based watch; nano and gedit write in place and are reliable. If hot-reload appears stuck, restart the app — this is a pre-existing watcher limitation, not a feature regression.
 
 ---
 
