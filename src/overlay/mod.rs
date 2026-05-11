@@ -3,6 +3,7 @@
 mod caption_buffer;
 mod drag;
 mod transcript_log;
+mod transcript_window;
 mod window;
 
 pub mod input_region;
