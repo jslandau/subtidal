@@ -25,6 +25,13 @@ pub fn build_overlay_window(app: &Application, cfg: &Config) -> ApplicationWindo
     match cfg.overlay_mode {
         OverlayMode::Docked => configure_docked(&window, &cfg.screen_edge, &cfg.dock_position),
         OverlayMode::Floating => configure_floating(&window, cfg),
+        OverlayMode::Transcript => {
+            // Transcript mode hides the layer-shell overlay entirely; configure as
+            // docked so if the user switches back to Docked mid-session the surface
+            // is in a known good state. The window's visibility is gated separately
+            // by the activation closure in overlay/mod.rs.
+            configure_docked(&window, &cfg.screen_edge, &cfg.dock_position);
+        }
     }
 
     // Build caption label with wrapping.

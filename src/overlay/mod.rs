@@ -36,6 +36,10 @@ pub enum OverlayCommand {
     /// Update caption text (also sent as plain String via glib channel in normal flow).
     #[allow(dead_code)]
     SetCaption(String),
+    /// Enable or disable caption emission. On the disable edge the overlay
+    /// will (in Phase 6) clear all caption surfaces; for now the placeholder
+    /// arm just mirrors the AtomicBool stored in `CaptionsEnabled`.
+    SetCaptionsEnabled(bool),
     /// Quit the application cleanly (sent by tray Quit and SIGTERM handler).
     Quit,
 }
@@ -143,20 +147,28 @@ pub fn run_gtk_app(
             let config = Arc::clone(&config_clone);
             let dragging = Rc::clone(&is_dragging);
             let buf = Rc::clone(&caption_buffer);
+            let captions_enabled = Arc::clone(&captions_enabled_clone);
             glib::MainContext::default().spawn_local(async move {
                 while let Ok(cmd) = cmd_rx.recv().await {
                     let bypass_drag = matches!(
                         cmd,
-                        OverlayCommand::Quit | OverlayCommand::SetVisible(_)
+                        OverlayCommand::Quit
+                            | OverlayCommand::SetVisible(_)
+                            | OverlayCommand::SetCaptionsEnabled(_)
+                            | OverlayCommand::SetMode(_)
                     );
                     if bypass_drag || !dragging.get() {
-                        handle_overlay_command(&window, cmd, &config, &dragging, &buf);
+                        handle_overlay_command(&window, cmd, &config, &dragging, &buf, &captions_enabled);
                     }
                 }
             });
         }
 
-        window.present();
+        if cfg.overlay_mode == OverlayMode::Transcript {
+            window.set_visible(false);
+        } else {
+            window.present();
+        }
     });
 
     app.run_with_args::<&str>(&[]);
@@ -168,6 +180,7 @@ fn handle_overlay_command(
     config: &Arc<std::sync::Mutex<Config>>,
     is_dragging: &Rc<Cell<bool>>,
     caption_buffer: &Rc<RefCell<CaptionBuffer>>,
+    captions_enabled: &CaptionsEnabled,
 ) {
     match cmd {
         OverlayCommand::SetVisible(v) => window.set_visible(v),
@@ -204,6 +217,11 @@ fn handle_overlay_command(
                         add_drag_handler(window, is_dragging);
                     }
                 }
+                OverlayMode::Transcript => {
+                    // Phase 2 placeholder: hide the overlay window. The transcript
+                    // window is built and shown in Phase 4.
+                    window.set_visible(false);
+                }
             }
         }
         OverlayCommand::SetLocked(locked) => {
@@ -229,6 +247,11 @@ fn handle_overlay_command(
         OverlayCommand::SetCaption(text) => {
             let label = find_caption_label(window);
             label.set_text(&text);
+        }
+        OverlayCommand::SetCaptionsEnabled(enabled) => {
+            // Phase 2 placeholder: store the AtomicBool. Phase 6 expands this
+            // to also clear all caption surfaces on the disable edge.
+            captions_enabled.store(enabled, Ordering::Relaxed);
         }
         OverlayCommand::Quit => {
             // Quit the GTK4 application cleanly so all cleanup (Drop impls) runs.

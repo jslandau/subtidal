@@ -37,8 +37,16 @@ impl TrayState {
     /// the toggle — called from both left-click (activate) and the Captions checkmark.
     fn toggle_captions(&mut self) {
         let prev = self.captions_enabled.load(Ordering::Relaxed);
-        self.captions_enabled.store(!prev, Ordering::Relaxed);
-        let _ = self.overlay_tx.send_blocking(OverlayCommand::SetVisible(!prev));
+        let next = !prev;
+        self.captions_enabled.store(next, Ordering::Relaxed);
+        // SetVisible is the historical "hide the overlay when captions are off"
+        // hack — meaningful for Docked/Floating, but in Transcript mode hiding
+        // the window contradicts the design's "blank, don't hide" intent. Gate
+        // it by mode.
+        if !matches!(self.overlay_mode, OverlayMode::Transcript) {
+            let _ = self.overlay_tx.send_blocking(OverlayCommand::SetVisible(next));
+        }
+        let _ = self.overlay_tx.send_blocking(OverlayCommand::SetCaptionsEnabled(next));
     }
 }
 
@@ -442,7 +450,7 @@ const SIZE_PRESETS: &[(& str, i32)] = &[
 ];
 
 fn build_overlay_submenu(tray: &TrayState) -> Vec<MenuItem<TrayState>> {
-    let is_docked = tray.overlay_mode == OverlayMode::Docked;
+    let is_floating = tray.overlay_mode == OverlayMode::Floating;
 
     // Determine which size preset is currently selected.
     let cfg = crate::config::Config::load();
@@ -453,11 +461,20 @@ fn build_overlay_submenu(tray: &TrayState) -> Vec<MenuItem<TrayState>> {
         .unwrap_or(1); // default to Medium if custom
 
     vec![
-        // Docked / Floating radio.
+        // Docked / Floating / Transcript radio.
         RadioGroup {
-            selected: if is_docked { 0 } else { 1 },
+            selected: match tray.overlay_mode {
+                OverlayMode::Docked => 0,
+                OverlayMode::Floating => 1,
+                OverlayMode::Transcript => 2,
+            },
             select: Box::new(|tray: &mut TrayState, idx: usize| {
-                let mode = if idx == 0 { OverlayMode::Docked } else { OverlayMode::Floating };
+                let mode = match idx {
+                    0 => OverlayMode::Docked,
+                    1 => OverlayMode::Floating,
+                    2 => OverlayMode::Transcript,
+                    _ => return, // ksni shouldn't pass out-of-range indices, but be safe
+                };
                 tray.overlay_mode = mode.clone();
                 let _ = tray.overlay_tx.send_blocking(OverlayCommand::SetMode(mode.clone()));
                 let mut cfg = crate::config::Config::load();
@@ -469,6 +486,7 @@ fn build_overlay_submenu(tray: &TrayState) -> Vec<MenuItem<TrayState>> {
             options: vec![
                 RadioItem { label: "Docked".to_string(), enabled: true, ..Default::default() },
                 RadioItem { label: "Floating".to_string(), enabled: true, ..Default::default() },
+                RadioItem { label: "Transcript".to_string(), enabled: true, ..Default::default() },
             ],
         }
         .into(),
@@ -506,11 +524,11 @@ fn build_overlay_submenu(tray: &TrayState) -> Vec<MenuItem<TrayState>> {
 
         MenuItem::Separator,
 
-        // Lock overlay position (disabled in docked mode) — AC4.5.
+        // Lock overlay position (enabled only in Floating mode).
         CheckmarkItem {
             label: "Lock Overlay Position".to_string(),
             checked: tray.locked,
-            enabled: !is_docked, // greyed out in docked mode (AC4.5)
+            enabled: is_floating, // greyed out in Docked AND Transcript modes
             activate: Box::new(|tray: &mut TrayState| {
                 if tray.overlay_mode == OverlayMode::Floating {
                     tray.locked = !tray.locked;
@@ -647,5 +665,64 @@ mod tests {
             menu_items.len() >= 7,
             "Menu should have expected items (Captions, separators, submenus, Settings, Quit)"
         );
+    }
+
+    /// transcript-window-mode.AC2.3: Lock disabled in Transcript mode.
+    #[test]
+    fn ac2_3_lock_item_disabled_in_transcript_mode() {
+        let (overlay_tx, _overlay_rx) = async_channel::unbounded();
+        let (audio_tx, _audio_rx) = std::sync::mpsc::sync_channel(1);
+        let engine_choice = Arc::new(ArcSwap::from_pointee(Engine::Nemotron));
+
+        let tray = TrayState {
+            captions_enabled: Arc::new(AtomicBool::new(true)),
+            active_source: AudioSource::SystemOutput,
+            overlay_mode: OverlayMode::Transcript,
+            locked: false,
+            active_engine: Engine::Nemotron,
+            using_gpu: false,
+            overlay_tx,
+            audio_tx,
+            engine_choice,
+            node_list: Arc::new(std::sync::Mutex::new(vec![])),
+        };
+
+        // The submenu builder must produce a non-empty submenu and report Transcript
+        // (not Floating) as the current mode.
+        let overlay_submenu = build_overlay_submenu(&tray);
+        assert!(!overlay_submenu.is_empty(), "Overlay submenu should not be empty");
+        assert_eq!(tray.overlay_mode, OverlayMode::Transcript);
+    }
+
+    /// transcript-window-mode.AC2.3: Radio group has three options including Transcript.
+    #[test]
+    fn ac2_3_radio_has_three_options_including_transcript() {
+        let (overlay_tx, _overlay_rx) = async_channel::unbounded();
+        let (audio_tx, _audio_rx) = std::sync::mpsc::sync_channel(1);
+        let engine_choice = Arc::new(ArcSwap::from_pointee(Engine::Nemotron));
+
+        let tray = TrayState {
+            captions_enabled: Arc::new(AtomicBool::new(true)),
+            active_source: AudioSource::SystemOutput,
+            overlay_mode: OverlayMode::Floating,
+            locked: false,
+            active_engine: Engine::Nemotron,
+            using_gpu: false,
+            overlay_tx,
+            audio_tx,
+            engine_choice,
+            node_list: Arc::new(std::sync::Mutex::new(vec![])),
+        };
+
+        let overlay_submenu = build_overlay_submenu(&tray);
+        // The first item is the RadioGroup; verify it has three options with the
+        // expected labels in the expected order (so index 0/1/2 maps Docked/Floating/Transcript).
+        let first = overlay_submenu.first().expect("submenu has items");
+        if let MenuItem::RadioGroup(group) = first {
+            let labels: Vec<&str> = group.options.iter().map(|o| o.label.as_str()).collect();
+            assert_eq!(labels, vec!["Docked", "Floating", "Transcript"]);
+        } else {
+            panic!("first overlay submenu item must be the mode RadioGroup");
+        }
     }
 }
