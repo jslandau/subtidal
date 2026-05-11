@@ -33,6 +33,8 @@ pub enum OverlayMode {
     Docked,
     /// Freely positioned xdg_toplevel window.
     Floating,
+    /// Standard scrollable transcript window (not layer-shell).
+    Transcript,
 }
 
 /// Which screen edge the overlay is anchored to in docked mode.
@@ -550,6 +552,22 @@ mod tests {
             cfg.appearance.effective_expire_secs(),
             8,
             "effective_expire_secs() should return 8 for default value"
+        );
+    }
+
+    /// transcript-window-mode.AC2.4: Transcript variant round-trips through TOML.
+    #[test]
+    fn ac2_4_overlay_mode_transcript_round_trips_through_toml() {
+        let toml_input = r#"overlay_mode = "transcript""#;
+        #[derive(serde::Deserialize, serde::Serialize)]
+        struct Wrapper { overlay_mode: super::OverlayMode }
+        let w: Wrapper = toml::from_str(toml_input).expect("parse");
+        assert_eq!(w.overlay_mode, super::OverlayMode::Transcript);
+
+        let serialized = toml::to_string(&Wrapper { overlay_mode: super::OverlayMode::Transcript }).expect("serialize");
+        assert!(
+            serialized.contains(r#"overlay_mode = "transcript""#),
+            "expected serialized TOML to contain `overlay_mode = \"transcript\"`, got: {serialized}"
         );
     }
 }
