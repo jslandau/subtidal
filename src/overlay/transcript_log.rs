@@ -7,8 +7,6 @@
 //! tokens that signal word boundaries in RNNT output. This makes it a faithful audit log
 //! suitable for `.json` export and downstream processing.
 
-#![allow(dead_code)]
-
 use chrono::{DateTime, Local};
 use serde::Serialize;
 use std::time::Duration as StdDuration;
@@ -323,5 +321,21 @@ mod tests {
         let log = TranscriptLog::new(StdDuration::from_secs(2));
         let paras = log.paragraphs();
         assert!(paras.is_empty());
+    }
+
+    /// transcript-window-mode.AC4.6: TranscriptLog accumulates across simulated
+    /// mode-switch boundaries (purely a data-level test — the GTK side is exercised
+    /// manually).
+    #[test]
+    fn ac4_6_transcript_log_accumulates_across_simulated_mode_switches() {
+        let mut log = TranscriptLog::new(std::time::Duration::from_millis(1500));
+        let t0 = ts(1_700_000_000, 0);
+        log.push_at("hello".to_string(), t0);
+        log.push_at(" world".to_string(), t0 + chrono::Duration::milliseconds(200));
+        // simulate user toggling mode (no effect on the log itself)
+        log.push_at("again".to_string(), t0 + chrono::Duration::milliseconds(2000));
+        assert_eq!(log.fragments().len(), 3);
+        assert_eq!(log.paragraphs().len(), 2,
+            "second paragraph starts after >1.5s gap");
     }
 }

@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 //! Transcript GTK4 window: widget tree, autoscroll logic, and caption display.
 //!
 //! Handles the construction of a regular (non-layer-shell) ApplicationWindow containing

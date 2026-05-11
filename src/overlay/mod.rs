@@ -97,6 +97,41 @@ pub fn run_gtk_app(
             cfg.appearance.effective_expire_secs(),
         )));
 
+        // Transcript log: accumulates every recognized fragment from session start.
+        // Wrapped in Rc<RefCell<>> so the caption consumer (mutating push) and the
+        // command consumer (clear-on-disable in Phase 6) can share it on the GTK
+        // main thread without locking.
+        let transcript_log = Rc::new(RefCell::new(
+            crate::overlay::transcript_log::TranscriptLog::new(std::time::Duration::from_millis(1500))
+        ));
+
+        // Engine display name and session start: computed once at activation, both
+        // passed into the transcript window for use by the Save dialog (Phase 5).
+        //
+        // The explicit match (instead of `Display`/`Debug`) is intentional — when a
+        // future engine variant is added to `crate::config::Engine`, the Rust
+        // compiler will fail this match exhaustively, forcing the developer to
+        // pick a stable display string for the new engine. Using `format!("{:?}", cfg.engine)`
+        // would silently produce e.g. "Whisper" without thinking about JSON-stability.
+        let engine_name = match cfg.engine {
+            crate::config::Engine::Nemotron => "nemotron".to_string(),
+        };
+        let session_start = chrono::Local::now();
+
+        // Current overlay mode tracker — read by the caption and command consumers
+        // to route updates to the correct surface. OverlayMode derives Clone but not Copy;
+        // use Rc<RefCell<OverlayMode>> and borrow it for read.
+        let current_mode: Rc<RefCell<OverlayMode>> = Rc::new(RefCell::new(cfg.overlay_mode.clone()));
+
+        // Construct the transcript window (always built, initially hidden by the
+        // builder). Phase 5 wires the Save button.
+        let transcript_state = crate::overlay::transcript_window::build_transcript_window(
+            app,
+            Rc::clone(&transcript_log),
+            engine_name.clone(),
+            session_start,
+        );
+
         // connect_activate may fire more than once (e.g. on second instance
         // activation). Pull the channels out the first time and no-op after.
         let Some(caption_rx) = caption_rx_outer.lock().unwrap().take() else { return };
@@ -110,15 +145,36 @@ pub fn run_gtk_app(
             let window = window.clone();
             let enabled = Arc::clone(&captions_enabled_clone);
             let dragging = Rc::clone(&is_dragging);
+            let log = Rc::clone(&transcript_log);
+            let mode = Rc::clone(&current_mode);
+            let tstate = transcript_state.clone();
             glib::MainContext::default().spawn_local(async move {
                 while let Ok(text) = caption_rx.recv().await {
                     if !enabled.load(Ordering::Relaxed) {
                         continue;
                     }
-                    buf.borrow_mut().push(text);
-                    if !dragging.get() {
-                        label.set_text(&buf.borrow().display_text());
-                        window.set_visible(true);
+
+                    // Always: append to the durable transcript log AND to the transcript
+                    // window's TextBuffer (safe even while the window is hidden — GTK
+                    // queues layout updates and they materialize on .present()).
+                    let kind = log.borrow_mut().push(text.clone());
+                    let fragment = log
+                        .borrow()
+                        .fragments()
+                        .last()
+                        .cloned()
+                        .expect("just pushed a fragment");
+                    crate::overlay::transcript_window::append_fragment_to_view(&tstate, &fragment, kind);
+
+                    // Overlay surfaces (caption_buffer + label) only update when the
+                    // overlay is the active mode.
+                    let m = mode.borrow().clone();
+                    if matches!(m, OverlayMode::Docked | OverlayMode::Floating) {
+                        buf.borrow_mut().push(text);
+                        if !dragging.get() {
+                            label.set_text(&buf.borrow().display_text());
+                            window.set_visible(true);
+                        }
                     }
                 }
             });
@@ -149,6 +205,9 @@ pub fn run_gtk_app(
             let dragging = Rc::clone(&is_dragging);
             let buf = Rc::clone(&caption_buffer);
             let captions_enabled = Arc::clone(&captions_enabled_clone);
+            let mode = Rc::clone(&current_mode);
+            let tstate = transcript_state.clone();
+            let log = Rc::clone(&transcript_log);
             glib::MainContext::default().spawn_local(async move {
                 while let Ok(cmd) = cmd_rx.recv().await {
                     let bypass_drag = matches!(
@@ -159,16 +218,24 @@ pub fn run_gtk_app(
                             | OverlayCommand::SetMode(_)
                     );
                     if bypass_drag || !dragging.get() {
-                        handle_overlay_command(&window, cmd, &config, &dragging, &buf, &captions_enabled);
+                        handle_overlay_command(
+                            &window, cmd, &config, &dragging, &buf,
+                            &captions_enabled, &mode, &tstate, &log,
+                        );
                     }
                 }
             });
         }
 
-        if cfg.overlay_mode == OverlayMode::Transcript {
-            window.set_visible(false);
-        } else {
-            window.present();
+        match cfg.overlay_mode {
+            OverlayMode::Docked | OverlayMode::Floating => {
+                transcript_state.window.set_visible(false);
+                window.present();
+            }
+            OverlayMode::Transcript => {
+                window.set_visible(false);
+                transcript_state.window.present();
+            }
         }
     });
 
@@ -182,23 +249,44 @@ fn handle_overlay_command(
     is_dragging: &Rc<Cell<bool>>,
     caption_buffer: &Rc<RefCell<CaptionBuffer>>,
     captions_enabled: &CaptionsEnabled,
+    current_mode: &Rc<RefCell<OverlayMode>>,
+    transcript_state: &crate::overlay::transcript_window::TranscriptWindowState,
+    _transcript_log: &Rc<RefCell<crate::overlay::transcript_log::TranscriptLog>>,
 ) {
     match cmd {
-        OverlayCommand::SetVisible(v) => window.set_visible(v),
+        OverlayCommand::SetVisible(v) => {
+            // Route to whichever window is currently active.
+            let m = current_mode.borrow().clone();
+            match m {
+                OverlayMode::Docked | OverlayMode::Floating => window.set_visible(v),
+                OverlayMode::Transcript => transcript_state.window.set_visible(v),
+            }
+        }
         OverlayCommand::SetMode(mode) => {
-            // Reconfigure the existing layer-shell window for the new mode.
-            // gtk4-layer-shell allows changing anchors/keyboard mode on a realized window.
+            // Persist the new mode locally and in config.
+            //
+            // NOTE on dual-write (pre-existing pattern; do NOT "fix"): the tray's
+            // RadioGroup `select` closure ALREADY writes `cfg.overlay_mode` to disk
+            // via `cfg.save()` (see `src/tray/mod.rs:464-467`). This handler updates
+            // the in-memory `Arc<Mutex<Config>>` shared with the GTK side. The two
+            // stores eventually reconverge via the notify-debouncer-mini hot-reload
+            // watcher at `src/config.rs:312-365`. This dual-write is intentional
+            // and predates the transcript work; preserve it.
+            *current_mode.borrow_mut() = mode.clone();
             let mut cfg = config.lock().unwrap();
             cfg.overlay_mode = mode.clone();
             match mode {
                 OverlayMode::Docked => {
+                    transcript_state.window.set_visible(false);
                     for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
                         window.set_anchor(edge, false);
                     }
                     configure_docked(window, &cfg.screen_edge, &cfg.dock_position);
                     input_region::set_empty_input_region(window);
+                    window.set_visible(true);
                 }
                 OverlayMode::Floating => {
+                    transcript_state.window.set_visible(false);
                     for edge in [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right] {
                         window.set_anchor(edge, false);
                     }
@@ -217,15 +305,22 @@ fn handle_overlay_command(
                         input_region::clear_input_region(window);
                         add_drag_handler(window, is_dragging);
                     }
+                    window.set_visible(true);
                 }
                 OverlayMode::Transcript => {
-                    // Phase 2 placeholder: hide the overlay window. The transcript
-                    // window is built and shown in Phase 4.
                     window.set_visible(false);
+                    // present() raises the window above other toplevel windows
+                    // and is a no-op if it's already presented and visible.
+                    transcript_state.window.present();
                 }
             }
         }
         OverlayCommand::SetLocked(locked) => {
+            // No-op when in Transcript mode: lock controls only affect the
+            // floating layer-shell overlay.
+            if matches!(*current_mode.borrow(), OverlayMode::Transcript) {
+                return;
+            }
             if locked {
                 input_region::set_empty_input_region(window);
                 window.set_keyboard_mode(KeyboardMode::None);
@@ -236,26 +331,41 @@ fn handle_overlay_command(
             }
         }
         OverlayCommand::UpdateAppearance(appearance) => {
+            // No-op when in Transcript mode: appearance config applies to the
+            // overlay only (per design "explicitly out of scope").
+            if matches!(*current_mode.borrow(), OverlayMode::Transcript) {
+                return;
+            }
             apply_appearance(&appearance);
             let label = find_caption_label(window);
-            let max_chars = estimate_max_chars(appearance.width, appearance.font_size, appearance.effective_char_width_fraction());
+            let max_chars = estimate_max_chars(
+                appearance.width, appearance.font_size,
+                appearance.effective_char_width_fraction(),
+            );
             label.set_max_width_chars(max_chars);
             label.set_lines(appearance.max_lines as i32);
             window.set_width_request(appearance.width);
             let mut buf = caption_buffer.borrow_mut();
-            buf.update_config(appearance.max_lines as usize, max_chars as usize, appearance.effective_expire_secs());
+            buf.update_config(
+                appearance.max_lines as usize, max_chars as usize,
+                appearance.effective_expire_secs(),
+            );
         }
         OverlayCommand::SetCaption(text) => {
+            // SetCaption is a legacy command path (currently `#[allow(dead_code)]`)
+            // for direct overlay-label updates. It is NOT part of transcript
+            // routing — the transcript window is updated only by the caption
+            // consumer future via `append_fragment_to_view`. Leave SetCaption's
+            // behavior unchanged.
             let label = find_caption_label(window);
             label.set_text(&text);
         }
         OverlayCommand::SetCaptionsEnabled(enabled) => {
-            // Phase 2 placeholder: store the AtomicBool. Phase 6 expands this
-            // to also clear all caption surfaces on the disable edge.
+            // Phase 4: still the AtomicBool-only stub. Phase 6 expands this with
+            // the clear-on-disable side effects across all four caption surfaces.
             captions_enabled.store(enabled, Ordering::Relaxed);
         }
         OverlayCommand::Quit => {
-            // Quit the GTK4 application cleanly so all cleanup (Drop impls) runs.
             if let Some(app) = window.application() {
                 app.quit();
             }
