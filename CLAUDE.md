@@ -2,7 +2,7 @@
 
 Real-time speech-to-text overlay for Linux/Wayland.
 
-Freshness: 2026-04-22
+Freshness: 2026-05-11
 
 ## Purpose
 
@@ -23,6 +23,8 @@ overlay/window.rs — GTK4 layer-shell window construction (docked/floating), CS
 overlay/drag.rs   — floating-mode drag gesture with compositor-quirk coordinate compensation
 overlay/caption_buffer.rs — pure text buffer: line-fill, overlap dedup, expiry (GTK-free, well-tested)
 overlay/input_region.rs — Wayland input region for click-through
+overlay/transcript_log.rs   — pure data: timestamped fragments, paragraph coalescing, .json serialization (GTK-free, well-tested)
+overlay/transcript_window.rs — GTK4 toplevel window for transcript mode: scrollable TextView, autoscroll, Save dialog
 tray/mod.rs       — ksni StatusNotifierItem system tray
 ```
 
@@ -47,6 +49,7 @@ The old "audio bridge" and "engine switch" threads, and the `Arc<Mutex<SyncSende
 - **Caption display**: Line-fill model — text fills lines word-by-word up to a character limit (0.85× estimated max chars), then shifts oldest line off when all lines are full. During silence, lines expire one at a time after `expire_secs` (default 8s). Engine whitespace signals word boundaries: leading space = new word, no space = continuation of previous word. RNNT overlap deduplication is preserved.
 - **Overlay drag**: Uses accumulated offset tracking to compensate for layer-shell coordinate system shift. During drag, all GTK mutations (captions, CSS, commands) are suppressed via is_dragging flag to prevent relayout jitter.
 - **Audio source fallback**: When a captured PipeWire node disappears, automatically falls back to SystemOutput with desktop notification.
+- **Overlay modes**: Three modes — `Docked` and `Floating` use the gtk4-layer-shell overlay; `Transcript` uses a regular GTK toplevel window with append-only timestamped paragraphs. Both windows are constructed at startup and visibility-toggled by mode. Captions always append to `TranscriptLog` regardless of mode (mid-session switch reveals full history). On captions-disable edge, all four caption surfaces are cleared (TranscriptLog, transcript view, CaptionBuffer, overlay label).
 
 ## Dependencies (key crates)
 
