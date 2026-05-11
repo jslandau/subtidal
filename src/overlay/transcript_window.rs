@@ -161,6 +161,7 @@ pub fn append_fragment_to_view(
 }
 
 /// Clear all text from the transcript view.
+#[allow(dead_code)]
 pub fn clear_view(state: &TranscriptWindowState) {
     let (mut start, mut end) = (state.buffer.start_iter(), state.buffer.end_iter());
     state.buffer.delete(&mut start, &mut end);

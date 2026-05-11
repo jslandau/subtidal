@@ -28,6 +28,7 @@ pub enum AppendKind {
 /// A paragraph: a contiguous run of fragments within the silence threshold,
 /// timestamped at the first fragment of the run.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub struct Paragraph {
     pub timestamp: DateTime<Local>,
     pub text: String,
@@ -93,6 +94,7 @@ impl TranscriptLog {
     /// Walks fragments in order, splitting on the same gap rule as `push_at`.
     /// Each paragraph is timestamped at its first fragment and contains the verbatim
     /// concatenation of all fragment text in the run (no separators, preserving whitespace).
+    #[allow(dead_code)]
     pub fn paragraphs(&self) -> Vec<Paragraph> {
         if self.fragments.is_empty() {
             return Vec::new();
@@ -146,6 +148,7 @@ impl TranscriptLog {
     /// - `"session_start"`: RFC-3339 timestamp of session creation
     /// - `"engine"`: name of the STT engine (e.g., "nemotron")
     /// - `"fragments"`: array of `{timestamp, text}` objects for each fragment
+    #[allow(dead_code)]
     pub fn to_json(&self, engine_name: &str, session_start: DateTime<Local>) -> serde_json::Value {
         serde_json::json!({
             "session_start": session_start,
@@ -158,6 +161,7 @@ impl TranscriptLog {
     ///
     /// After `clear()`, `fragments()` returns an empty slice and the next `push()`
     /// returns `NewParagraph`.
+    #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.fragments.clear();
     }
