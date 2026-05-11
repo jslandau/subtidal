@@ -61,6 +61,8 @@ The old "audio bridge" and "engine switch" threads, and the `Arc<Mutex<SyncSende
 - ksni 0.3 — D-Bus StatusNotifierItem tray
 - hf-hub 0.5 — model download
 - notify 6 + notify-debouncer-mini 0.4 — config file watching
+- chrono 0.4 — timestamps for transcript fragments and Save filenames
+- serde_json 1 — transcript .json export sidecar
 
 ## Invariants
 
