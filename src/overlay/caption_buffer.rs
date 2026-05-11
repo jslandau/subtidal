@@ -204,6 +204,16 @@ impl CaptionBuffer {
         self.max_chars_per_line = max_chars_per_line;
         self.expire_secs = expire_secs;
     }
+
+    /// Reset all caption state, leaving configuration (max_lines, max_chars_per_line,
+    /// expire_secs) untouched. After `clear()`:
+    /// - `display_text()` returns the empty string.
+    /// - The next `push()` begins a fresh first line.
+    /// - The RNNT word-boundary deduplication state is reset.
+    pub fn clear(&mut self) {
+        self.lines.clear();
+        self.last_tail.clear();
+    }
 }
 
 #[cfg(test)]
@@ -555,5 +565,34 @@ mod tests {
         let display = buf.display_text();
         let lines: Vec<&str> = display.split('\n').collect();
         assert!(lines.len() >= 2, "New text should respect updated max_chars_per_line");
+    }
+
+    /// AC6.2: clear() resets lines and last_tail, allowing display_text to return empty string.
+    #[test]
+    fn ac6_2_clear_resets_lines_and_last_tail() {
+        let mut buf = CaptionBuffer::new(3, 40, 8);
+        buf.push("hello world".to_string());
+        buf.push(" goodnight".to_string());
+        assert!(!buf.display_text().is_empty(), "buffer should have content before clear");
+        buf.clear();
+        assert_eq!(buf.display_text(), "", "display_text should be empty after clear");
+    }
+
+    /// AC6.2: push after clear starts a fresh line with no prior content.
+    #[test]
+    fn ac6_2_push_after_clear_starts_fresh_line() {
+        let mut buf = CaptionBuffer::new(3, 40, 8);
+        buf.push("alpha bravo".to_string());
+        buf.clear();
+        buf.push("charlie".to_string());
+        let out = buf.display_text();
+        assert!(
+            out.contains("charlie"),
+            "post-clear push must appear in display_text; got: {out:?}"
+        );
+        assert!(
+            !out.contains("alpha") && !out.contains("bravo"),
+            "post-clear display_text must not contain pre-clear text; got: {out:?}"
+        );
     }
 }

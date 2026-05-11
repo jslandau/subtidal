@@ -158,7 +158,6 @@ impl TranscriptLog {
     ///
     /// After `clear()`, `fragments()` returns an empty slice and the next `push()`
     /// returns `NewParagraph`.
-    #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.fragments.clear();
     }

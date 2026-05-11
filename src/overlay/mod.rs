@@ -251,7 +251,7 @@ fn handle_overlay_command(
     captions_enabled: &CaptionsEnabled,
     current_mode: &Rc<RefCell<OverlayMode>>,
     transcript_state: &crate::overlay::transcript_window::TranscriptWindowState,
-    _transcript_log: &Rc<RefCell<crate::overlay::transcript_log::TranscriptLog>>,
+    transcript_log: &Rc<RefCell<crate::overlay::transcript_log::TranscriptLog>>,
 ) {
     match cmd {
         OverlayCommand::SetVisible(v) => {
@@ -361,9 +361,26 @@ fn handle_overlay_command(
             label.set_text(&text);
         }
         OverlayCommand::SetCaptionsEnabled(enabled) => {
-            // Phase 4: still the AtomicBool-only stub. Phase 6 expands this with
-            // the clear-on-disable side effects across all four caption surfaces.
+            // Update the AtomicBool first — the caption consumer future reads this
+            // and short-circuits when false. Setting it before clearing prevents any
+            // in-flight caption from being appended back into a buffer we just cleared.
             captions_enabled.store(enabled, Ordering::Relaxed);
+
+            if !enabled {
+                // Clear all four caption surfaces:
+                // 1. Durable transcript log.
+                transcript_log.borrow_mut().clear();
+                // 2. Transcript window's TextBuffer (visible even while hidden;
+                //    must be cleared so a future mode switch shows nothing).
+                crate::overlay::transcript_window::clear_view(transcript_state);
+                // 3. Overlay caption buffer (line-fill state).
+                caption_buffer.borrow_mut().clear();
+                // 4. Overlay caption label (the visible text in the layer-shell window).
+                let label = find_caption_label(window);
+                label.set_text("");
+            }
+            // On (true): no clearing — the prior disable already cleared everything,
+            // and there is no carryover state from a freshly re-enabled recognizer.
         }
         OverlayCommand::Quit => {
             if let Some(app) = window.application() {
