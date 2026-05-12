@@ -9,6 +9,7 @@ All processing happens locally — no cloud services, no network requests (excep
 - **STT engine**: Nemotron (GPU via CUDA, or CPU fallback) for real-time speech recognition
 - **Per-application audio capture** via PipeWire — caption any app, not just the mic
 - **Overlay modes**: docked (edge-anchored, click-through) or floating (draggable, resizable via tray)
+- **Transcript mode**: separate window, ordinary text, timestamped scrollable transcript
 - **System tray** for toggling captions, switching audio source/engine, adjusting overlay size
 - **Hot-reloadable config** at `~/.config/subtidal/config.toml`
 
