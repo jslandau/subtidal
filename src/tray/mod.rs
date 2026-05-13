@@ -17,6 +17,7 @@ pub struct TrayState {
     pub active_source: AudioSource,
     pub overlay_mode: OverlayMode,
     pub locked: bool,
+    pub above_fullscreen: bool,
     pub active_engine: Engine,
     pub using_gpu: bool,
     /// Channel to send OverlayCommand to the GTK4 main thread.
@@ -543,6 +544,31 @@ fn build_overlay_submenu(tray: &TrayState) -> Vec<MenuItem<TrayState>> {
             ..Default::default()
         }
         .into(),
+
+        // Show above fullscreen windows (wlr-layer-shell Overlay layer).
+        // Disabled in Transcript mode since that uses a regular toplevel,
+        // not a layer-shell surface.
+        CheckmarkItem {
+            label: "Show Above Fullscreen".to_string(),
+            checked: tray.above_fullscreen,
+            enabled: !matches!(tray.overlay_mode, OverlayMode::Transcript),
+            activate: Box::new(|tray: &mut TrayState| {
+                if matches!(tray.overlay_mode, OverlayMode::Transcript) {
+                    return;
+                }
+                tray.above_fullscreen = !tray.above_fullscreen;
+                let _ = tray.overlay_tx.send_blocking(
+                    OverlayCommand::SetAboveFullscreen(tray.above_fullscreen),
+                );
+                let mut cfg = crate::config::Config::load();
+                cfg.above_fullscreen = tray.above_fullscreen;
+                if let Err(e) = cfg.save() {
+                    eprintln!("warn: failed to save config: {e}");
+                }
+            }),
+            ..Default::default()
+        }
+        .into(),
     ]
 }
 
@@ -574,6 +600,7 @@ mod tests {
             active_source: AudioSource::SystemOutput,
             overlay_mode: OverlayMode::Docked,
             locked: false,
+            above_fullscreen: false,
             active_engine: Engine::Nemotron,
             using_gpu: false,
             overlay_tx,
@@ -606,6 +633,7 @@ mod tests {
             active_source: AudioSource::SystemOutput,
             overlay_mode: OverlayMode::Floating,
             locked: false,
+            above_fullscreen: false,
             active_engine: Engine::Nemotron,
             using_gpu: false,
             overlay_tx,
@@ -637,6 +665,7 @@ mod tests {
             active_source: AudioSource::SystemOutput,
             overlay_mode: OverlayMode::Docked,
             locked: true,
+            above_fullscreen: false,
             active_engine: Engine::Nemotron,
             using_gpu: false,
             overlay_tx,
@@ -679,6 +708,7 @@ mod tests {
             active_source: AudioSource::SystemOutput,
             overlay_mode: OverlayMode::Transcript,
             locked: false,
+            above_fullscreen: false,
             active_engine: Engine::Nemotron,
             using_gpu: false,
             overlay_tx,
@@ -706,6 +736,7 @@ mod tests {
             active_source: AudioSource::SystemOutput,
             overlay_mode: OverlayMode::Floating,
             locked: false,
+            above_fullscreen: false,
             active_engine: Engine::Nemotron,
             using_gpu: false,
             overlay_tx,

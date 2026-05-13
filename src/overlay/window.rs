@@ -19,7 +19,7 @@ pub fn build_overlay_window(app: &Application, cfg: &Config) -> ApplicationWindo
 
     // Initialize layer shell.
     window.init_layer_shell();
-    window.set_layer(Layer::Top);
+    window.set_layer(if cfg.above_fullscreen { Layer::Overlay } else { Layer::Top });
     window.set_exclusive_zone(0); // don't push other windows aside
 
     match cfg.overlay_mode {

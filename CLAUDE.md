@@ -2,7 +2,7 @@
 
 Real-time speech-to-text overlay for Linux/Wayland.
 
-Freshness: 2026-05-11
+Freshness: 2026-05-13
 
 ## Purpose
 
@@ -49,6 +49,7 @@ The old "audio bridge" and "engine switch" threads, and the `Arc<Mutex<SyncSende
 - **Caption display**: Line-fill model — text fills lines word-by-word up to a character limit (0.85× estimated max chars), then shifts oldest line off when all lines are full. During silence, lines expire one at a time after `expire_secs` (default 8s). Engine whitespace signals word boundaries: leading space = new word, no space = continuation of previous word. RNNT overlap deduplication is preserved.
 - **Overlay drag**: Uses accumulated offset tracking to compensate for layer-shell coordinate system shift. During drag, all GTK mutations (captions, CSS, commands) are suppressed via is_dragging flag to prevent relayout jitter.
 - **Audio source fallback**: When a captured PipeWire node disappears, automatically falls back to SystemOutput with desktop notification.
+- **Above-fullscreen toggle**: `config.above_fullscreen` (tray: "Show Above Fullscreen") selects `Layer::Overlay` vs `Layer::Top` for the layer-shell overlay. Overlay layer renders above compositor-fullscreened clients (e.g. browser video); Top does not. Live-applied via `OverlayCommand::SetAboveFullscreen` (no rebuild). No-op in Transcript mode (regular toplevel).
 - **Overlay modes**: Three modes — `Docked` and `Floating` use the gtk4-layer-shell overlay; `Transcript` uses a regular GTK toplevel window with append-only timestamped paragraphs. Both windows are constructed at startup and visibility-toggled by mode. Captions always append to `TranscriptLog` regardless of mode (mid-session switch reveals full history). On captions-disable edge, all four caption surfaces are cleared (TranscriptLog, transcript view, CaptionBuffer, overlay label).
 
 ## Dependencies (key crates)

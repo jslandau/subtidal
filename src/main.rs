@@ -321,6 +321,7 @@ fn main() {
         active_source: cfg.audio_source.clone(),
         overlay_mode: cfg.overlay_mode.clone(),
         locked: cfg.locked,
+        above_fullscreen: cfg.above_fullscreen,
         active_engine: cfg.engine.clone(),
         using_gpu: use_cuda,
         overlay_tx: cmd_tx.clone(),

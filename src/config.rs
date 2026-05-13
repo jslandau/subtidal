@@ -174,6 +174,11 @@ pub struct Config {
     #[serde(default = "default_locked")]
     pub locked: bool,
 
+    /// Whether the overlay should render above fullscreen windows
+    /// (uses wlr-layer-shell `Overlay` layer instead of `Top`).
+    #[serde(default)]
+    pub above_fullscreen: bool,
+
     /// Position of the overlay along the docked edge.
     #[serde(default)]
     pub dock_position: DockPosition,
@@ -209,6 +214,7 @@ impl Default for Config {
             screen_edge: ScreenEdge::default(),
             position: OverlayPosition::default(),
             locked: true,
+            above_fullscreen: false,
             dock_position: DockPosition::default(),
             appearance: AppearanceConfig::default(),
             vram_unload_secs: default_vram_unload_secs(),
@@ -330,6 +336,7 @@ pub fn start_hot_reload(
     let prev_appearance = std::sync::Mutex::new(initial_cfg.appearance.clone());
     let prev_mode = std::sync::Mutex::new(initial_cfg.overlay_mode);
     let prev_locked = std::sync::Mutex::new(initial_cfg.locked);
+    let prev_above_fullscreen = std::sync::Mutex::new(initial_cfg.above_fullscreen);
 
     // Debounce at 500ms: multiple rapid writes (e.g. from an editor) collapse into one event.
     let mut debouncer = new_debouncer(Duration::from_millis(500), move |result: DebounceEventResult| {
@@ -363,6 +370,14 @@ pub fn start_hot_reload(
                                     crate::overlay::OverlayCommand::SetLocked(new_cfg.locked)
                                 );
                                 *prev = new_cfg.locked;
+                            }
+                        }
+                        if let Ok(mut prev) = prev_above_fullscreen.lock() {
+                            if *prev != new_cfg.above_fullscreen {
+                                let _ = overlay_tx.send_blocking(
+                                    crate::overlay::OverlayCommand::SetAboveFullscreen(new_cfg.above_fullscreen)
+                                );
+                                *prev = new_cfg.above_fullscreen;
                             }
                         }
                         // Update tray to reflect new config state.

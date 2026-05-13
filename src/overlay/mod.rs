@@ -18,7 +18,7 @@ use crate::overlay::window::{
 use gtk4::prelude::*;
 use gtk4::{Application, ApplicationWindow};
 use gtk4::glib;
-use gtk4_layer_shell::{Edge, KeyboardMode, LayerShell};
+use gtk4_layer_shell::{Edge, KeyboardMode, LayerShell, Layer};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
@@ -32,6 +32,9 @@ pub enum OverlayCommand {
     SetMode(OverlayMode),
     /// Lock or unlock the floating overlay.
     SetLocked(bool),
+    /// Toggle whether the overlay renders above fullscreen windows
+    /// (switches the layer-shell layer between Top and Overlay).
+    SetAboveFullscreen(bool),
     /// Update appearance from config.
     UpdateAppearance(AppearanceConfig),
     /// Update caption text (also sent as plain String via glib channel in normal flow).
@@ -314,6 +317,15 @@ fn handle_overlay_command(
                     // and is a no-op if it's already presented and visible.
                     transcript_state.window.present();
                 }
+            }
+        }
+        OverlayCommand::SetAboveFullscreen(above) => {
+            // Apply to the layer-shell overlay window only; transcript mode uses
+            // a regular toplevel and is unaffected by layer-shell stacking.
+            window.set_layer(if above { Layer::Overlay } else { Layer::Top });
+            // Persist to the in-memory shared config so subsequent rebuilds match.
+            if let Ok(mut cfg) = config.lock() {
+                cfg.above_fullscreen = above;
             }
         }
         OverlayCommand::SetLocked(locked) => {
