@@ -1,16 +1,34 @@
-mod audio;
-mod config;
-mod models;
-mod stt;
-mod overlay;
-mod tray;
+//! Subtidal binary entry point.
+//!
+//! Library code lives in the `subtidal` crate (`src/lib.rs`); Linux-specific
+//! startup helpers live in `main_linux` (gated to `target_os = "linux"`).
+
+#[cfg(target_os = "linux")]
 mod main_linux;
+
+// Hard-fail the binary build on non-Linux targets with a clear message.
+// `cargo check --lib --target ...` does NOT compile this binary and so does
+// not trip this error — that is how the CI macOS-check stays green while
+// `cargo build` on macOS fails fast with a single, clear message.
+//
+// Placement note: this MUST come AFTER `mod main_linux;` is declared but
+// BEFORE any `use` or other logic, per Rust's mod-resolution order.
+#[cfg(not(target_os = "linux"))]
+compile_error!("Subtidal currently only supports Linux. macOS support is planned.");
 
 use arc_swap::ArcSwap;
 use clap::Parser;
-use config::Config;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+
+#[cfg(target_os = "linux")]
+use subtidal::{audio, config::{self, Config}, models, overlay, stt, tray};
+
+#[cfg(target_os = "linux")]
+use main_linux::{
+    cuda_available, cuda_status_message, ensure_provider_libs_next_to_exe,
+    exit_without_atexit, reexec_with_absolute_argv0_if_needed, run_cuda_probe,
+};
 
 /// Install the .desktop file and app icon to XDG standard locations on first run.
 fn ensure_desktop_entry_installed() {
@@ -67,12 +85,12 @@ struct Args {
 }
 
 fn main() {
-    main_linux::reexec_with_absolute_argv0_if_needed();
-    main_linux::ensure_provider_libs_next_to_exe();
+    reexec_with_absolute_argv0_if_needed();
+    ensure_provider_libs_next_to_exe();
 
     // If we're a CUDA probe subprocess, run the probe and exit immediately.
     if std::env::var_os("__SUBTIDAL_CUDA_PROBE").is_some() {
-        main_linux::run_cuda_probe();
+        run_cuda_probe();
     }
 
     let args = Args::parse();
@@ -164,8 +182,8 @@ fn main() {
 
     // Probe CUDA in a subprocess so a CUDA-provider crash can't take the parent down.
     let model_dir = models::nemotron_model_dir();
-    let use_cuda = main_linux::cuda_available(&model_dir);
-    eprintln!("{}", main_linux::cuda_status_message(use_cuda));
+    let use_cuda = cuda_available(&model_dir);
+    eprintln!("{}", cuda_status_message(use_cuda));
 
     // Captions-enabled flag: read by STT thread to skip inference, by tray/overlay for UI.
     let captions_enabled = Arc::new(AtomicBool::new(!args.start_disabled));
@@ -287,5 +305,5 @@ fn main() {
 
     overlay::run_gtk_app(cfg, caption_rx, cmd_rx, Arc::clone(&captions_enabled));
 
-    main_linux::exit_without_atexit(0)
+    exit_without_atexit(0)
 }
