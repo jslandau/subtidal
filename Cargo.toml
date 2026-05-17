@@ -10,24 +10,17 @@ name = "subtidal"
 path = "src/main.rs"
 
 [dependencies]
-# GUI
-gtk4 = { version = "0.10", features = ["v4_10"] }
-gtk4-layer-shell = "0.7"
 glib = "0.19"
 
-# System tray
-ksni = "0.3"
-
 # Audio
-pipewire = "0.9"
 rubato = "1.0"
 ringbuf = "0.4"
 bytemuck = "1"
 audioadapter-buffers = "2"
 
 # STT
-ort = { version = "2.0.0-rc.12", features = ["cuda"] }
-parakeet-rs = { version = "0.3.4", features = ["cuda"] }
+ort = "2.0.0-rc.12"
+parakeet-rs = "0.3.4"
 ndarray = "0.16"
 
 # Model management
@@ -63,14 +56,26 @@ dirs = "5"
 # Signal handling
 ctrlc = "3"
 
-# Process exit without atexit handlers (avoids CUDA cleanup race)
-libc = "0.2"
-
 # Lock-free atomic swap for engine selection
 arc-swap = "1"
 
 # Async channels for glib main-loop consumption
 async-channel = "2"
+
+# Linux-only crates and CUDA feature additions.
+# Resolver v2 (edition 2021 default) isolates the `cuda` feature on `ort` and
+# `parakeet-rs` to Linux-target compilations only; on non-Linux targets these
+# entries are skipped entirely and the base `[dependencies]` versions (without
+# `cuda`) are used. Version strings MUST match the base entries — Cargo rejects
+# target-conditional entries that omit version.
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk4 = { version = "0.10", features = ["v4_10"] }
+gtk4-layer-shell = "0.7"
+ksni = "0.3"
+pipewire = "0.9"
+libc = "0.2"
+ort = { version = "2.0.0-rc.12", features = ["cuda"] }
+parakeet-rs = { version = "0.3.4", features = ["cuda"] }
 
 [profile.release]
 opt-level = 3
