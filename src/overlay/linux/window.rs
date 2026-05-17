@@ -1,7 +1,7 @@
 //! Overlay window construction, docked/floating layout, and CSS styling.
 
 use crate::config::{AppearanceConfig, Config, DockPosition, OverlayMode, ScreenEdge};
-use crate::overlay::input_region;
+use super::input_region;
 use gtk4::prelude::*;
 use gtk4::{Application, ApplicationWindow, Label};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
