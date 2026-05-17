@@ -1,10 +1,13 @@
 //! STT engine abstraction and the combined audio-resample-inference thread.
 
+#[cfg(target_os = "linux")]
 pub mod nemotron;
 
 use anyhow::Result;
 use arc_swap::ArcSwap;
+#[cfg(target_os = "linux")]
 use ort::ep::ExecutionProvider as _;
+#[cfg(target_os = "linux")]
 use ort::ep::CUDA;
 use ringbuf::HeapCons;
 use ringbuf::traits::Consumer;
@@ -98,6 +101,7 @@ pub struct PipelineConfig {
 ///
 /// Engine swap is handled by swapping the `ArcSwap<Engine>` from the tray; this
 /// thread notices on each chunk boundary and rebuilds its local engine.
+#[cfg(target_os = "linux")]
 pub fn spawn_stt_thread(
     mut ring_consumer: HeapCons<f32>,
     wake: Arc<AudioWake>,
@@ -222,6 +226,7 @@ pub fn spawn_stt_thread(
         .expect("spawning stt-pipeline thread")
 }
 
+#[cfg(target_os = "linux")]
 fn build_engine(
     choice: &Engine,
     model_dir: &std::path::Path,
@@ -234,6 +239,7 @@ fn build_engine(
 
 /// Detect CUDA usability by loading the model with CUDA in a subprocess.
 /// See the comment in `run_cuda_probe` for why this is a subprocess.
+#[cfg(target_os = "linux")]
 pub fn cuda_available(model_dir: &std::path::Path) -> bool {
     use std::io::Read as _;
     use std::process::{Command, Stdio};
@@ -267,6 +273,7 @@ pub fn cuda_available(model_dir: &std::path::Path) -> bool {
 /// Called when `__SUBTIDAL_CUDA_PROBE` env var is set. Attempts to load the
 /// Nemotron model with CUDA; prints "cuda:ok" on success, then `_exit`s so
 /// the ORT/CUDA destructors don't run (they can hang or crash).
+#[cfg(target_os = "linux")]
 pub fn run_cuda_probe() -> ! {
     use std::io::Write as _;
 
