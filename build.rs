@@ -4,6 +4,15 @@
 use std::path::PathBuf;
 
 fn main() {
+    // `cfg!(target_os = "linux")` here would check the HOST OS, not the target.
+    // Read the TARGET env var (set by Cargo for build scripts) to detect the
+    // actual compilation target so `cargo check --target x86_64-apple-darwin`
+    // from a Linux host correctly skips CUDA-provider scanning.
+    let target = std::env::var("TARGET").unwrap_or_default();
+    if !target.contains("linux") {
+        return;
+    }
+
     // ort-sys downloads ORT binaries into the cargo build cache under OUT_DIR.
     // The copy-dylibs feature symlinks provider .so files into target/{profile}/,
     // but `cargo install` only copies the final binary. We find the actual .so
