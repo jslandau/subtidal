@@ -5,10 +5,6 @@ pub mod nemotron;
 
 use anyhow::Result;
 use arc_swap::ArcSwap;
-#[cfg(target_os = "linux")]
-use ort::ep::ExecutionProvider as _;
-#[cfg(target_os = "linux")]
-use ort::ep::CUDA;
 use ringbuf::HeapCons;
 use ringbuf::traits::Consumer;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -235,72 +231,6 @@ fn build_engine(
     match choice {
         Engine::Nemotron => Ok(Box::new(nemotron::NemotronEngine::new(model_dir, use_cuda)?)),
     }
-}
-
-/// Detect CUDA usability by loading the model with CUDA in a subprocess.
-/// See the comment in `run_cuda_probe` for why this is a subprocess.
-#[cfg(target_os = "linux")]
-pub fn cuda_available(model_dir: &std::path::Path) -> bool {
-    use std::io::Read as _;
-    use std::process::{Command, Stdio};
-
-    let exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(_) => return false,
-    };
-
-    let result = Command::new(exe)
-        .env("__SUBTIDAL_CUDA_PROBE", "1")
-        .env("__SUBTIDAL_CUDA_PROBE_MODEL_DIR", model_dir)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .and_then(|mut child| {
-            let mut output = String::new();
-            if let Some(ref mut stdout) = child.stdout {
-                let _ = stdout.read_to_string(&mut output);
-            }
-            let status = child.wait()?;
-            Ok((status, output))
-        });
-
-    match result {
-        Ok((status, output)) => status.success() && output.trim() == "cuda:ok",
-        Err(_) => false,
-    }
-}
-
-/// Called when `__SUBTIDAL_CUDA_PROBE` env var is set. Attempts to load the
-/// Nemotron model with CUDA; prints "cuda:ok" on success, then `_exit`s so
-/// the ORT/CUDA destructors don't run (they can hang or crash).
-#[cfg(target_os = "linux")]
-pub fn run_cuda_probe() -> ! {
-    use std::io::Write as _;
-
-    let available = CUDA::default().is_available().unwrap_or(false);
-    if !available {
-        unsafe { libc::_exit(0) };
-    }
-
-    if let Some(model_dir) = std::env::var_os("__SUBTIDAL_CUDA_PROBE_MODEL_DIR") {
-        let config = parakeet_rs::ExecutionConfig::new()
-            .with_execution_provider(parakeet_rs::ExecutionProvider::Cuda);
-        let loaded = parakeet_rs::Nemotron::from_pretrained(
-            std::path::Path::new(&model_dir),
-            Some(config),
-        );
-        if loaded.is_err() {
-            unsafe { libc::_exit(1) };
-        }
-        let _ = std::io::stdout().write_all(b"cuda:ok");
-        let _ = std::io::stdout().flush();
-        std::mem::forget(loaded);
-        unsafe { libc::_exit(0) };
-    }
-
-    let _ = std::io::stdout().write_all(b"cuda:ok");
-    let _ = std::io::stdout().flush();
-    unsafe { libc::_exit(0) };
 }
 
 #[cfg(test)]
