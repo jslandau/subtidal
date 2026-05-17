@@ -5,6 +5,10 @@ edition = "2021"
 description = "Real-time speech-to-text overlay for Linux/Wayland"
 license = "MIT"
 
+[lib]
+name = "subtidal"
+path = "src/lib.rs"
+
 [[bin]]
 name = "subtidal"
 path = "src/main.rs"
