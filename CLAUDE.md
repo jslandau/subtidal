@@ -2,7 +2,7 @@
 
 Real-time speech-to-text overlay for Linux/Wayland.
 
-Freshness: 2026-05-13
+Freshness: 2026-05-17
 
 ## Purpose
 
@@ -81,3 +81,33 @@ cargo build --release
 ```
 
 Requires: PipeWire running, Wayland compositor with wlr-layer-shell support. CUDA optional (GPU acceleration for Nemotron).
+
+## Platform Isolation
+
+Subtidal's source tree is structured so that all Linux-specific code is gated behind `#[cfg(target_os = "linux")]`. The crate exposes both a `[lib]` (`src/lib.rs`) and a `[[bin]]` (`src/main.rs`); the binary additionally carries a `#[cfg(not(target_os = "linux"))] compile_error!` guard that hard-fails non-Linux binary builds with a clear "macOS support is planned" message.
+
+**Cfg-gating boundaries.** Each platform-bound subsystem follows one of three patterns:
+
+- **Shell-and-re-export** (`audio/`, `tray/`): `mod.rs` is a thin shell that declares `#[cfg(target_os = "linux")] mod impl_linux;` and re-exports the public surface. The Linux implementation body lives in `impl_linux.rs`.
+- **Subtree-and-re-export** (`overlay/`): `mod.rs` keeps neutral items (`OverlayCommand`, `CaptionsEnabled`, `caption_buffer`, `transcript_log`) at the module root and gates a `linux/` subdirectory holding the GTK orchestration (`run_gtk_app`, `handle_overlay_command`) and per-window submodules (`window`, `drag`, `input_region`, `transcript_window`).
+- **In-place gating** (`stt/`): the module mixes neutral types (`SttEngine` trait, `AudioWake`, `PipelineConfig`) with Linux-only items (`mod nemotron`, `spawn_stt_thread`, `build_engine`). Linux-only items carry `#[cfg(target_os = "linux")]` directly; neutral items are unguarded.
+
+**Cargo dependencies.** Linux-only crates (`pipewire`, `gtk4`, `gtk4-layer-shell`, `ksni`, `libc`) live in `[target.'cfg(target_os = "linux")'.dependencies]`. The `cuda` feature on `ort` and `parakeet-rs` is Linux-conditional via additive feature unification: each crate appears once in `[dependencies]` (without `cuda`) and once in the Linux-conditional block (with `cuda`). Resolver v2 (edition 2021 default) keeps the `cuda` feature from bleeding onto non-Linux targets.
+
+**Verification mechanism.** A GitHub Actions workflow at `.github/workflows/macos-check.yml` runs `cargo check --lib --target x86_64-apple-darwin` on `ubuntu-latest` for every push and pull request. Any future commit that accidentally introduces Linux coupling into a notionally-neutral module fails the check. The workflow uses `--lib` (not bare `cargo check`) so the binary's `compile_error!` guard does not fire.
+
+**Build-script gate.** `build.rs` early-returns on non-Linux targets via `env::var("TARGET").unwrap_or_default().contains("linux")`. The `cfg!(target_os = "linux")` macro is intentionally NOT used here — it reflects the build host, not the cross-compilation target, and would silently fail to skip CUDA-provider scanning during `cargo check --target x86_64-apple-darwin` from a Linux host.
+
+**`compile_error!` location.** `src/main.rs` contains the macOS hard-fail guard immediately after the `mod main_linux;` declaration and before any `use` or other logic. Placement before `mod` declarations causes confusing cascading errors from rustc's mod-resolution pass.
+
+**Recipe for adding a new platform (e.g., macOS).**
+
+1. Remove the line `compile_error!("Subtidal currently only supports Linux. macOS support is planned.");` from `src/main.rs` (or refine its cfg predicate to exclude the new platform).
+2. For each cfg-gated subsystem, mirror the Linux structure with a sibling implementation:
+   - `audio/`: add `src/audio/impl_macos.rs` and gate it from `src/audio/mod.rs` with `#[cfg(target_os = "macos")]`.
+   - `tray/`: same shape — add `src/tray/impl_macos.rs`.
+   - `overlay/`: add `src/overlay/macos/` subdirectory and gate `mod macos;` from `src/overlay/mod.rs`.
+   - `stt/`: add a `mod coreml;` (or analogous) and gate the Linux-specific items behind their existing cfgs.
+3. Add a `[target.'cfg(target_os = "macos")'.dependencies]` block in `Cargo.toml` listing macOS-only crates (e.g., `core-foundation`, `cocoa`).
+4. Move the Linux-specific main helpers analogously into `src/main_macos.rs` and add the corresponding `#[cfg(target_os = "macos")] mod main_macos;` declaration in `src/main.rs`.
+5. Add the new target as an entry (or matrix value) in `.github/workflows/macos-check.yml` (which can be renamed to e.g. `cross-target-check.yml` once it serves multiple targets).
