@@ -93,6 +93,11 @@ libc = "0.2"
 parakeet-rs = { version = "0.3.4", features = ["webgpu"] }
 ort = { version = "2.0.0-rc.12", features = ["webgpu"] }
 hound = "3.5"  # WAV reader for the spike fixture; tiny pure-Rust crate
+# Model download — gated to Linux above to avoid Linux→darwin cross-compile of
+# ring's cc invocation. Native macOS builds need it too for the Phase 0 spike
+# and the Phase 3 STT pipeline; the cross-compile failure mode only applies to
+# the CI host direction.
+hf-hub = { version = "0.5", features = ["tokio"] }
 
 [profile.release]
 opt-level = 3
