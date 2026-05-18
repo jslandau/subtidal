@@ -10,22 +10,29 @@ Captures system or per-application audio via PipeWire, runs local STT inference 
 
 ## Architecture
 
+Platform-bound code is cfg-gated; see `## Platform Isolation` below for the gating patterns. File map:
+
 ```
-main.rs           — CLI args, startup orchestration, thread wiring
-config.rs         — TOML config with hot-reload (notify/debouncer)
-models/mod.rs     — HuggingFace model download (hf-hub + tokio)
-audio/mod.rs      — PipeWire capture thread, node enumeration, source switching
-audio/resampler.rs — rubato 48kHz stereo -> 16kHz mono resampler
-stt/mod.rs        — SttEngine trait, AudioWake (condvar), combined STT pipeline thread
-stt/nemotron.rs   — Nemotron RNNT engine (ort + parakeet-rs, CUDA)
-overlay/mod.rs    — overlay orchestration, OverlayCommand dispatch, run_gtk_app public API
-overlay/window.rs — GTK4 layer-shell window construction (docked/floating), CSS, caption label
-overlay/drag.rs   — floating-mode drag gesture with compositor-quirk coordinate compensation
-overlay/caption_buffer.rs — pure text buffer: line-fill, overlap dedup, expiry (GTK-free, well-tested)
-overlay/input_region.rs — Wayland input region for click-through
-overlay/transcript_log.rs   — pure data: timestamped fragments, paragraph coalescing, .json serialization (GTK-free, well-tested)
-overlay/transcript_window.rs — GTK4 toplevel window for transcript mode: scrollable TextView, autoscroll, Save dialog
-tray/mod.rs       — ksni StatusNotifierItem system tray
+lib.rs                       — library crate root; re-exports modules for cross-target `cargo check --lib`
+main.rs                      — bin entry point: CLI args + non-Linux `compile_error!` guard; delegates to main_linux
+main_linux.rs                — Linux startup orchestration, thread wiring, CUDA probe/reexec helpers (cuda_available, run_cuda_probe, cuda_status_message, reexec_with_absolute_argv0_if_needed, …)
+config.rs                    — TOML config with hot-reload (notify/debouncer)
+models/mod.rs                — HuggingFace model download (hf-hub + tokio)
+audio/mod.rs                 — neutral shell; re-exports impl_linux on Linux
+audio/impl_linux.rs          — PipeWire capture thread, node enumeration, source switching
+audio/resampler.rs           — rubato 48kHz stereo -> 16kHz mono resampler (platform-neutral)
+stt/mod.rs                   — SttEngine trait + AudioWake (neutral) + Linux-gated spawn_stt_thread / build_engine / `mod nemotron`
+stt/nemotron.rs              — Nemotron RNNT engine (ort + parakeet-rs, CUDA) [Linux-only]
+overlay/mod.rs               — neutral: OverlayCommand, CaptionsEnabled; re-exports overlay/linux on Linux
+overlay/caption_buffer.rs    — pure text buffer: line-fill, overlap dedup, expiry (GTK-free, well-tested) [neutral]
+overlay/transcript_log.rs    — pure data: timestamped fragments, paragraph coalescing, .json serialization (GTK-free, well-tested) [neutral]
+overlay/linux/mod.rs         — overlay orchestration, OverlayCommand dispatch, run_gtk_app public API
+overlay/linux/window.rs      — GTK4 layer-shell window construction (docked/floating), CSS, caption label
+overlay/linux/drag.rs        — floating-mode drag gesture with compositor-quirk coordinate compensation
+overlay/linux/input_region.rs — Wayland input region for click-through
+overlay/linux/transcript_window.rs — GTK4 toplevel window for transcript mode: scrollable TextView, autoscroll, Save dialog
+tray/mod.rs                  — neutral shell; re-exports impl_linux on Linux
+tray/impl_linux.rs           — ksni StatusNotifierItem system tray
 ```
 
 ## Thread Model
@@ -57,8 +64,8 @@ The old "audio bridge" and "engine switch" threads, and the `Arc<Mutex<SyncSende
 - gtk4 0.10 + gtk4-layer-shell 0.7 — Wayland overlay
 - pipewire 0.9 — audio capture
 - rubato 1.0 — sample rate conversion
-- ort 2.0.0-rc.12 (cuda feature) — ONNX Runtime inference
-- parakeet-rs 0.3 — Nemotron RNNT decoder
+- ort 2.0.0-rc.12 — ONNX Runtime inference (`cuda` feature is Linux-only via target-conditional dependency)
+- parakeet-rs 0.3 — Nemotron RNNT decoder (`cuda` feature is Linux-only via target-conditional dependency)
 - ksni 0.3 — D-Bus StatusNotifierItem tray
 - hf-hub 0.5 — model download
 - notify 6 + notify-debouncer-mini 0.4 — config file watching
