@@ -5,13 +5,19 @@ pub mod nemotron;
 
 use anyhow::Result;
 use arc_swap::ArcSwap;
+#[cfg(target_os = "linux")]
 use ringbuf::HeapCons;
+#[cfg(target_os = "linux")]
 use ringbuf::traits::Consumer;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
+#[cfg(target_os = "linux")]
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(target_os = "linux")]
+use std::time::Instant;
 
+#[cfg(target_os = "linux")]
 use crate::audio::resampler::AudioResampler;
 use crate::config::Engine;
 
@@ -29,6 +35,10 @@ pub trait SttEngine: Send + 'static {
 pub struct AudioWake {
     data_ready: AtomicBool,
     shutdown: AtomicBool,
+    // `mutex` and `wait_timeout` are only invoked from the cfg-gated STT
+    // pipeline thread; on non-Linux they're carried for structural parity but
+    // never touched. Tests on Linux exercise them.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     mutex: Mutex<()>,
     condvar: Condvar,
 }
@@ -64,6 +74,7 @@ impl AudioWake {
     /// Wait for data or timeout. Returns true if data was signalled, false on timeout.
     /// On return, `data_ready` is cleared so the caller should drain whatever is
     /// available.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     fn wait_timeout(&self, timeout: Duration) -> bool {
         if self.data_ready.swap(false, Ordering::AcqRel) {
             return true;

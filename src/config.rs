@@ -1,7 +1,9 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
 use notify_debouncer_mini::{new_debouncer, DebounceEventResult};
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 
 /// Which STT engine to use for inference.
@@ -317,6 +319,7 @@ impl Config {
 /// Note: Programmatic saves (e.g. from tray callbacks) will trigger the watcher,
 /// causing a redundant but harmless reload cycle. The updates are idempotent,
 /// so this is accepted as a trade-off for simplicity.
+#[cfg(target_os = "linux")]
 pub fn start_hot_reload(
     overlay_tx: async_channel::Sender<crate::overlay::OverlayCommand>,
     tray_handle: ksni::Handle<crate::tray::TrayState>,
