@@ -86,17 +86,19 @@ libc = "0.2"
 
 # Resolver v2 isolates the `webgpu` feature on `ort` and `parakeet-rs` to
 # macOS-target compilations only; this mirrors the Linux/cuda pattern above.
-# objc2-* crates and dispatch are added in Phase 1 (skeleton wiring); this
-# Phase 0 block intentionally adds ONLY the inference dependencies needed
-# for the WebGPU spike, so Phase 0 stays narrowly scoped.
 [target.'cfg(target_os = "macos")'.dependencies]
 parakeet-rs = { version = "0.3.4", features = ["webgpu"] }
 ort = { version = "2.0.0-rc.12", features = ["webgpu"] }
 hound = "3.5"  # WAV reader for the spike fixture; tiny pure-Rust crate
-# Model download — gated to Linux above to avoid Linux→darwin cross-compile of
-# ring's cc invocation. Native macOS builds need it too for the Phase 0 spike
-# and the Phase 3 STT pipeline; the cross-compile failure mode only applies to
-# the CI host direction.
+# AppKit bindings (used Phase 2+); declared up-front so cross-target check exercises them.
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = "0.3"
+objc2-core-foundation = "0.3"
+# Grand Central Dispatch for caption-bridge main-thread marshaling (Phase 2+).
+dispatch2 = "0.3"
+block2 = "0.6"
+# Model download via HuggingFace Hub (cross-platform now; was Linux-only).
 hf-hub = { version = "0.5", features = ["tokio"] }
 
 [profile.release]
