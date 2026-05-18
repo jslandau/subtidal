@@ -84,6 +84,16 @@ hf-hub = { version = "0.5", features = ["tokio"] }
 # Process exit without atexit handlers (avoids CUDA cleanup race)
 libc = "0.2"
 
+# Resolver v2 isolates the `webgpu` feature on `ort` and `parakeet-rs` to
+# macOS-target compilations only; this mirrors the Linux/cuda pattern above.
+# objc2-* crates and dispatch are added in Phase 1 (skeleton wiring); this
+# Phase 0 block intentionally adds ONLY the inference dependencies needed
+# for the WebGPU spike, so Phase 0 stays narrowly scoped.
+[target.'cfg(target_os = "macos")'.dependencies]
+parakeet-rs = { version = "0.3.4", features = ["webgpu"] }
+ort = { version = "2.0.0-rc.12", features = ["webgpu"] }
+hound = "3.5"  # WAV reader for the spike fixture; tiny pure-Rust crate
+
 [profile.release]
 opt-level = 3
 lto = true
