@@ -5,40 +5,27 @@ edition = "2021"
 description = "Real-time speech-to-text overlay for Linux/Wayland"
 license = "MIT"
 
+[lib]
+name = "subtidal"
+path = "src/lib.rs"
+
 [[bin]]
 name = "subtidal"
 path = "src/main.rs"
 
 [dependencies]
-# GUI
-gtk4 = { version = "0.10", features = ["v4_10"] }
-gtk4-layer-shell = "0.7"
-glib = "0.19"
-
-# System tray
-ksni = "0.3"
-
 # Audio
-pipewire = "0.9"
 rubato = "1.0"
 ringbuf = "0.4"
 bytemuck = "1"
 audioadapter-buffers = "2"
 
-# STT
-ort = { version = "2.0.0-rc.12", features = ["cuda"] }
-parakeet-rs = { version = "0.3.4", features = ["cuda"] }
+# STT (ort + parakeet-rs are Linux-only; see target-conditional block below)
 ndarray = "0.16"
-
-# Model management
-hf-hub = { version = "0.5", features = ["tokio"] }
 
 # Config hot-reload
 notify = "6"
 notify-debouncer-mini = "0.4"
-
-# Desktop notifications
-notify-rust = "4"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -63,14 +50,39 @@ dirs = "5"
 # Signal handling
 ctrlc = "3"
 
-# Process exit without atexit handlers (avoids CUDA cleanup race)
-libc = "0.2"
-
 # Lock-free atomic swap for engine selection
 arc-swap = "1"
 
 # Async channels for glib main-loop consumption
 async-channel = "2"
+
+# Linux-only crates and CUDA feature additions.
+# Resolver v2 (edition 2021 default) isolates the `cuda` feature on `ort` and
+# `parakeet-rs` to Linux-target compilations only; on non-Linux targets these
+# entries are skipped entirely and the base `[dependencies]` versions (without
+# `cuda`) are used. Version strings MUST match the base entries — Cargo rejects
+# target-conditional entries that omit version.
+[target.'cfg(target_os = "linux")'.dependencies]
+# GUI
+gtk4 = { version = "0.10", features = ["v4_10"] }
+gtk4-layer-shell = "0.7"
+glib = "0.19"
+# System tray
+ksni = "0.3"
+# Audio
+pipewire = "0.9"
+# STT (ort + parakeet-rs are Linux-only — they drag onig_sys/cc-bound C deps
+# that don't cross-compile from Linux to darwin).
+ort = { version = "2.0.0-rc.12", features = ["cuda"] }
+parakeet-rs = { version = "0.3.4", features = ["cuda"] }
+# Desktop notifications (notify-rust pulls in mac-notification-sys whose build
+# script fails when cross-compiling from Linux to darwin).
+notify-rust = "4"
+# Model management (hf-hub → ureq → rustls → ring, whose build script invokes
+# `cc` with macOS-only flags that fail on a Linux CI host).
+hf-hub = { version = "0.5", features = ["tokio"] }
+# Process exit without atexit handlers (avoids CUDA cleanup race)
+libc = "0.2"
 
 [profile.release]
 opt-level = 3

@@ -1,15 +1,34 @@
-mod audio;
-mod config;
-mod models;
-mod stt;
-mod overlay;
-mod tray;
+//! Subtidal binary entry point.
+//!
+//! Library code lives in the `subtidal` crate (`src/lib.rs`); Linux-specific
+//! startup helpers live in `main_linux` (gated to `target_os = "linux"`).
+
+#[cfg(target_os = "linux")]
+mod main_linux;
+
+// Hard-fail the binary build on non-Linux targets with a clear message.
+// `cargo check --lib --target ...` does NOT compile this binary and so does
+// not trip this error — that is how the CI macOS-check stays green while
+// `cargo build` on macOS fails fast with a single, clear message.
+//
+// Placement note: this MUST come AFTER `mod main_linux;` is declared but
+// BEFORE any `use` or other logic, per Rust's mod-resolution order.
+#[cfg(not(target_os = "linux"))]
+compile_error!("Subtidal currently only supports Linux. macOS support is planned.");
 
 use arc_swap::ArcSwap;
 use clap::Parser;
-use config::Config;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+
+#[cfg(target_os = "linux")]
+use subtidal::{audio, config::{self, Config}, models, overlay, stt, tray};
+
+#[cfg(target_os = "linux")]
+use main_linux::{
+    cuda_available, cuda_status_message, ensure_provider_libs_next_to_exe,
+    exit_without_atexit, reexec_with_absolute_argv0_if_needed, run_cuda_probe,
+};
 
 /// Install the .desktop file and app icon to XDG standard locations on first run.
 fn ensure_desktop_entry_installed() {
@@ -65,130 +84,13 @@ struct Args {
     start_disabled: bool,
 }
 
-fn find_provider_dir() -> Option<std::path::PathBuf> {
-    // Check next to the binary (cargo run with symlinks in target/release/)
-    if let Some(exe_dir) = std::env::current_exe().ok()
-        .and_then(|p| std::fs::canonicalize(p).ok())
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-    {
-        if exe_dir.join("libonnxruntime_providers_cuda.so").exists() {
-            return Some(exe_dir);
-        }
-    }
-
-    // Use the provider directory embedded at compile time by build.rs
-    if let Some(dir) = option_env!("ORT_PROVIDER_LIB_DIR") {
-        let p = std::path::PathBuf::from(dir);
-        if p.join("libonnxruntime_providers_cuda.so").exists() {
-            return Some(p);
-        }
-    }
-
-    // Fallback: scan ort cache at runtime
-    find_ort_cache_dir()
-}
-
-/// Ensure the CUDA provider .so files live next to the installed binary.
-///
-/// ORT's provider discovery uses dladdr on its own static code, which resolves to
-/// the binary's directory (not CWD, not LD_LIBRARY_PATH). We symlink the provider
-/// .so files from the ORT build cache into the exe dir so ORT's GetRuntimePath
-/// finds them regardless of how subtidal was launched (CLI, app launcher, systemd).
-fn ensure_provider_libs_next_to_exe() {
-    let exe_dir = match std::env::current_exe().ok()
-        .and_then(|p| std::fs::canonicalize(p).ok())
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-    {
-        Some(d) => d,
-        None => return,
-    };
-
-    if exe_dir.join("libonnxruntime_providers_cuda.so").exists() {
-        return;
-    }
-
-    let source_dir = match find_provider_dir() {
-        Some(d) => d,
-        None => return,
-    };
-
-    if source_dir == exe_dir {
-        return;
-    }
-
-    for name in ["libonnxruntime_providers_cuda.so", "libonnxruntime_providers_shared.so"] {
-        let src = source_dir.join(name);
-        let dst = exe_dir.join(name);
-        if !src.exists() || dst.exists() { continue; }
-        let _ = std::os::unix::fs::symlink(&src, &dst);
-    }
-}
-
-/// Locate this binary's ORT provider dir inside `~/.cache/ort.pyke.io/dfbin/`.
-///
-/// Keys on the exact `dist.hash` that `build.rs` embedded into the binary —
-/// not mtime — so a stale sibling build of a different ORT version can't be
-/// picked up and cause ABI mismatch. If the build-time hash is unavailable
-/// (e.g. built without ORT_PROVIDER_LIB_DIR resolution), returns None and lets
-/// the other layers of `find_provider_dir` handle it.
-fn find_ort_cache_dir() -> Option<std::path::PathBuf> {
-    let expected_hash = option_env!("ORT_DIST_HASH")?;
-    let cache_dir = dirs::cache_dir()?.join("ort.pyke.io/dfbin");
-    if !cache_dir.is_dir() {
-        return None;
-    }
-    for arch_entry in std::fs::read_dir(&cache_dir).ok()?.flatten() {
-        let candidate = arch_entry.path().join(expected_hash);
-        if candidate.join("libonnxruntime_providers_cuda.so").exists() {
-            return Some(candidate);
-        }
-    }
-    None
-}
-
-/// ORT's `GetRuntimePath` locates provider .so files relative to argv[0]'s parent
-/// directory. When launched by bare name from a shell (e.g. `subtidal`), argv[0]
-/// has no directory component and the runtime path becomes empty, so the CUDA
-/// provider library is not found and CUDA EP registration silently falls back to
-/// CPU. Re-exec ourselves with the absolute path from `current_exe()` so argv[0]
-/// always has a directory component matching the real binary location.
-fn reexec_with_absolute_argv0_if_needed() {
-    use std::os::unix::process::CommandExt as _;
-
-    if std::env::var_os("__SUBTIDAL_REEXECED").is_some() {
-        return;
-    }
-    // Probe subprocess is already spawned with an absolute path by cuda_available().
-    if std::env::var_os("__SUBTIDAL_CUDA_PROBE").is_some() {
-        return;
-    }
-    let argv0 = match std::env::args_os().next() {
-        Some(a) => a,
-        None => return,
-    };
-    if std::path::Path::new(&argv0).parent().map(|p| !p.as_os_str().is_empty()).unwrap_or(false) {
-        return; // already has a directory component
-    }
-    let exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(_) => return,
-    };
-    let rest: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
-    let err = std::process::Command::new(&exe)
-        .args(&rest)
-        .env("__SUBTIDAL_REEXECED", "1")
-        .arg0(&exe)
-        .exec();
-    eprintln!("warn: failed to re-exec with absolute path ({err}); continuing. GPU acceleration may be unavailable.");
-}
-
 fn main() {
     reexec_with_absolute_argv0_if_needed();
     ensure_provider_libs_next_to_exe();
 
     // If we're a CUDA probe subprocess, run the probe and exit immediately.
     if std::env::var_os("__SUBTIDAL_CUDA_PROBE").is_some() {
-        stt::run_cuda_probe();
+        run_cuda_probe();
     }
 
     let args = Args::parse();
@@ -280,7 +182,7 @@ fn main() {
 
     // Probe CUDA in a subprocess so a CUDA-provider crash can't take the parent down.
     let model_dir = models::nemotron_model_dir();
-    let use_cuda = stt::cuda_available(&model_dir);
+    let use_cuda = cuda_available(&model_dir);
     eprintln!("{}", cuda_status_message(use_cuda));
 
     // Captions-enabled flag: read by STT thread to skip inference, by tray/overlay for UI.
@@ -403,38 +305,5 @@ fn main() {
 
     overlay::run_gtk_app(cfg, caption_rx, cmd_rx, Arc::clone(&captions_enabled));
 
-    // Use libc::_exit to skip all atexit handlers (both Rust and C++).
-    // ORT's C++ atexit destructors call cudaFreeHost after the CUDA driver has
-    // already shut down, causing SIGABRT. std::process::exit still runs atexit
-    // handlers; _exit does not.
-    unsafe { libc::_exit(0) }
-}
-
-/// Returns the appropriate CUDA status message based on availability.
-/// AC3.1 and AC3.2: Testable CUDA status logging.
-fn cuda_status_message(cuda_available: bool) -> &'static str {
-    if cuda_available {
-        "info: CUDA available, Nemotron will use GPU acceleration"
-    } else {
-        "info: CUDA not available, Nemotron will use CPU"
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn cuda_status_message_when_available() {
-        let msg = cuda_status_message(true);
-        assert!(msg.contains("GPU acceleration"));
-        assert!(msg.contains("CUDA available"));
-    }
-
-    #[test]
-    fn cuda_status_message_when_unavailable() {
-        let msg = cuda_status_message(false);
-        assert!(msg.contains("CPU"));
-        assert!(msg.contains("CUDA not available"));
-    }
+    exit_without_atexit(0)
 }

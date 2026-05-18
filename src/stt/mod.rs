@@ -1,18 +1,23 @@
 //! STT engine abstraction and the combined audio-resample-inference thread.
 
+#[cfg(target_os = "linux")]
 pub mod nemotron;
 
 use anyhow::Result;
 use arc_swap::ArcSwap;
-use ort::ep::ExecutionProvider as _;
-use ort::ep::CUDA;
+#[cfg(target_os = "linux")]
 use ringbuf::HeapCons;
+#[cfg(target_os = "linux")]
 use ringbuf::traits::Consumer;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
+#[cfg(target_os = "linux")]
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(target_os = "linux")]
+use std::time::Instant;
 
+#[cfg(target_os = "linux")]
 use crate::audio::resampler::AudioResampler;
 use crate::config::Engine;
 
@@ -30,6 +35,10 @@ pub trait SttEngine: Send + 'static {
 pub struct AudioWake {
     data_ready: AtomicBool,
     shutdown: AtomicBool,
+    // `mutex` and `wait_timeout` are only invoked from the cfg-gated STT
+    // pipeline thread; on non-Linux they're carried for structural parity but
+    // never touched. Tests on Linux exercise them.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     mutex: Mutex<()>,
     condvar: Condvar,
 }
@@ -65,6 +74,7 @@ impl AudioWake {
     /// Wait for data or timeout. Returns true if data was signalled, false on timeout.
     /// On return, `data_ready` is cleared so the caller should drain whatever is
     /// available.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     fn wait_timeout(&self, timeout: Duration) -> bool {
         if self.data_ready.swap(false, Ordering::AcqRel) {
             return true;
@@ -98,6 +108,7 @@ pub struct PipelineConfig {
 ///
 /// Engine swap is handled by swapping the `ArcSwap<Engine>` from the tray; this
 /// thread notices on each chunk boundary and rebuilds its local engine.
+#[cfg(target_os = "linux")]
 pub fn spawn_stt_thread(
     mut ring_consumer: HeapCons<f32>,
     wake: Arc<AudioWake>,
@@ -222,6 +233,7 @@ pub fn spawn_stt_thread(
         .expect("spawning stt-pipeline thread")
 }
 
+#[cfg(target_os = "linux")]
 fn build_engine(
     choice: &Engine,
     model_dir: &std::path::Path,
@@ -230,70 +242,6 @@ fn build_engine(
     match choice {
         Engine::Nemotron => Ok(Box::new(nemotron::NemotronEngine::new(model_dir, use_cuda)?)),
     }
-}
-
-/// Detect CUDA usability by loading the model with CUDA in a subprocess.
-/// See the comment in `run_cuda_probe` for why this is a subprocess.
-pub fn cuda_available(model_dir: &std::path::Path) -> bool {
-    use std::io::Read as _;
-    use std::process::{Command, Stdio};
-
-    let exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(_) => return false,
-    };
-
-    let result = Command::new(exe)
-        .env("__SUBTIDAL_CUDA_PROBE", "1")
-        .env("__SUBTIDAL_CUDA_PROBE_MODEL_DIR", model_dir)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .and_then(|mut child| {
-            let mut output = String::new();
-            if let Some(ref mut stdout) = child.stdout {
-                let _ = stdout.read_to_string(&mut output);
-            }
-            let status = child.wait()?;
-            Ok((status, output))
-        });
-
-    match result {
-        Ok((status, output)) => status.success() && output.trim() == "cuda:ok",
-        Err(_) => false,
-    }
-}
-
-/// Called when `__SUBTIDAL_CUDA_PROBE` env var is set. Attempts to load the
-/// Nemotron model with CUDA; prints "cuda:ok" on success, then `_exit`s so
-/// the ORT/CUDA destructors don't run (they can hang or crash).
-pub fn run_cuda_probe() -> ! {
-    use std::io::Write as _;
-
-    let available = CUDA::default().is_available().unwrap_or(false);
-    if !available {
-        unsafe { libc::_exit(0) };
-    }
-
-    if let Some(model_dir) = std::env::var_os("__SUBTIDAL_CUDA_PROBE_MODEL_DIR") {
-        let config = parakeet_rs::ExecutionConfig::new()
-            .with_execution_provider(parakeet_rs::ExecutionProvider::Cuda);
-        let loaded = parakeet_rs::Nemotron::from_pretrained(
-            std::path::Path::new(&model_dir),
-            Some(config),
-        );
-        if loaded.is_err() {
-            unsafe { libc::_exit(1) };
-        }
-        let _ = std::io::stdout().write_all(b"cuda:ok");
-        let _ = std::io::stdout().flush();
-        std::mem::forget(loaded);
-        unsafe { libc::_exit(0) };
-    }
-
-    let _ = std::io::stdout().write_all(b"cuda:ok");
-    let _ = std::io::stdout().flush();
-    unsafe { libc::_exit(0) };
 }
 
 #[cfg(test)]
