@@ -11,15 +11,16 @@ use std::sync::atomic::AtomicBool;
 use ringbuf::HeapRb;
 use ringbuf::traits::Split;
 
-/// Fixture-WAV harness: reads a 16kHz mono WAV file, upsamples to 48kHz stereo
-/// via simple sample repetition, and feeds into the ring buffer at real-time pacing.
-/// Phase 3 only; superseded by Phase 4's ScreenCaptureKit integration.
+/// Fixture-WAV harness: reads a 16kHz mono WAV file, upsamples to 48kHz mono
+/// via rubato SincFixedIn, duplicates to stereo, and feeds into the ring buffer
+/// at real-time pacing. Phase 3 only; superseded by Phase 4's ScreenCaptureKit.
 fn feed_fixture_wav(
     path: &str,
     ring_producer: &mut ringbuf::HeapProd<f32>,
     wake: &Arc<stt::AudioWake>,
 ) -> anyhow::Result<()> {
     use hound::WavReader;
+    use rubato::{Resampler, SincFixedIn};
 
     // Read the 16kHz mono fixture.
     let mut reader = WavReader::open(path)
@@ -48,22 +49,31 @@ fn feed_fixture_wav(
         .map(|s| s as f32 / 32768.0)
         .collect();
 
-    // Upsample 16kHz mono to 48kHz stereo via simple 3x sample repetition.
-    // 16kHz → 48kHz = 3x upsampling; replicate each sample 3 times, then duplicate to stereo.
-    let mut stereo_48k = Vec::with_capacity(mono_samples.len() * 6); // 3x upsampling, *2 for stereo
-    for &sample in &mono_samples {
-        // Repeat sample 3 times for 3x upsampling
-        stereo_48k.push(sample);
-        stereo_48k.push(sample);
-        stereo_48k.push(sample);
-        // Duplicate to stereo (L=sample, R=sample)
-        stereo_48k.push(sample);
-        stereo_48k.push(sample);
-        stereo_48k.push(sample);
+    // Upsample 16kHz mono → 48kHz mono using rubato SincFixedIn.
+    // SincFixedIn requires input in the form of Vec<Vec<f32>> (per-channel).
+    let mut resampler = SincFixedIn::<f32>::new(
+        3.0, // ratio: 48kHz / 16kHz = 3.0
+        2.0, // oversampling factor for SincFixedIn
+        rubato::SincInterpolationType::Linear,
+        256, // chunk size (arbitrary; we process the entire fixture at once)
+        1,   // mono: 1 input channel
+    );
+
+    // Wrap mono samples in a Vec<Vec<f32>> for rubato API.
+    let input = vec![mono_samples];
+    let (mono_48k, _) = resampler.process(&input, None)
+        .map_err(|e| anyhow::anyhow!("resampling failed: {e}"))?;
+    let mono_48k = mono_48k.into_iter().next().unwrap();
+
+    // Duplicate mono to stereo (interleaved L, R, L, R, ...).
+    let mut stereo_48k = Vec::with_capacity(mono_48k.len() * 2);
+    for &sample in &mono_48k {
+        stereo_48k.push(sample); // L
+        stereo_48k.push(sample); // R
     }
 
     // Pace the pushes: 48kHz stereo = 96000 samples/sec = 96 interleaved samples per millisecond.
-    // Sleep ~10ms between every 960 interleaved samples (10ms worth).
+    // Feed 960 interleaved samples (10ms of 48kHz stereo) every 10ms.
     let chunk_size = 960; // 10ms of 48kHz stereo interleaved
     let sleep_duration = std::time::Duration::from_millis(10);
 

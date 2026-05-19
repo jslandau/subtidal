@@ -32,6 +32,7 @@ pub trait SttEngine: Send + 'static {
 /// `data_ready` is the boolean predicate the Condvar protects; the RT side sets
 /// it with SeqCst and signals without holding the mutex (a missed wakeup is
 /// harmless because the consumer re-checks the flag on every timeout).
+#[derive(Default)]
 pub struct AudioWake {
     data_ready: AtomicBool,
     shutdown: AtomicBool,
@@ -45,12 +46,7 @@ pub struct AudioWake {
 
 impl AudioWake {
     pub fn new() -> Self {
-        Self {
-            data_ready: AtomicBool::new(false),
-            shutdown: AtomicBool::new(false),
-            mutex: Mutex::new(()),
-            condvar: Condvar::new(),
-        }
+        Self::default()
     }
 
     /// Called from the PipeWire real-time callback. Sets the ready flag and
