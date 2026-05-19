@@ -3,18 +3,43 @@ use std::path::Path;
 use std::path::PathBuf;
 
 /// Returns the base directory for downloaded model files.
-/// ~/.local/share/subtidal/models/
+#[cfg(target_os = "linux")]
 pub fn models_dir() -> PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from(".local/share"))
+    // ~/.local/share/subtidal/models/ (XDG convention)
+    dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
         .join("subtidal")
         .join("models")
 }
 
+#[cfg(target_os = "macos")]
+pub fn models_dir() -> PathBuf {
+    // ~/Library/Application Support/Subtidal/models/ (Apple convention)
+    dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("Subtidal")
+        .join("models")
+}
+
 /// Returns the directory for Nemotron ONNX model files.
-/// ~/.local/share/subtidal/models/nemotron/
+#[cfg(target_os = "linux")]
 pub fn nemotron_model_dir() -> PathBuf {
-    models_dir().join("nemotron")
+    // ~/.local/share/subtidal/models/nemotron/ (XDG convention)
+    dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("subtidal")
+        .join("models")
+        .join("nemotron")
+}
+
+#[cfg(target_os = "macos")]
+pub fn nemotron_model_dir() -> PathBuf {
+    // ~/Library/Application Support/Subtidal/models/nemotron/ (Apple convention)
+    dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("Subtidal")
+        .join("models")
+        .join("nemotron")
 }
 
 /// HuggingFace repo and file paths for the Nemotron streaming model.

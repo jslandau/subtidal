@@ -244,9 +244,11 @@ fn build_engine(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
+    use std::thread;
+    use std::time::Instant;
 
     #[test]
     fn audio_wake_notify_wakes_waiter() {

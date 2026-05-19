@@ -10,7 +10,6 @@
 
 pub mod audio;
 pub mod config;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod models;
 pub mod overlay;
 pub mod stt;

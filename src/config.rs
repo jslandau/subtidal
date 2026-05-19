@@ -226,11 +226,22 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Returns the path to the config file: ~/.config/subtidal/config.toml
+    /// Returns the path to the config file.
+    /// Linux: ~/.config/subtidal/config.toml (XDG convention)
+    /// macOS: ~/Library/Application Support/Subtidal/config.toml (Apple convention)
+    #[cfg(target_os = "linux")]
     pub fn config_path() -> PathBuf {
         dirs::config_dir()
             .unwrap_or_else(|| PathBuf::from(".config"))
             .join("subtidal")
+            .join("config.toml")
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn config_path() -> PathBuf {
+        dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("Subtidal")
             .join("config.toml")
     }
 
