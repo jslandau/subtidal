@@ -1,7 +1,7 @@
 //! macOS audio capture (ScreenCaptureKit). Phase 4 ships SystemOutput-only
 //! capture; per-app capture and source switching land in Phase 5.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 
@@ -49,10 +49,39 @@ pub fn start_audio_thread(
 }
 
 fn run_sck_capture(
-    _ring_producer: Arc<Mutex<ringbuf::HeapProd<f32>>>,
-    _audio_wake: Arc<AudioWake>,
-    _rx_cmd: Receiver<AudioCommand>,
+    ring_producer: Arc<Mutex<ringbuf::HeapProd<f32>>>,
+    audio_wake: Arc<AudioWake>,
+    rx_cmd: Receiver<AudioCommand>,
 ) -> Result<()> {
-    // Task 3 fills this in.
-    anyhow::bail!("run_sck_capture not yet implemented (Phase 4 Task 3)")
+    // Build a single-threaded tokio runtime for SCK async APIs (completion handlers).
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+
+    // Fetch shareable content (displays) — this may prompt for TCC permission.
+    let stream = rt.block_on(async {
+        let content = stream::shareable_content_current().await
+            .context("SCShareableContent — is Screen Recording permission granted?")?;
+        stream::build_stream(&content, Arc::clone(&ring_producer), Arc::clone(&audio_wake))
+    })?;
+
+    // Start capturing audio from the stream.
+    rt.block_on(async {
+        stream::start_capture(&stream).await
+            .context("SCStream.startCapture — TCC denied?")
+    })?;
+
+    // Spin until shutdown command received.
+    loop {
+        match rx_cmd.recv() {
+            Ok(AudioCommand::Shutdown) | Err(_) => break,
+        }
+    }
+
+    // Stop capturing (best-effort cleanup).
+    rt.block_on(async {
+        let _ = stream::stop_capture(&stream).await;
+    });
+
+    Ok(())
 }
