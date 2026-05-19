@@ -4,10 +4,10 @@
 
 use std::sync::Arc;
 use objc2::MainThreadMarker;
-use objc2_app_kit::{NSApplication, NSPanel, NSTextField};
+use objc2_app_kit::{NSApplication, NSPanel, NSTextField, NSApplicationActivationPolicy};
 use objc2::rc::Retained;
 use objc2_foundation::NSString;
-use objc2::{msg_send};
+use objc2::msg_send;
 use crate::config::Config;
 use crate::overlay::{OverlayCommand, CaptionsEnabled};
 use super::panel;
@@ -70,14 +70,12 @@ pub fn run_app(
 
     // 2. Get NSApplication and set to Accessory (no Dock icon, matches LSUIElement=true).
     let app = NSApplication::sharedApplication(mtm);
-    // NSApplicationActivationPolicy values: Regular=0, Accessory=1, Prohibited=2.
     // Accessory matches LSUIElement=true in Info.plist: no Dock icon, UI allowed.
-    let activation_policy: isize = 1;
-    unsafe { let _: () = msg_send![&app, setActivationPolicy: activation_policy]; }
+    app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 
     // 3. Build the overlay panel and retain both panel and content label.
     let (panel, label) = panel::build_overlay_panel(mtm, &config);
-    unsafe { let _: () = msg_send![&panel, orderFront: std::ptr::null::<std::ffi::c_void>()]; }
+    panel.orderFront(None);
 
     // Wrap panel and label in Arc so workers can share ownership.
     let handles = Arc::new(OverlayHandles { panel, label });
@@ -121,8 +119,7 @@ pub fn run_app(
                     match cmd {
                         OverlayCommand::Quit => {
                             let app = NSApplication::sharedApplication(mtm);
-                            // terminate: takes the sender NSApp; nil is conventional here.
-                            unsafe { let _: () = msg_send![&app, terminate: std::ptr::null::<NSApplication>()]; }
+                            app.terminate(None);
                         }
                         OverlayCommand::SetAboveFullscreen(on) => {
                             panel::set_above_fullscreen(&handles_closure.panel, mtm, on);
@@ -150,9 +147,9 @@ pub fn run_app(
         })
         .expect("spawn overlay-cmd thread");
 
-    // 6. Call NSApplication.run() — blocks until terminate(&app) is called from
+    // 6. Call NSApplication.run() — blocks until terminate() is called from
     // any dispatched closure (e.g. the Quit handler above).
-    unsafe { let _: () = msg_send![&app, run]; }
+    app.run();
 
     // 7. After run() returns, workers exit on next iteration when the channels close.
     // The OverlayHandles Arc is dropped when the last worker closes.

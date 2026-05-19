@@ -10,6 +10,7 @@ use objc2_foundation::NSString;
 use objc2_app_kit::{
     NSPanel, NSTextField, NSWindowStyleMask, NSWindowCollectionBehavior,
     NSFloatingWindowLevel, NSStatusWindowLevel, NSColor, NSFont, NSLineBreakMode,
+    NSBackingStoreType,
 };
 use objc2_core_foundation::{CGRect, CGPoint, CGSize};
 use crate::config::Config;
@@ -52,7 +53,7 @@ pub fn build_overlay_panel(
 
         // Create the NSPanel with appropriate style and behavior.
         let style_mask = NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel;
-        let backing = 2u64; // NSBackingStoreBuffered
+        let backing = NSBackingStoreType::Buffered.0;
 
         // Allocate and initialize NSPanel
         let panel: Retained<NSPanel> = msg_send![
