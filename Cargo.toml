@@ -92,8 +92,14 @@ ort = { version = "2.0.0-rc.12", features = ["webgpu"] }
 hound = "3.5"  # WAV reader for the spike fixture; tiny pure-Rust crate
 # AppKit bindings (used Phase 2+); declared up-front so cross-target check exercises them.
 objc2 = "0.6"
-objc2-foundation = "0.3"
-objc2-app-kit = "0.3"
+objc2-foundation = { version = "0.3", features = [
+    "NSString", "NSNotification", "NSObject", "NSRunLoop",
+] }
+objc2-app-kit = { version = "0.3", features = [
+    "NSApplication", "NSPanel", "NSWindow", "NSTextField", "NSScreen",
+    "NSColor", "NSFont", "NSAttributedString", "NSEvent",
+    "NSResponder", "NSView", "NSAppearance",
+] }
 objc2-core-foundation = "0.3"
 # Grand Central Dispatch for caption-bridge main-thread marshaling (Phase 2+).
 dispatch2 = "0.3"
