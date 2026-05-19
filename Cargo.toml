@@ -111,6 +111,14 @@ objc2-app-kit = { version = "0.3", features = [
     "NSResponder", "NSView", "NSAppearance",
 ] }
 objc2-core-foundation = "0.3"
+objc2-screen-capture-kit = { version = "0.3", features = [
+    "SCStream", "SCShareableContent", "SCError",
+    "objc2-core-media", "block2", "dispatch2",
+] }
+objc2-core-media = { version = "0.3", features = [
+    "CMSampleBuffer", "CMBlockBuffer", "CMFormatDescription", "CMTime", "CMAttachment",
+] }
+objc2-core-audio-types = "0.3"  # AudioStreamBasicDescription, AudioBufferList
 # Grand Central Dispatch for caption-bridge main-thread marshaling (Phase 2+).
 dispatch2 = "0.3"
 block2 = "0.6"
