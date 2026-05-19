@@ -111,19 +111,17 @@ fn feed_fixture_wav(
     let chunk_size = 960; // 10ms of 48kHz stereo interleaved
     let sleep_duration = std::time::Duration::from_millis(10);
 
-    for chunk in stereo_48k.chunks(chunk_size) {
-        if wake.is_shutdown() {
-            break;
+    // Loop the fixture continuously so STT has steady audio after model warm-up.
+    // The early loop iterations will drop samples while the model loads; that's expected.
+    'outer: loop {
+        for chunk in stereo_48k.chunks(chunk_size) {
+            if wake.is_shutdown() {
+                break 'outer;
+            }
+            let _ = ring_producer.push_slice(chunk);
+            wake.notify();
+            std::thread::sleep(sleep_duration);
         }
-        let n = ring_producer.push_slice(chunk);
-        if n < chunk.len() {
-            eprintln!(
-                "warn: ring buffer full, dropped {} samples",
-                chunk.len() - n
-            );
-        }
-        wake.notify();
-        std::thread::sleep(sleep_duration);
     }
 
     Ok(())
