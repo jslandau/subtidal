@@ -38,7 +38,9 @@ pub fn run_app(
 
     // 2. Get NSApplication and set to Accessory (no Dock icon, matches LSUIElement=true).
     let app = NSApplication::sharedApplication(mtm);
-    let activation_policy = 2u64; // NSApplicationActivationPolicyAccessory
+    // NSApplicationActivationPolicy values: Regular=0, Accessory=1, Prohibited=2.
+    // Accessory matches LSUIElement=true in Info.plist: no Dock icon, UI allowed.
+    let activation_policy: isize = 1;
     unsafe { let _: () = msg_send![&app, setActivationPolicy: activation_policy]; }
 
     // 3. Build the overlay panel and retain both panel and content label.
