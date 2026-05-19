@@ -1,23 +1,23 @@
 //! STT engine abstraction and the combined audio-resample-inference thread.
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod nemotron;
 
 use anyhow::Result;
 use arc_swap::ArcSwap;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use ringbuf::HeapCons;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use ringbuf::traits::Consumer;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::thread;
 use std::time::Duration;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::time::Instant;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::audio::resampler::AudioResampler;
 use crate::config::Engine;
 
@@ -108,7 +108,7 @@ pub struct PipelineConfig {
 ///
 /// Engine swap is handled by swapping the `ArcSwap<Engine>` from the tray; this
 /// thread notices on each chunk boundary and rebuilds its local engine.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn spawn_stt_thread(
     mut ring_consumer: HeapCons<f32>,
     wake: Arc<AudioWake>,
@@ -233,7 +233,7 @@ pub fn spawn_stt_thread(
         .expect("spawning stt-pipeline thread")
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn build_engine(
     choice: &Engine,
     model_dir: &std::path::Path,
@@ -244,7 +244,7 @@ fn build_engine(
     }
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests {
     use super::*;
     use std::thread;
