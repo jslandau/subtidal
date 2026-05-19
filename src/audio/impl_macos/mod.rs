@@ -19,11 +19,23 @@ pub enum AudioCommand {
     Shutdown,
 }
 
+/// User-visible message posted to the NSPanel when SCK fails to start
+/// (typically because TCC permission was denied). Satisfies AC3.6's
+/// "in-panel message" branch.
+const TCC_DENIED_PANEL_MESSAGE: &str =
+    "Grant Screen Recording permission in System Settings → Privacy & Security, then relaunch.";
+
 /// Public entry point — symmetric with `audio::impl_linux::start_audio_thread`.
 /// Phase 4 tuple has 2 elements; Phase 5 widens to add a fallback-event
 /// receiver and surfaces neutral `AudioSource` types.
+///
+/// `error_caption_tx` is the same caption channel the STT pipeline writes
+/// into; on TCC denial the audio thread posts a one-shot caption to it so
+/// the user sees an actionable message in the NSPanel rather than an empty
+/// overlay (AC3.6).
 pub fn start_audio_thread(
     audio_wake: Arc<AudioWake>,
+    error_caption_tx: async_channel::Sender<String>,
 ) -> Result<(SyncSender<AudioCommand>, ringbuf::HeapCons<f32>)> {
     // Same capacity as Linux: 48000 frames × 2 channels = 96_000 f32 elements.
     const RING_BUF_CAPACITY: usize = 96_000;
@@ -42,6 +54,10 @@ pub fn start_audio_thread(
         .spawn(move || {
             if let Err(e) = run_sck_capture(producer_for_thread, wake_for_thread, rx_cmd) {
                 eprintln!("error: SCK capture exited: {e:#}");
+                // Surface the failure in the NSPanel via the caption channel.
+                // send_blocking is fine here — this is the non-RT path and the
+                // overlay's caption-bridge thread will drain immediately.
+                let _ = error_caption_tx.send_blocking(TCC_DENIED_PANEL_MESSAGE.to_string());
             }
         })?;
 
@@ -71,12 +87,8 @@ fn run_sck_capture(
             .context("SCStream.startCapture — TCC denied?")
     })?;
 
-    // Spin until shutdown command received.
-    loop {
-        match rx_cmd.recv() {
-            Ok(AudioCommand::Shutdown) | Err(_) => break,
-        }
-    }
+    // Wait for shutdown. Phase 5 extends the match to dispatch SwitchSource.
+    let _ = rx_cmd.recv();
 
     // Stop capturing (best-effort cleanup).
     rt.block_on(async {

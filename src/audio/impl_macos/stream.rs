@@ -142,12 +142,12 @@ pub fn build_stream(
 /// First invocation triggers the macOS TCC prompt for Screen Recording.
 pub async fn shareable_content_current() -> Result<Retained<SCShareableContent>> {
     let (tx, rx) = tokio::sync::oneshot::channel::<Result<Retained<SCShareableContent>>>();
-    let tx_cell = std::cell::UnsafeCell::new(Some(tx));
+    let tx_cell = std::sync::Mutex::new(Some(tx));
 
     unsafe {
         let block = RcBlock::new(
             move |content: *mut SCShareableContent, error: *mut NSError| {
-                let Some(tx) = (*tx_cell.get()).take() else {
+                let Some(tx) = tx_cell.lock().ok().and_then(|mut g| g.take()) else {
                     return;
                 };
                 let result = if !error.is_null() {
@@ -174,11 +174,11 @@ pub async fn shareable_content_current() -> Result<Retained<SCShareableContent>>
 /// Start capturing audio.
 pub async fn start_capture(stream: &SCStream) -> Result<()> {
     let (tx, rx) = tokio::sync::oneshot::channel::<Result<()>>();
-    let tx_cell = std::cell::UnsafeCell::new(Some(tx));
+    let tx_cell = std::sync::Mutex::new(Some(tx));
 
     unsafe {
         let block = RcBlock::new(move |error: *mut NSError| {
-            let Some(tx) = (*tx_cell.get()).take() else {
+            let Some(tx) = tx_cell.lock().ok().and_then(|mut g| g.take()) else {
                 return;
             };
             let result = if !error.is_null() {
@@ -201,11 +201,11 @@ pub async fn start_capture(stream: &SCStream) -> Result<()> {
 /// Stop capturing audio. Best-effort; errors are surfaced to the caller.
 pub async fn stop_capture(stream: &SCStream) -> Result<()> {
     let (tx, rx) = tokio::sync::oneshot::channel::<Result<()>>();
-    let tx_cell = std::cell::UnsafeCell::new(Some(tx));
+    let tx_cell = std::sync::Mutex::new(Some(tx));
 
     unsafe {
         let block = RcBlock::new(move |error: *mut NSError| {
-            let Some(tx) = (*tx_cell.get()).take() else {
+            let Some(tx) = tx_cell.lock().ok().and_then(|mut g| g.take()) else {
                 return;
             };
             let result = if !error.is_null() {

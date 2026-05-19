@@ -44,14 +44,28 @@ pub fn extract_pcm(sb: &CMSampleBuffer) -> Option<&[f32]> {
         }
 
         let bb = sb.data_buffer()?;
+        let mut length_at_offset: usize = 0;
         let mut total_len: usize = 0;
         let mut ptr: *mut std::os::raw::c_char = std::ptr::null_mut();
-        let status =
-            bb.data_pointer(0, std::ptr::null_mut(), &mut total_len, &mut ptr);
+        let status = bb.data_pointer(
+            0,
+            &mut length_at_offset,
+            &mut total_len,
+            &mut ptr,
+        );
         if status != 0 || ptr.is_null() {
             return None;
         }
-        let n_samples = total_len / std::mem::size_of::<f32>();
+        // CMBlockBuffer can be multi-segment; `length_at_offset` is the size of
+        // the contiguous range starting at `ptr`, while `total_len` sums all
+        // segments. SCK's audio path typically delivers single-segment buffers,
+        // but if a multi-segment buffer ever arrives, the contiguous slice we
+        // can hand out is shorter than `total_len`. Drop the buffer rather
+        // than read past the first segment.
+        if length_at_offset != total_len {
+            return None;
+        }
+        let n_samples = length_at_offset / std::mem::size_of::<f32>();
         Some(std::slice::from_raw_parts(ptr as *const f32, n_samples))
     }
 }

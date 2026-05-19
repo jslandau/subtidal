@@ -41,25 +41,28 @@ pub fn main() {
     // 4. Create shared AudioWake primitive for STT thread coordination.
     let audio_wake = Arc::new(stt::AudioWake::new());
 
-    // 5. Start ScreenCaptureKit audio capture. This spawns the screen-capture-audio
-    // worker thread which constructs the SCStream and pushes samples into the
-    // ring buffer. First launch triggers the TCC permission prompt.
-    let (audio_cmd_tx, ring_consumer) = audio::start_audio_thread(Arc::clone(&audio_wake))
-        .unwrap_or_else(|e| {
-            eprintln!("error: failed to start audio capture: {e:#}");
-            eprintln!("hint: grant Screen Recording permission to Subtidal.app in System Settings → Privacy & Security.");
-            std::process::exit(1);
-        });
-
-    // 6. Lock-free engine selection (single engine for now, but the infrastructure exists).
+    // 5. Lock-free engine selection (single engine for now, but the infrastructure exists).
     let engine_choice = Arc::new(arc_swap::ArcSwap::new(Arc::new(config::Engine::Nemotron)));
 
-    // 7. Construct shared state: captions_enabled flag.
+    // 6. Construct shared state: captions_enabled flag.
     let captions_enabled: CaptionsEnabled = Arc::new(AtomicBool::new(true));
 
-    // 8. Build async channels for captions and overlay commands.
+    // 7. Build async channels for captions and overlay commands.
     let (caption_tx, caption_rx) = async_channel::unbounded::<String>();
     let (cmd_tx, cmd_rx) = async_channel::unbounded::<OverlayCommand>();
+
+    // 8. Start ScreenCaptureKit audio capture. This spawns the screen-capture-audio
+    // worker thread which constructs the SCStream and pushes samples into the
+    // ring buffer. First launch triggers the TCC permission prompt. The caption
+    // channel is handed over so the audio thread can post an in-panel error
+    // message if TCC is denied (AC3.6).
+    let (audio_cmd_tx, ring_consumer) =
+        audio::start_audio_thread(Arc::clone(&audio_wake), caption_tx.clone())
+            .unwrap_or_else(|e| {
+                eprintln!("error: failed to start audio capture: {e:#}");
+                eprintln!("hint: grant Screen Recording permission to Subtidal.app in System Settings → Privacy & Security.");
+                std::process::exit(1);
+            });
 
     // 9. Construct the STT pipeline configuration and spawn the thread.
     let pipeline_cfg = stt::PipelineConfig {
@@ -88,8 +91,8 @@ pub fn main() {
     })
     .expect("install ctrlc handler");
 
-    // 12. Call overlay::run_app to build the panel and run NSApplication.run().
-    // This blocks until Quit is posted (from ctrlc or signal handler).
+    // Call overlay::run_app to build the panel and run NSApplication.run().
+    // This blocks until Quit is posted by the ctrlc handler.
     overlay::run_app(config, caption_rx, cmd_rx, captions_enabled);
 
     // 13. After run_app returns, release the STT thread + SCK audio thread and clean up.
