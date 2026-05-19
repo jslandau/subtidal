@@ -15,3 +15,7 @@ mod impl_linux;
 pub use impl_linux::{
     start_audio_thread, validate_audio_source, AudioCommand, AudioNode, NodeList,
 };
+
+#[cfg(target_os = "macos")]
+mod impl_macos;
+// No re-exports yet; macOS public surface is built up in Phases 4-5.

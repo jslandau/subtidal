@@ -10,3 +10,7 @@ mod impl_linux;
 
 #[cfg(target_os = "linux")]
 pub use impl_linux::{spawn_tray, TrayState};
+
+#[cfg(target_os = "macos")]
+mod impl_macos;
+// No re-exports yet; macOS public surface is built up in Phase 6.

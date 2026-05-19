@@ -15,6 +15,10 @@ mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::run_gtk_app;
 
+#[cfg(target_os = "macos")]
+mod macos;
+// No re-exports yet; macOS public surface is built up in Phase 2.
+
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
