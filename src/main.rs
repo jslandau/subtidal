@@ -14,8 +14,7 @@ mod main_macos;
 // not trip this error — that is how the CI cross-target-check stays green while
 // `cargo build` on unsupported targets fails fast with a single, clear message.
 //
-// Placement note: this MUST come AFTER all `mod` declarations but
-// BEFORE any `use` or other logic, per Rust's mod-resolution order.
+// Placement note: this MUST come AFTER all `mod` declarations, per Rust's mod-resolution order.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 compile_error!("Subtidal supports Linux and macOS only.");
 

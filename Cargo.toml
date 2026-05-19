@@ -56,6 +56,9 @@ arc-swap = "1"
 # Async channels for glib main-loop consumption
 async-channel = "2"
 
+# Model management (cross-platform)
+hf-hub = { version = "0.5", features = ["tokio"] }
+
 # Linux-only crates and CUDA feature additions.
 # Resolver v2 (edition 2021 default) isolates the `cuda` feature on `ort` and
 # `parakeet-rs` to Linux-target compilations only; on non-Linux targets these
@@ -78,9 +81,6 @@ parakeet-rs = { version = "0.3.4", features = ["cuda"] }
 # Desktop notifications (notify-rust pulls in mac-notification-sys whose build
 # script fails when cross-compiling from Linux to darwin).
 notify-rust = "4"
-# Model management (hf-hub → ureq → rustls → ring, whose build script invokes
-# `cc` with macOS-only flags that fail on a Linux CI host).
-hf-hub = { version = "0.5", features = ["tokio"] }
 # Process exit without atexit handlers (avoids CUDA cleanup race)
 libc = "0.2"
 
@@ -98,8 +98,6 @@ objc2-core-foundation = "0.3"
 # Grand Central Dispatch for caption-bridge main-thread marshaling (Phase 2+).
 dispatch2 = "0.3"
 block2 = "0.6"
-# Model download via HuggingFace Hub (cross-platform now; was Linux-only).
-hf-hub = { version = "0.5", features = ["tokio"] }
 
 [profile.release]
 opt-level = 3

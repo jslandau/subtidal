@@ -2,7 +2,7 @@
 
 Real-time speech-to-text overlay for Linux/Wayland.
 
-Freshness: 2026-05-17
+Freshness: 2026-05-18
 
 ## Purpose
 
@@ -14,16 +14,18 @@ Platform-bound code is cfg-gated; see `## Platform Isolation` below for the gati
 
 ```
 lib.rs                       — library crate root; re-exports modules for cross-target `cargo check --lib`
-main.rs                      — bin entry point: CLI args + non-Linux `compile_error!` guard; delegates to main_linux
+main.rs                      — bin entry point; platform-agnostic `compile_error!` guard; dispatches to main_linux/main_macos
 main_linux.rs                — Linux startup orchestration, thread wiring, CUDA probe/reexec helpers (cuda_available, run_cuda_probe, cuda_status_message, reexec_with_absolute_argv0_if_needed, …)
-config.rs                    — TOML config with hot-reload (notify/debouncer)
-models/mod.rs                — HuggingFace model download (hf-hub + tokio)
-audio/mod.rs                 — neutral shell; re-exports impl_linux on Linux
+main_macos.rs                — macOS startup entry point (stub in Phase 1; Phase 2+ has NSApplication orchestration)
+config.rs                    — TOML config with hot-reload (notify/debouncer); cfg-gated per-OS config paths
+models/mod.rs                — HuggingFace model download (hf-hub + tokio); cross-platform with cfg-gated per-OS data dirs
+audio/mod.rs                 — neutral shell; re-exports impl_linux on Linux, impl_macos on macOS
 audio/impl_linux.rs          — PipeWire capture thread, node enumeration, source switching
+audio/impl_macos.rs          — macOS audio capture (ScreenCaptureKit); skeleton in Phase 1, populated Phase 4–5
 audio/resampler.rs           — rubato 48kHz stereo -> 16kHz mono resampler (platform-neutral)
 stt/mod.rs                   — SttEngine trait + AudioWake (neutral) + Linux-gated spawn_stt_thread / build_engine / `mod nemotron`
 stt/nemotron.rs              — Nemotron RNNT engine (ort + parakeet-rs, CUDA) [Linux-only]
-overlay/mod.rs               — neutral: OverlayCommand, CaptionsEnabled; re-exports overlay/linux on Linux
+overlay/mod.rs               — neutral: OverlayCommand, CaptionsEnabled; re-exports overlay/linux on Linux, overlay/macos on macOS
 overlay/caption_buffer.rs    — pure text buffer: line-fill, overlap dedup, expiry (GTK-free, well-tested) [neutral]
 overlay/transcript_log.rs    — pure data: timestamped fragments, paragraph coalescing, .json serialization (GTK-free, well-tested) [neutral]
 overlay/linux/mod.rs         — overlay orchestration, OverlayCommand dispatch, run_gtk_app public API
@@ -31,8 +33,10 @@ overlay/linux/window.rs      — GTK4 layer-shell window construction (docked/fl
 overlay/linux/drag.rs        — floating-mode drag gesture with compositor-quirk coordinate compensation
 overlay/linux/input_region.rs — Wayland input region for click-through
 overlay/linux/transcript_window.rs — GTK4 toplevel window for transcript mode: scrollable TextView, autoscroll, Save dialog
-tray/mod.rs                  — neutral shell; re-exports impl_linux on Linux
+overlay/macos/mod.rs         — macOS overlay orchestration (NSPanel/NSWindow); skeleton in Phase 1, populated Phase 2+ (panel + caption bridge)
+tray/mod.rs                  — neutral shell; re-exports impl_linux on Linux, impl_macos on macOS
 tray/impl_linux.rs           — ksni StatusNotifierItem system tray
+tray/impl_macos.rs           — macOS tray implementation (NSStatusItem); skeleton in Phase 1, populated Phase 6
 ```
 
 ## Thread Model
@@ -105,7 +109,7 @@ Subtidal's source tree is structured so that all Linux-specific code is gated be
 
 **Build-script gate.** `build.rs` early-returns on non-Linux targets via `env::var("TARGET").unwrap_or_default().contains("linux")`. The `cfg!(target_os = "linux")` macro is intentionally NOT used here — it reflects the build host, not the cross-compilation target, and would silently fail to skip CUDA-provider scanning during `cargo check --target x86_64-apple-darwin` from a Linux host.
 
-**`compile_error!` location.** `src/main.rs` contains the macOS hard-fail guard immediately after the `mod main_linux;` declaration and before any `use` or other logic. Placement before `mod` declarations causes confusing cascading errors from rustc's mod-resolution pass.
+**`compile_error!` location.** `src/main.rs` contains the platform-availability guard immediately after all `mod` declarations (`mod main_linux;` and `mod main_macos;`) and before any `use` or other logic. Placement before `mod` declarations causes confusing cascading errors from rustc's mod-resolution pass.
 
 **Recipe for adding a new platform (e.g., macOS).**
 

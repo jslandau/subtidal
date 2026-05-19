@@ -73,7 +73,7 @@ pub fn nemotron_models_present() -> bool {
     nemotron_models_present_in(&models_dir())
 }
 
-/// Download all Nemotron model files to `~/.local/share/subtidal/models/nemotron/`.
+/// Download all Nemotron model files to `nemotron_model_dir()` (per-OS data dir).
 /// Skips individual files that already exist.
 /// Exits the process with an error message if any download fails.
 pub async fn ensure_nemotron_models() -> Result<()> {
