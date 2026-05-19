@@ -92,6 +92,10 @@ libc = "0.2"
 
 # Resolver v2 isolates the `webgpu` feature on `ort` and `parakeet-rs` to
 # macOS-target compilations only; this mirrors the Linux/cuda pattern above.
+# Note: webgpu is targeted for Phase 4-5 inference (STT pipeline on GPU via WebGPU).
+# Phase 2 does not use it (test caption harness only). Phase 2 cross-target check
+# (aarch64-apple-darwin) is constrained by ort's prebuilt binary availability; Phase 7
+# adds x86_64-apple-darwin once ort supplies x86_64 wgpu prebuilts.
 [target.'cfg(target_os = "macos")'.dependencies]
 parakeet-rs = { version = "0.3.4", features = ["webgpu"] }
 ort = { version = "2.0.0-rc.12", features = ["webgpu"] }

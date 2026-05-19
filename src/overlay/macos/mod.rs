@@ -6,5 +6,4 @@
 pub mod panel;
 mod app;
 
-#[allow(dead_code)]
 pub use app::run_app;

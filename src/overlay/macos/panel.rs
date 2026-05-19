@@ -30,7 +30,6 @@ pub struct PanelConfig {
 /// Returns (panel, content_label) where the label is the main caption text view.
 /// The panel is constructed with appropriate flags for multi-space rendering,
 /// fullscreen compatibility, and transparency.
-#[allow(dead_code)]
 pub fn build_overlay_panel(
     mtm: MainThreadMarker,
     config: &Config,
@@ -120,7 +119,7 @@ pub fn build_overlay_panel(
 }
 
 /// Inspect panel configuration for testing and verification.
-#[allow(dead_code)]
+#[allow(dead_code)]  // Used in #[cfg(all(test, target_os = "macos"))] tests
 pub fn inspect(panel: &NSPanel) -> PanelConfig {
     unsafe {
         let level: i64 = msg_send![panel, level];
@@ -145,8 +144,11 @@ pub fn inspect(panel: &NSPanel) -> PanelConfig {
 /// When `on` is true, sets the panel to NSStatusWindowLevel (renders above fullscreen).
 /// When `on` is false, sets the panel to NSFloatingWindowLevel (below fullscreen).
 /// The same NSPanel instance is retained throughout; no rebuild occurs.
-#[allow(dead_code)]
-pub fn set_above_fullscreen(panel: &NSPanel, _mtm: MainThreadMarker, on: bool) {
+///
+/// SAFETY: The mtm parameter proves this is called on the main thread, where
+/// AppKit mutations are safe. The parameter is not directly used but enforces
+/// the contract at the call site.
+pub fn set_above_fullscreen(panel: &NSPanel, _: MainThreadMarker, on: bool) {
     unsafe {
         let level = if on {
             NSStatusWindowLevel as i64
