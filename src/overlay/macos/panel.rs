@@ -5,12 +5,12 @@
 //! Transcript window.
 
 use objc2::rc::Retained;
-use objc2::{msg_send, MainThreadMarker, ClassType, MainThreadOnly};
+use objc2::{msg_send, MainThreadMarker, MainThreadOnly, ClassType};
 use objc2_foundation::NSString;
 use objc2_app_kit::{
     NSPanel, NSTextField, NSWindowStyleMask, NSWindowCollectionBehavior,
     NSFloatingWindowLevel, NSStatusWindowLevel, NSColor, NSFont, NSLineBreakMode,
-    NSBackingStoreType,
+    NSBackingStoreType, NSView,
 };
 use objc2_core_foundation::{CGRect, CGPoint, CGSize};
 use crate::config::Config;
@@ -46,74 +46,78 @@ pub fn build_overlay_panel(
 
         // Determine initial level based on above_fullscreen config.
         let level = if config.above_fullscreen {
-            NSStatusWindowLevel as i64
+            NSStatusWindowLevel as isize
         } else {
-            NSFloatingWindowLevel as i64
+            NSFloatingWindowLevel as isize
         };
 
         // Create the NSPanel with appropriate style and behavior.
         let style_mask = NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel;
-        let backing = NSBackingStoreType::Buffered.0;
+        let backing = NSBackingStoreType::Buffered;
 
-        // Allocate and initialize NSPanel
-        let panel: Retained<NSPanel> = msg_send![
+        // Allocate and initialize NSPanel using typed init method.
+        let panel: Retained<NSPanel> = NSPanel::initWithContentRect_styleMask_backing_defer(
             NSPanel::alloc(mtm),
-            initWithContentRect: frame,
-            styleMask: style_mask.bits() as u64,
-            backing: backing,
-            defer: false
-        ];
+            frame,
+            style_mask,
+            backing,
+            false
+        );
 
         // Set window level (floating or status depending on above_fullscreen)
-        let _: () = msg_send![&panel, setLevel: level];
+        panel.setLevel(level);
 
         // Configure collection behavior for multi-space and fullscreen support
         let collection_behavior = NSWindowCollectionBehavior::CanJoinAllSpaces
             | NSWindowCollectionBehavior::FullScreenAuxiliary;
-        let _: () = msg_send![&panel, setCollectionBehavior: collection_behavior.bits()];
+        panel.setCollectionBehavior(collection_behavior);
 
         // Mark as floating panel
-        let _: () = msg_send![&panel, setFloatingPanel: true];
+        panel.setFloatingPanel(true);
 
         // Set transparent background
         let clear_color = NSColor::clearColor();
-        let _: () = msg_send![&panel, setBackgroundColor: &*clear_color];
+        panel.setBackgroundColor(Some(&*clear_color));
 
         // Disable shadow (Floating mode)
-        let _: () = msg_send![&panel, setHasShadow: false];
+        panel.setHasShadow(false);
 
         // Click-through: ignore mouse events
-        let _: () = msg_send![&panel, setIgnoresMouseEvents: true];
+        panel.setIgnoresMouseEvents(true);
 
         // Allow repositioning by background click
-        let _: () = msg_send![&panel, setMovableByWindowBackground: true];
+        panel.setMovableByWindowBackground(true);
 
         // Create and configure the content NSTextField
         let label_frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(width, height));
-        let label: Retained<NSTextField> = msg_send![
+        let label: Retained<NSTextField> = NSTextField::initWithFrame(
             NSTextField::alloc(mtm),
-            initWithFrame: label_frame
-        ];
+            label_frame
+        );
 
         // Text properties
         let empty_str = NSString::from_str("");
-        let _: () = msg_send![&label, setStringValue: &*empty_str];
-        let _: () = msg_send![&label, setLineBreakMode: NSLineBreakMode::ByWordWrapping.0];
-        let _: () = msg_send![&label, setEditable: false];
-        let _: () = msg_send![&label, setSelectable: false];
-        let _: () = msg_send![&label, setBordered: false];
-        let _: () = msg_send![&label, setDrawsBackground: false];
+        label.setStringValue(&*empty_str);
+        label.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
+        label.setEditable(false);
+        label.setSelectable(false);
+        label.setBordered(false);
+        label.setDrawsBackground(false);
 
         // Font: monospace at configured size
+        // SAFETY: msg_send! is retained here because NSFont::userFixedPitchFontOfSize
+        // doesn't have a typed equivalent in objc2-app-kit 0.3.
         let font_size = config.appearance.font_size as f64;
         let font: Retained<NSFont> = msg_send![
             NSFont::class(),
             userFixedPitchFontOfSize: font_size
         ];
-        let _: () = msg_send![&label, setFont: &*font];
+        label.setFont(Some(&*font));
 
         // Set label as panel's content view
-        let _: () = msg_send![&panel, setContentView: &*label];
+        // SAFETY: NSTextField is a subclass of NSView, so we can transmute the reference.
+        let view_ref: &NSView = std::mem::transmute::<&NSTextField, &NSView>(&label);
+        panel.setContentView(Some(view_ref));
 
         (panel, label)
     }
@@ -122,20 +126,18 @@ pub fn build_overlay_panel(
 /// Inspect panel configuration for testing and verification.
 #[allow(dead_code)]  // Used in #[cfg(all(test, target_os = "macos"))] tests
 pub fn inspect(panel: &NSPanel) -> PanelConfig {
-    unsafe {
-        let level: i64 = msg_send![panel, level];
-        let collection_behavior: u64 = msg_send![panel, collectionBehavior];
-        let is_floating_panel: bool = msg_send![panel, isFloatingPanel];
-        let style_mask: u64 = msg_send![panel, styleMask];
-        let ignores_mouse_events: bool = msg_send![panel, ignoresMouseEvents];
+    let level: i64 = panel.level() as i64;
+    let collection_behavior: u64 = panel.collectionBehavior().bits() as u64;
+    let is_floating_panel = panel.isFloatingPanel();
+    let style_mask: u64 = panel.styleMask().bits() as u64;
+    let ignores_mouse_events = panel.ignoresMouseEvents();
 
-        PanelConfig {
-            level,
-            collection_behavior,
-            is_floating_panel,
-            style_mask,
-            ignores_mouse_events,
-        }
+    PanelConfig {
+        level,
+        collection_behavior,
+        is_floating_panel,
+        style_mask,
+        ignores_mouse_events,
     }
 }
 
@@ -150,18 +152,23 @@ pub fn inspect(panel: &NSPanel) -> PanelConfig {
 /// AppKit mutations are safe. The parameter is not directly used but enforces
 /// the contract at the call site.
 pub fn set_above_fullscreen(panel: &NSPanel, _: MainThreadMarker, on: bool) {
-    unsafe {
-        let level = if on {
-            NSStatusWindowLevel as i64
-        } else {
-            NSFloatingWindowLevel as i64
-        };
-        let _: () = msg_send![panel, setLevel:level];
-    }
+    let level = if on {
+        NSStatusWindowLevel as isize
+    } else {
+        NSFloatingWindowLevel as isize
+    };
+    panel.setLevel(level);
 }
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
+    // NOTE: `cargo test --lib` runs tests on worker threads, so the MainThreadMarker::new()
+    // check inside each test silently skips assertions when not on the main thread.
+    // To actually exercise the assertions, run `cargo test --lib -- --test-threads=1`.
+    // Only the first test will acquire the main thread; subsequent tests will still skip.
+    // A future MainThreadTestHarness (Phase 5/6) will provide a proper test harness
+    // for single-threaded main-thread testing of AppKit code.
+
     use super::*;
     use crate::config::{AppearanceConfig, OverlayPosition};
 

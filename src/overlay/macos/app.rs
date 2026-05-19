@@ -7,7 +7,6 @@ use objc2::MainThreadMarker;
 use objc2_app_kit::{NSApplication, NSPanel, NSTextField, NSApplicationActivationPolicy};
 use objc2::rc::Retained;
 use objc2_foundation::NSString;
-use objc2::msg_send;
 use crate::config::Config;
 use crate::overlay::{OverlayCommand, CaptionsEnabled};
 use super::panel;
@@ -96,7 +95,7 @@ pub fn run_app(
                     let _mtm = MainThreadMarker::new()
                         .expect("dispatch main queue runs on main thread");
                     let ns_text = NSString::from_str(&text);
-                    unsafe { let _: () = msg_send![&*handles_closure.label, setStringValue: &*ns_text]; }
+                    handles_closure.label.setStringValue(&*ns_text);
                     // CaptionBuffer / TranscriptLog integration deferred to Phase 6.
                 });
             }
@@ -130,7 +129,7 @@ pub fn run_app(
                                 // Phase 2: clear the label only.
                                 // Phase 6 extends to all 4 surfaces.
                                 let ns_empty = NSString::from_str("");
-                                unsafe { let _: () = msg_send![&*handles_closure.label, setStringValue: &*ns_empty]; }
+                                handles_closure.label.setStringValue(&*ns_empty);
                             }
                         }
                         // Phase 2 stubs — Phase 6 fills in real handlers.
