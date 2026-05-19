@@ -18,4 +18,6 @@ pub use impl_linux::{
 
 #[cfg(target_os = "macos")]
 mod impl_macos;
-// No re-exports yet; macOS public surface is built up in Phases 4-5.
+
+#[cfg(target_os = "macos")]
+pub use impl_macos::{start_audio_thread, AudioCommand};
