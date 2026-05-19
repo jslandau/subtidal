@@ -9,10 +9,10 @@ use subtidal::{models, stt};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use ringbuf::HeapRb;
-use ringbuf::traits::Split;
+use ringbuf::traits::{Producer, Split};
 
 /// Fixture-WAV harness: reads a 16kHz mono WAV file, upsamples to 48kHz mono
-/// via rubato SincFixedIn, duplicates to stereo, and feeds into the ring buffer
+/// via rubato Fft resampler, duplicates to stereo, and feeds into the ring buffer
 /// at real-time pacing. Phase 3 only; superseded by Phase 4's ScreenCaptureKit.
 fn feed_fixture_wav(
     path: &str,
@@ -20,10 +20,11 @@ fn feed_fixture_wav(
     wake: &Arc<stt::AudioWake>,
 ) -> anyhow::Result<()> {
     use hound::WavReader;
-    use rubato::{Resampler, SincFixedIn};
+    use rubato::{Fft, FixedSync, Resampler};
+    use audioadapter_buffers::direct::SequentialSliceOfVecs;
 
     // Read the 16kHz mono fixture.
-    let mut reader = WavReader::open(path)
+    let reader = WavReader::open(path)
         .map_err(|e| anyhow::anyhow!("failed to open fixture WAV: {e}"))?;
     let spec = reader.spec();
 
@@ -49,21 +50,54 @@ fn feed_fixture_wav(
         .map(|s| s as f32 / 32768.0)
         .collect();
 
-    // Upsample 16kHz mono → 48kHz mono using rubato SincFixedIn.
-    // SincFixedIn requires input in the form of Vec<Vec<f32>> (per-channel).
-    let mut resampler = SincFixedIn::<f32>::new(
-        3.0, // ratio: 48kHz / 16kHz = 3.0
-        2.0, // oversampling factor for SincFixedIn
-        rubato::SincInterpolationType::Linear,
-        256, // chunk size (arbitrary; we process the entire fixture at once)
-        1,   // mono: 1 input channel
-    );
+    // Upsample 16kHz mono → 48kHz mono using rubato Fft resampler.
+    // FixedSync::Input means input size is fixed, output varies.
+    // Input chunk size: 1280 samples at 16kHz = 80ms
+    // Output: 1280 * 3 = 3840 samples at 48kHz (same 80ms duration)
+    let input_chunk_size = 1280;
+    let mut resampler = Fft::<f32>::new(
+        16_000, // input sample rate
+        48_000, // output sample rate
+        input_chunk_size,
+        2, // sub-chunks
+        1, // mono: 1 input channel
+        FixedSync::Input,
+    )?;
 
-    // Wrap mono samples in a Vec<Vec<f32>> for rubato API.
-    let input = vec![mono_samples];
-    let (mono_48k, _) = resampler.process(&input, None)
-        .map_err(|e| anyhow::anyhow!("resampling failed: {e}"))?;
-    let mono_48k = mono_48k.into_iter().next().unwrap();
+    let expected_output_frames = (input_chunk_size * 48_000) / 16_000;
+
+    // Pre-allocate channel buffers for resampling.
+    let mut input_vecs = vec![Vec::with_capacity(input_chunk_size)];
+    let mut output_vecs = vec![vec![0.0f32; expected_output_frames]];
+
+    // Process all samples in chunks.
+    let mut mono_48k = Vec::new();
+    for chunk in mono_samples.chunks(input_chunk_size) {
+        input_vecs[0].clear();
+        input_vecs[0].extend_from_slice(chunk);
+
+        // If this is a partial final chunk, pad with zeros.
+        if input_vecs[0].len() < input_chunk_size {
+            input_vecs[0].resize(input_chunk_size, 0.0);
+        }
+
+        let input_adapter =
+            SequentialSliceOfVecs::new(&input_vecs, 1, input_chunk_size)
+                .map_err(|e| anyhow::anyhow!("creating input adapter: {e}"))?;
+
+        let mut output_adapter = SequentialSliceOfVecs::new_mut(
+            &mut output_vecs,
+            1,
+            expected_output_frames,
+        )
+        .map_err(|e| anyhow::anyhow!("creating output adapter: {e}"))?;
+
+        let (_input_count, output_count) = resampler
+            .process_into_buffer(&input_adapter, &mut output_adapter, None)
+            .map_err(|e| anyhow::anyhow!("resampling audio: {e}"))?;
+
+        mono_48k.extend_from_slice(&output_vecs[0][..output_count]);
+    }
 
     // Duplicate mono to stereo (interleaved L, R, L, R, ...).
     let mut stereo_48k = Vec::with_capacity(mono_48k.len() * 2);
