@@ -172,12 +172,18 @@ pub fn apply_geometry(
     mode: OverlayMode,
     config: &Config,
 ) {
+    // Height is pre-sized for max_lines so caption text never has to
+    // resize the panel (resize-while-paint causes the flicker bug).
+    let height = panel_height_for_lines(
+        config.appearance.font_size,
+        config.appearance.max_lines as usize,
+    );
+
     unsafe {
         match mode {
             OverlayMode::Docked => {
                 let screen = NSScreen::mainScreen(mtm).expect("main screen");
                 let visible = screen.visibleFrame();  // AC2.7 — not frame
-                let height = panel_height_for_font(config.appearance.font_size);
                 let rect = CGRect::new(
                     CGPoint::new(visible.origin.x, visible.origin.y + visible.size.height - height),
                     CGSize::new(visible.size.width, height),
@@ -186,23 +192,30 @@ pub fn apply_geometry(
                 panel.setIgnoresMouseEvents(true);  // AC2.5
                 panel.setMovableByWindowBackground(false);
                 panel.setHasShadow(true);
+                if let Some(content) = panel.contentView() {
+                    if let Ok(label) = content.downcast::<NSTextField>() {
+                        // Docked spans the full screen; center text so it
+                        // reads as a banner instead of clinging to the left edge.
+                        label.setAlignment(objc2_app_kit::NSTextAlignment::Center);
+                    }
+                }
             }
             OverlayMode::Floating => {
                 let rect = CGRect::new(
                     CGPoint::new(config.position.x as f64, config.position.y as f64),
-                    CGSize::new(
-                        config.appearance.width as f64,
-                        panel_height_for_font(config.appearance.font_size),
-                    ),
+                    CGSize::new(config.appearance.width as f64, height),
                 );
                 panel.setFrame_display(rect, true);
                 // Mouse events: locked → pass-through (AC2.5); unlocked → receive
                 // (so setMovableByWindowBackground can detect the drag).
-                // ignoresMouseEvents=true bypasses the window entirely, which would
-                // make drag impossible regardless of movableByWindowBackground.
                 panel.setIgnoresMouseEvents(config.locked);
                 panel.setMovableByWindowBackground(!config.locked);
                 panel.setHasShadow(false);
+                if let Some(content) = panel.contentView() {
+                    if let Ok(label) = content.downcast::<NSTextField>() {
+                        label.setAlignment(objc2_app_kit::NSTextAlignment::Left);
+                    }
+                }
             }
             OverlayMode::Transcript => {
                 // Transcript mode uses a separate NSWindow; hide the caption panel.
@@ -225,49 +238,19 @@ fn panel_height_for_lines(font_size: f32, line_count: usize) -> f64 {
     (font_size as f64) * 1.5 * lines + 8.0
 }
 
-/// Set the caption text and grow the panel height to match the line count
-/// of the display string. The panel's top edge is held fixed so the
-/// caption stays anchored where the user placed it (Floating) or against
-/// the menu bar (Docked); the bottom edge grows downward.
-///
-/// Called by the caption-bridge and expiry timer after each label update
-/// so multi-line CaptionBuffer output is fully visible.
+/// Set the caption text on the label. The panel is pre-sized for
+/// `max_lines` at startup / mode-switch, so no per-caption frame change
+/// is needed here — that avoids resize jitter and the off-screen rendering
+/// flicker we hit when growing height while text was being painted.
 pub fn set_caption_text(
-    panel: &NSPanel,
+    _panel: &NSPanel,
     label: &NSTextField,
     text: &str,
-    mtm: MainThreadMarker,
-    config: &Config,
+    _mtm: MainThreadMarker,
+    _config: &Config,
 ) {
     let ns_text = NSString::from_str(text);
     unsafe { label.setStringValue(&ns_text) };
-
-    // Skip resize in Transcript mode — the overlay panel is hidden.
-    if matches!(config.overlay_mode, OverlayMode::Transcript) {
-        return;
-    }
-
-    let line_count = text.lines().count().max(1);
-    let new_height = panel_height_for_lines(config.appearance.font_size, line_count);
-
-    let current = panel.frame();
-    // Hold the top edge: origin.y = (top of current frame) - new_height.
-    let top = current.origin.y + current.size.height;
-    let new_frame = CGRect::new(
-        CGPoint::new(current.origin.x, top - new_height),
-        CGSize::new(current.size.width, new_height),
-    );
-    unsafe { panel.setFrame_display(new_frame, true) };
-
-    // The content view (NSTextField label) auto-sizes via the contentView
-    // -> setFrame path on macOS when the panel's content view is configured
-    // with auto-layout; for our manual layout we resize it explicitly.
-    let label_frame = CGRect::new(
-        CGPoint::new(0.0, 0.0),
-        CGSize::new(current.size.width, new_height),
-    );
-    unsafe { label.setFrame(label_frame) };
-    let _ = mtm; // marker held to enforce main-thread call site
 }
 
 /// AC1.6 — re-apply geometry on NSApplicationDidChangeScreenParametersNotification.

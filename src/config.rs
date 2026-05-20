@@ -439,6 +439,7 @@ pub fn start_hot_reload(
 #[cfg(target_os = "macos")]
 pub fn start_hot_reload_macos(
     audio_cmd_tx: std::sync::mpsc::SyncSender<crate::audio::AudioCommand>,
+    overlay_tx: async_channel::Sender<crate::overlay::OverlayCommand>,
 ) -> anyhow::Result<notify_debouncer_mini::Debouncer<notify::RecommendedWatcher>> {
     let config_path = Config::config_path();
     if let Some(parent) = config_path.parent() {
@@ -447,21 +448,60 @@ pub fn start_hot_reload_macos(
 
     let initial_cfg = Config::load();
     let prev_source = std::sync::Mutex::new(initial_cfg.audio_source.clone());
+    let prev_appearance = std::sync::Mutex::new(initial_cfg.appearance.clone());
+    let prev_mode = std::sync::Mutex::new(initial_cfg.overlay_mode.clone());
+    let prev_locked = std::sync::Mutex::new(initial_cfg.locked);
+    let prev_above_fullscreen = std::sync::Mutex::new(initial_cfg.above_fullscreen);
 
     let mut debouncer = new_debouncer(Duration::from_millis(500), move |result: DebounceEventResult| {
         match result {
             Ok(_events) => match Config::load_from(&Config::config_path()) {
                 Ok(new_cfg) => {
+                    // Only emit when a value actually changed — defends against
+                    // the drag-save echo (position-only writes match position-only
+                    // in new_cfg and produce no commands).
                     if let Ok(mut prev) = prev_source.lock() {
                         if *prev != new_cfg.audio_source {
                             eprintln!(
-                                "info: config hot-reload: audio_source changed {:?} -> {:?}",
+                                "info: hot-reload: audio_source {:?} -> {:?}",
                                 *prev, new_cfg.audio_source
                             );
                             let _ = audio_cmd_tx.send(
                                 crate::audio::AudioCommand::SwitchSource(new_cfg.audio_source.clone())
                             );
                             *prev = new_cfg.audio_source.clone();
+                        }
+                    }
+                    if let Ok(mut prev) = prev_appearance.lock() {
+                        if *prev != new_cfg.appearance {
+                            let _ = overlay_tx.send_blocking(
+                                crate::overlay::OverlayCommand::UpdateAppearance(new_cfg.appearance.clone())
+                            );
+                            *prev = new_cfg.appearance.clone();
+                        }
+                    }
+                    if let Ok(mut prev) = prev_mode.lock() {
+                        if *prev != new_cfg.overlay_mode {
+                            let _ = overlay_tx.send_blocking(
+                                crate::overlay::OverlayCommand::SetMode(new_cfg.overlay_mode.clone())
+                            );
+                            *prev = new_cfg.overlay_mode.clone();
+                        }
+                    }
+                    if let Ok(mut prev) = prev_locked.lock() {
+                        if *prev != new_cfg.locked {
+                            let _ = overlay_tx.send_blocking(
+                                crate::overlay::OverlayCommand::SetLocked(new_cfg.locked)
+                            );
+                            *prev = new_cfg.locked;
+                        }
+                    }
+                    if let Ok(mut prev) = prev_above_fullscreen.lock() {
+                        if *prev != new_cfg.above_fullscreen {
+                            let _ = overlay_tx.send_blocking(
+                                crate::overlay::OverlayCommand::SetAboveFullscreen(new_cfg.above_fullscreen)
+                            );
+                            *prev = new_cfg.above_fullscreen;
                         }
                     }
                 }

@@ -132,7 +132,7 @@ pub fn main() {
     // 10b. Start config hot-reload watcher. On audio_source edits it sends
     // SwitchSource to the audio worker so users can change capture target by
     // editing config.toml. _watcher must stay alive for the process lifetime.
-    let _config_watcher = match config::start_hot_reload_macos(audio_cmd_tx.clone()) {
+    let _config_watcher = match config::start_hot_reload_macos(audio_cmd_tx.clone(), cmd_tx.clone()) {
         Ok(w) => {
             eprintln!("info: config hot-reload active (watching config.toml for audio_source changes)");
             Some(w)
