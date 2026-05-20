@@ -5,6 +5,7 @@ use objc2::MainThreadMarker;
 use subtidal::audio::{self, AudioCommand};
 use subtidal::config::{self, Config};
 use subtidal::overlay::{self, CaptionsEnabled, OverlayCommand};
+use subtidal::tray;
 use subtidal::{models, stt};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -154,16 +155,36 @@ pub fn main() {
     })
     .expect("install ctrlc handler");
 
-    // 12. Call overlay::run_app to build the panel and run NSApplication.run().
+    // 12. Install the macOS system tray (NSStatusItem + NSMenu) on the main thread.
+    // This must happen before overlay::run_app so the tray is present when the app starts.
+    let mtm = MainThreadMarker::new()
+        .expect("main_macos::main must run on the main thread (needed for tray install)");
+
+    let audio_sources = Arc::new(std::sync::Mutex::new(
+        audio::list_sources().unwrap_or_default()
+    ));
+
+    let tray_state = tray::TrayState {
+        config: Arc::new(std::sync::Mutex::new(config.clone())),
+        captions_enabled: Arc::clone(&captions_enabled),
+        cmd_tx: cmd_tx.clone(),
+        audio_cmd_tx: audio_cmd_tx.clone(),
+        engine_choice: Arc::clone(&engine_choice),
+        audio_sources,
+    };
+
+    let _tray = tray::install_tray(tray_state, mtm);
+
+    // 13. Call overlay::run_app to build the panel and run NSApplication.run().
     // This blocks until Quit is posted by the ctrlc handler.
     overlay::run_app(config, caption_rx, cmd_rx, captions_enabled);
 
-    // 13. After run_app returns, release the STT thread + audio tap thread and clean up.
+    // 14. After run_app returns, release the STT thread + audio tap thread and clean up.
     audio_wake.shutdown();
     let _ = audio_cmd_tx.send(AudioCommand::Shutdown);
     drop(caption_tx);
     drop(cmd_tx);
 
-    // 14. Exit cleanly with code 0 (no CUDA atexit cleanup on macOS).
+    // 15. Exit cleanly with code 0 (no CUDA atexit cleanup on macOS).
     std::process::exit(0);
 }
