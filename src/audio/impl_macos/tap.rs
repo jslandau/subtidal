@@ -120,18 +120,21 @@ impl AudioTap {
             // Protect the tap_id from leaking on read_tap_uid or create_aggregate_device failures.
             // TapGuard is a scope guard that ensures AudioHardwareDestroyProcessTap is called
             // unless explicitly defused (which happens after the IOProc is successfully created).
-            struct TapGuard(AudioObjectID, bool);  // (tap_id, defused)
+            struct TapGuard { tap_id: AudioObjectID, defused: bool }
+            impl TapGuard {
+                fn defuse(&mut self) { self.defused = true; }
+            }
             impl Drop for TapGuard {
                 fn drop(&mut self) {
-                    if !self.1 {
-                        unsafe { let _ = AudioHardwareDestroyProcessTap(self.0); }
+                    if !self.defused {
+                        unsafe { let _ = AudioHardwareDestroyProcessTap(self.tap_id); }
                     }
                 }
             }
-            let mut tap_guard = TapGuard(tap_id, false);
+            let mut tap_guard = TapGuard { tap_id, defused: false };
 
             // Step 4: Read the tap's UID.
-            let tap_uid = read_tap_uid(tap_guard.0)
+            let tap_uid = read_tap_uid(tap_guard.tap_id)
                 .context("failed to read tap UID")?;
 
             // Step 5: Create aggregate device.
@@ -155,29 +158,28 @@ impl AudioTap {
                 &mut ioproc_id,
             );
             if status != 0 {
-                // Clean up: reclaim the Box and drop it.
+                // Clean up post-tap resources; TapGuard (still armed) destroys the tap on unwind.
                 let _ = Box::from_raw(context_ptr as *mut CallbackContext);
                 let _ = AudioHardwareDestroyAggregateDevice(aggregate_id);
-                let _ = AudioHardwareDestroyProcessTap(tap_guard.0);
                 anyhow::bail!("AudioDeviceCreateIOProcID failed: status={}", status);
             }
 
             // Step 7: Start the IOProc.
             let status = AudioDeviceStart(aggregate_id, ioproc_id);
             if status != 0 {
-                // Clean up in reverse order.
+                // Clean up post-tap resources in reverse order; TapGuard destroys the tap on unwind.
                 let _ = AudioDeviceDestroyIOProcID(aggregate_id, ioproc_id);
+                let _ = Box::from_raw(context_ptr as *mut CallbackContext);
                 let _ = AudioHardwareDestroyAggregateDevice(aggregate_id);
-                let _ = AudioHardwareDestroyProcessTap(tap_guard.0);
                 anyhow::bail!("AudioDeviceStart failed: status={}", status);
             }
 
             // Defuse the guard — ownership of tap_id transfers to the AudioTap struct,
             // which will clean it up via Drop.
-            tap_guard.1 = true;
+            tap_guard.defuse();
 
             Ok(AudioTap {
-                tap_id: tap_guard.0,
+                tap_id: tap_guard.tap_id,
                 aggregate_id,
                 ioproc_id,
                 callback_context_ptr: context_ptr as *mut CallbackContext,
