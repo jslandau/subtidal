@@ -6,7 +6,6 @@ use std::sync::{Arc, Mutex};
 use objc2::MainThreadMarker;
 use objc2_app_kit::{NSApplication, NSPanel, NSTextField, NSApplicationActivationPolicy};
 use objc2::rc::Retained;
-use objc2_foundation::NSString;
 use crate::config::{Config, OverlayMode};
 use crate::overlay::{OverlayCommand, CaptionsEnabled, caption_buffer::CaptionBuffer, transcript_log::TranscriptLog};
 use super::{panel, transcript_window, drag};
@@ -233,12 +232,16 @@ pub fn run_app(
     // The OverlayHandles Arc is dropped when the last worker closes.
 }
 
-/// Helper function to derive max_chars_per_line from appearance config.
-/// Mimics the Linux formula: (width * char_width_fraction) / estimated_char_width.
+/// Derive max_chars_per_line from appearance config.
+///
+/// Mimics the Linux formula: (width * char_width_fraction) / char_width,
+/// where char_width scales with font size — a monospace glyph is roughly
+/// font_size * 0.6 wide. The earlier hard-coded 8px assumed a 13pt font;
+/// at larger sizes it overestimated capacity and NSTextField wrapped
+/// mid-line, producing more visual lines than the buffer budgeted for
+/// and clipping the bottom of the panel.
 fn derive_max_chars(appearance: &crate::config::AppearanceConfig) -> usize {
-    // Rough estimate: monospace char at default size ≈ 8 pixels wide.
-    // char_width_fraction is 0.85–0.95 to add visual padding.
-    let char_width_pixels = 8.0;  // Conservative estimate for monospace
+    let char_width_pixels = (appearance.font_size as f64 * 0.6).max(6.0);
     let effective_width = appearance.width as f64
         * appearance.effective_char_width_fraction() as f64;
     (effective_width / char_width_pixels).max(20.0) as usize
@@ -305,12 +308,37 @@ fn handle_overlay_command(
             }
         }
         OverlayCommand::UpdateAppearance(appearance) => {
+            // Update in-memory config (don't re-save — the watcher just read
+            // this from disk; writing back can cause a debouncer ping-pong).
             {
                 let mut cfg = handles.config.lock().unwrap();
                 cfg.appearance = appearance.clone();
-                let _ = cfg.save();
             }
 
+            // Re-apply font to the label.
+            let font_size = appearance.font_size as f64;
+            let font: objc2::rc::Retained<objc2_app_kit::NSFont> = unsafe {
+                use objc2::ClassType;
+                objc2::msg_send![
+                    objc2_app_kit::NSFont::class(),
+                    userFixedPitchFontOfSize: font_size
+                ]
+            };
+            handles.label.setFont(Some(&font));
+
+            // Re-apply background color from CSS string.
+            panel::apply_background_color(&handles.label, &appearance.background_color);
+
+            // Re-apply geometry so width / max_lines changes take effect.
+            let cfg_snapshot = handles.config.lock().unwrap().clone();
+            panel::apply_geometry(
+                &handles.panel,
+                mtm,
+                cfg_snapshot.overlay_mode.clone(),
+                &cfg_snapshot,
+            );
+
+            // Update CaptionBuffer wrap/expiry to match new appearance.
             let max_chars = derive_max_chars(&appearance);
             handles.caption_buffer.lock().unwrap().update_config(
                 appearance.max_lines as usize,

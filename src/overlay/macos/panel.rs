@@ -112,12 +112,7 @@ pub fn build_overlay_panel(
         // is layer-backable; cornerRadius + masksToBounds + layer.backgroundColor
         // gives us the soft pill look without an extra wrapper view.
         label.setWantsLayer(true);
-        if let Some(layer) = label.layer() {
-            layer.setCornerRadius(8.0);
-            layer.setMasksToBounds(true);
-            let bg = NSColor::colorWithWhite_alpha(0.0, 0.75);
-            layer.setBackgroundColor(Some(&bg.CGColor()));
-        }
+        apply_background_color(&label, &config.appearance.background_color);
 
         // Font: monospace at configured size
         // SAFETY: msg_send! is retained here because NSFont::userFixedPitchFontOfSize
@@ -184,9 +179,15 @@ pub fn apply_geometry(
             OverlayMode::Docked => {
                 let screen = NSScreen::mainScreen(mtm).expect("main screen");
                 let visible = screen.visibleFrame();  // AC2.7 — not frame
+                // Docked is a banner pinned to the top of the screen.
+                // Use the configured width, centered horizontally — full
+                // screen width left captions clinging to a tiny portion of
+                // a huge band.
+                let band_width = (config.appearance.width as f64).min(visible.size.width);
+                let x = visible.origin.x + (visible.size.width - band_width) * 0.5;
                 let rect = CGRect::new(
-                    CGPoint::new(visible.origin.x, visible.origin.y + visible.size.height - height),
-                    CGSize::new(visible.size.width, height),
+                    CGPoint::new(x, visible.origin.y + visible.size.height - height),
+                    CGSize::new(band_width, height),
                 );
                 panel.setFrame_display(rect, true);
                 panel.setIgnoresMouseEvents(true);  // AC2.5
@@ -194,8 +195,6 @@ pub fn apply_geometry(
                 panel.setHasShadow(true);
                 if let Some(content) = panel.contentView() {
                     if let Ok(label) = content.downcast::<NSTextField>() {
-                        // Docked spans the full screen; center text so it
-                        // reads as a banner instead of clinging to the left edge.
                         label.setAlignment(objc2_app_kit::NSTextAlignment::Center);
                     }
                 }
@@ -225,17 +224,63 @@ pub fn apply_geometry(
     }
 }
 
-/// Calculate panel height for a given font size and explicit line count.
-/// Used both for the initial single-line frame (line_count=1) and for
-/// growing the panel when CaptionBuffer emits a multi-line display.
-fn panel_height_for_font(font_size: f32) -> f64 {
-    panel_height_for_lines(font_size, 1)
+/// Apply a CSS-style color string to the caption label's CALayer
+/// (cornerRadius + masksToBounds preserved). Supports the two formats
+/// the Linux config uses: `rgba(R, G, B, A)` and `#RRGGBB`. Anything
+/// unparseable falls back to the default translucent dark.
+pub fn apply_background_color(label: &NSTextField, css: &str) {
+    let (r, g, b, a) = parse_css_color(css).unwrap_or((0.0, 0.0, 0.0, 0.75));
+    if let Some(layer) = label.layer() {
+        layer.setCornerRadius(8.0);
+        layer.setMasksToBounds(true);
+        let color = unsafe {
+            NSColor::colorWithCalibratedRed_green_blue_alpha(r, g, b, a)
+        };
+        layer.setBackgroundColor(Some(&color.CGColor()));
+    }
 }
 
-/// Per-line height plus uniform padding.
+/// Parse `rgba(R, G, B, A)`, `rgb(R, G, B)`, or `#RRGGBB[AA]`. Returns
+/// components in 0.0..=1.0 range. Tolerant of whitespace.
+fn parse_css_color(s: &str) -> Option<(f64, f64, f64, f64)> {
+    let s = s.trim();
+    if let Some(hex) = s.strip_prefix('#') {
+        if hex.len() == 6 || hex.len() == 8 {
+            let r = u8::from_str_radix(&hex[0..2], 16).ok()? as f64 / 255.0;
+            let g = u8::from_str_radix(&hex[2..4], 16).ok()? as f64 / 255.0;
+            let b = u8::from_str_radix(&hex[4..6], 16).ok()? as f64 / 255.0;
+            let a = if hex.len() == 8 {
+                u8::from_str_radix(&hex[6..8], 16).ok()? as f64 / 255.0
+            } else { 1.0 };
+            return Some((r, g, b, a));
+        }
+        return None;
+    }
+    let lower = s.to_ascii_lowercase();
+    let (prefix, has_alpha) = if let Some(rest) = lower.strip_prefix("rgba(") {
+        (rest, true)
+    } else if let Some(rest) = lower.strip_prefix("rgb(") {
+        (rest, false)
+    } else {
+        return None;
+    };
+    let body = prefix.strip_suffix(')')?;
+    let parts: Vec<&str> = body.split(',').map(|p| p.trim()).collect();
+    let expected = if has_alpha { 4 } else { 3 };
+    if parts.len() != expected { return None; }
+    let r = parts[0].parse::<f64>().ok()? / 255.0;
+    let g = parts[1].parse::<f64>().ok()? / 255.0;
+    let b = parts[2].parse::<f64>().ok()? / 255.0;
+    let a = if has_alpha { parts[3].parse::<f64>().ok()? } else { 1.0 };
+    Some((r, g, b, a))
+}
+
+/// Per-line height plus uniform padding. The 1.7 factor is generous
+/// enough to absorb font ascent/descent + line leading so NSTextField
+/// doesn't clip the bottom of multi-line wrapped text.
 fn panel_height_for_lines(font_size: f32, line_count: usize) -> f64 {
     let lines = line_count.max(1) as f64;
-    (font_size as f64) * 1.5 * lines + 8.0
+    (font_size as f64) * 1.7 * lines + 12.0
 }
 
 /// Set the caption text on the label. The panel is pre-sized for
