@@ -102,7 +102,7 @@ ort = { version = "2.0.0-rc.12", features = ["webgpu"] }
 # AppKit bindings (used Phase 2+); declared up-front so cross-target check exercises them.
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = [
-    "NSString", "NSNotification", "NSObject", "NSRunLoop",
+    "NSString", "NSNotification", "NSObject", "NSRunLoop", "NSArray",
 ] }
 objc2-app-kit = { version = "0.3", features = [
     "NSApplication", "NSPanel", "NSWindow", "NSTextField", "NSScreen",

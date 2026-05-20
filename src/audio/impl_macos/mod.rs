@@ -13,6 +13,7 @@ use crate::stt::AudioWake;
 mod stream;           // SCStream + delegate (Task 3, Phase 4 — being superseded)
 mod normalize;        // CMSampleBuffer → 48kHz stereo f32 (Task 3 + 5, Phase 4 — being superseded)
 mod tap_processes;    // Core Audio process enumeration (Task 2, Phase 5 revised)
+mod tap;              // Core Audio process tap RAII (Task 3, Phase 5 revised)
 
 /// Commands sent to the audio thread. Phase 4 ships only `Shutdown`; Phase 5
 /// adds `SwitchSource`.
