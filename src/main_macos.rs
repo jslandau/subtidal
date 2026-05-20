@@ -128,6 +128,20 @@ pub fn main() {
         pipeline_cfg,
     );
 
+    // 10b. Start config hot-reload watcher. On audio_source edits it sends
+    // SwitchSource to the audio worker so users can change capture target by
+    // editing config.toml. _watcher must stay alive for the process lifetime.
+    let _config_watcher = match config::start_hot_reload_macos(audio_cmd_tx.clone()) {
+        Ok(w) => {
+            eprintln!("info: config hot-reload active (watching config.toml for audio_source changes)");
+            Some(w)
+        }
+        Err(e) => {
+            eprintln!("warn: config hot-reload unavailable: {e}; config changes will need a restart");
+            None
+        }
+    };
+
     // 11. Install Ctrl-C handler to post OverlayCommand::Quit and signal both
     // the STT pipeline and audio tap thread to shut down.
     let cmd_tx_signal = cmd_tx.clone();

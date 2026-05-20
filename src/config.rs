@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use notify_debouncer_mini::{new_debouncer, DebounceEventResult};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::time::Duration;
 
 /// Which STT engine to use for inference.
@@ -425,6 +425,57 @@ pub fn start_hot_reload(
         notify::RecursiveMode::NonRecursive,
     )?;
 
+    Ok(debouncer)
+}
+
+/// Start watching config.toml for `audio_source` changes (macOS).
+///
+/// Sends `AudioCommand::SwitchSource` to the audio worker when the
+/// persisted `audio_source` differs from the previous reload. Other
+/// config fields (appearance, mode) are ignored here — the macOS overlay
+/// surface doesn't react to those yet (Phase 6).
+///
+/// Returns the debouncer (must be kept alive for the lifetime of the watch).
+#[cfg(target_os = "macos")]
+pub fn start_hot_reload_macos(
+    audio_cmd_tx: std::sync::mpsc::SyncSender<crate::audio::AudioCommand>,
+) -> anyhow::Result<notify_debouncer_mini::Debouncer<notify::RecommendedWatcher>> {
+    let config_path = Config::config_path();
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let initial_cfg = Config::load();
+    let prev_source = std::sync::Mutex::new(initial_cfg.audio_source.clone());
+
+    let mut debouncer = new_debouncer(Duration::from_millis(500), move |result: DebounceEventResult| {
+        match result {
+            Ok(_events) => match Config::load_from(&Config::config_path()) {
+                Ok(new_cfg) => {
+                    if let Ok(mut prev) = prev_source.lock() {
+                        if *prev != new_cfg.audio_source {
+                            eprintln!(
+                                "info: config hot-reload: audio_source changed {:?} -> {:?}",
+                                *prev, new_cfg.audio_source
+                            );
+                            let _ = audio_cmd_tx.send(
+                                crate::audio::AudioCommand::SwitchSource(new_cfg.audio_source.clone())
+                            );
+                            *prev = new_cfg.audio_source.clone();
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("warn: config hot-reload failed (malformed TOML): {e}");
+                }
+            },
+            Err(e) => eprintln!("warn: config file watch error: {e:?}"),
+        }
+    })?;
+
+    debouncer
+        .watcher()
+        .watch(&config_path, notify::RecursiveMode::NonRecursive)?;
     Ok(debouncer)
 }
 
