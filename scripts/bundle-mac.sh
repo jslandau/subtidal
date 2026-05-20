@@ -41,7 +41,7 @@ cp resources/macos/Info.plist "$APP/Contents/Info.plist"
 # Bundle the ort WebGPU runtime dylib next to the binary and wire @rpath so the
 # binary can resolve `@rpath/libwebgpu_dawn.dylib` without DYLD_LIBRARY_PATH.
 # Required for the bundle to launch via LaunchServices (`open Subtidal.app`),
-# which is itself required for TCC (Screen Recording) prompts to surface.
+# which is itself required for TCC (Audio Capture) prompts to surface.
 DYLIB_SRC="target/${PROFILE}/libwebgpu_dawn.dylib"
 if [[ -f "$DYLIB_SRC" ]]; then
   cp "$DYLIB_SRC" "$APP/Contents/MacOS/libwebgpu_dawn.dylib"

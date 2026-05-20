@@ -43,33 +43,57 @@ pub fn main() {
     // notifications silently fail but the audio watchdog and captions still work.
     audio::notify_request_authorization_best_effort();
 
-    // 4. Create shared AudioWake primitive for STT thread coordination.
+    // 4. Validate persisted audio source: if the config specifies an app that's
+    // not currently running, fall back to SystemOutput before spawning the audio thread.
+    let mut initial_audio_source = config.audio_source.clone();
+    if let config::AudioSource::App { bundle_id, .. } = &initial_audio_source {
+        match audio::list_sources() {
+            Ok(sources) => {
+                let present = sources.iter().any(|s| {
+                    if let config::AudioSource::App { bundle_id: b, .. } = &s.source {
+                        b == bundle_id
+                    } else {
+                        false
+                    }
+                });
+                if !present {
+                    eprintln!("info: persisted app '{}' is not running; falling back to SystemOutput", bundle_id);
+                    initial_audio_source = config::AudioSource::SystemOutput;
+                }
+            }
+            Err(e) => {
+                eprintln!("warn: could not validate persisted audio source: {e}; attempting to use it anyway");
+            }
+        }
+    }
+
+    // 5. Create shared AudioWake primitive for STT thread coordination.
     let audio_wake = Arc::new(stt::AudioWake::new());
 
-    // 5. Lock-free engine selection (single engine for now, but the infrastructure exists).
+    // 6. Lock-free engine selection (single engine for now, but the infrastructure exists).
     let engine_choice = Arc::new(arc_swap::ArcSwap::new(Arc::new(config::Engine::Nemotron)));
 
-    // 6. Construct shared state: captions_enabled flag.
+    // 7. Construct shared state: captions_enabled flag.
     let captions_enabled: CaptionsEnabled = Arc::new(AtomicBool::new(true));
 
-    // 7. Build async channels for captions and overlay commands.
+    // 8. Build async channels for captions and overlay commands.
     let (caption_tx, caption_rx) = async_channel::unbounded::<String>();
     let (cmd_tx, cmd_rx) = async_channel::unbounded::<OverlayCommand>();
 
-    // 8. Start Core Audio Process Tap audio capture. This spawns the audio-tap-worker
+    // 9. Start Core Audio Process Tap audio capture. This spawns the audio-tap-worker
     // thread which constructs the tap and pushes samples into the ring buffer.
     // First launch triggers the Audio Capture TCC permission prompt. The caption
     // channel is handed over so the audio thread can post an in-panel error
     // message if TCC is denied (AC3.6).
     let (audio_cmd_tx, ring_consumer, fallback_rx) =
-        audio::start_audio_thread(config.audio_source.clone(), Arc::clone(&audio_wake), caption_tx.clone())
+        audio::start_audio_thread(initial_audio_source, Arc::clone(&audio_wake), caption_tx.clone())
             .unwrap_or_else(|e| {
                 eprintln!("error: failed to start audio capture: {e:#}");
                 eprintln!("hint: grant Audio Capture permission to Subtidal.app in System Settings → Privacy & Security.");
                 std::process::exit(1);
             });
 
-    // 8b. Spawn a listener thread for fallback events. This thread drains the receiver
+    // 9b. Spawn a listener thread for fallback events. This thread drains the receiver
     // and logs each event for diagnostic purposes (and future tray-state updates).
     let _fallback_listener = std::thread::Builder::new()
         .name("audio-fallback-listener".into())
@@ -83,7 +107,7 @@ pub fn main() {
         })
         .expect("spawn fallback listener thread");
 
-    // 9. Construct the STT pipeline configuration and spawn the thread.
+    // 10. Construct the STT pipeline configuration and spawn the thread.
     let pipeline_cfg = stt::PipelineConfig {
         engine_choice: Arc::clone(&engine_choice),
         captions_enabled: Arc::clone(&captions_enabled),
@@ -98,8 +122,8 @@ pub fn main() {
         pipeline_cfg,
     );
 
-    // 10. Install Ctrl-C handler to post OverlayCommand::Quit and signal both
-    // the STT pipeline and SCK audio thread to shut down.
+    // 11. Install Ctrl-C handler to post OverlayCommand::Quit and signal both
+    // the STT pipeline and audio tap thread to shut down.
     let cmd_tx_signal = cmd_tx.clone();
     let audio_tx_signal = audio_cmd_tx.clone();
     let wake_for_signal = Arc::clone(&audio_wake);
@@ -110,11 +134,11 @@ pub fn main() {
     })
     .expect("install ctrlc handler");
 
-    // Call overlay::run_app to build the panel and run NSApplication.run().
+    // 12. Call overlay::run_app to build the panel and run NSApplication.run().
     // This blocks until Quit is posted by the ctrlc handler.
     overlay::run_app(config, caption_rx, cmd_rx, captions_enabled);
 
-    // 13. After run_app returns, release the STT thread + SCK audio thread and clean up.
+    // 13. After run_app returns, release the STT thread + audio tap thread and clean up.
     audio_wake.shutdown();
     let _ = audio_cmd_tx.send(AudioCommand::Shutdown);
     drop(caption_tx);

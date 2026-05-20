@@ -28,7 +28,6 @@ pub fn enumerate_audio_processes() -> Result<Vec<ProcessInfo>> {
     unsafe {
         // Step 1: Read kAudioHardwarePropertyProcessObjectList size.
         let mut size: u32 = 0;
-        let addr = &mut size as *mut u32;
         let status = AudioObjectGetPropertyDataSize(
             kAudioObjectSystemObject,
             &AudioObjectPropertyAddress {
@@ -38,7 +37,7 @@ pub fn enumerate_audio_processes() -> Result<Vec<ProcessInfo>> {
             },
             0,
             std::ptr::null(),
-            addr,
+            &mut size,
         );
         if status != 0 {
             anyhow::bail!("AudioObjectGetPropertyDataSize failed: status={}", status);
@@ -98,7 +97,6 @@ pub fn enumerate_audio_processes() -> Result<Vec<ProcessInfo>> {
 ///
 /// # Errors
 /// Returns Err if the PID is not found or Core Audio communication fails.
-#[allow(dead_code)]
 pub fn translate_pid_to_process_object(pid: std::ffi::c_int) -> Result<AudioObjectID> {
     unsafe {
         let mut out_id: AudioObjectID = 0;

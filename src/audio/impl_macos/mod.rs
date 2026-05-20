@@ -23,9 +23,23 @@ pub enum AudioCommand {
     SwitchSource(crate::config::AudioSource),
 }
 
-/// User-visible message posted to the NSPanel when Audio Capture fails to start
-/// (typically because TCC permission was denied). Satisfies AC3.6's
-/// "in-panel message" branch.
+/// Error type distinguishing initial tap build failure from runtime failures.
+#[derive(Debug)]
+enum CaptureError {
+    /// Initial tap construction failed (typically permission denied).
+    InitialBuildFailed(anyhow::Error),
+    /// Tap was running but failed later (app disappeared, rebuild failed, etc.).
+    RuntimeFailure(anyhow::Error),
+}
+
+impl From<anyhow::Error> for CaptureError {
+    fn from(e: anyhow::Error) -> Self {
+        CaptureError::RuntimeFailure(e)
+    }
+}
+
+/// User-visible message posted to the NSPanel when Audio Capture permission is denied.
+/// Satisfies AC3.6's "in-panel message" branch.
 const TCC_DENIED_PANEL_MESSAGE: &str =
     "Grant Audio Capture permission in System Settings → Privacy & Security, then relaunch.";
 
@@ -59,18 +73,26 @@ pub fn start_audio_thread(
     std::thread::Builder::new()
         .name("audio-tap-worker".into())
         .spawn(move || {
-            if let Err(e) = run_tap_capture(
+            match run_tap_capture(
                 initial_source_for_thread,
                 producer_for_thread,
                 wake_for_thread,
                 rx_cmd,
                 fallback_tx,
             ) {
-                eprintln!("error: audio tap capture exited: {e:#}");
-                // Surface the failure in the NSPanel via the caption channel.
-                // send_blocking is fine here — this is the non-RT path and the
-                // overlay's caption-bridge thread will drain immediately.
-                let _ = error_caption_tx.send_blocking(TCC_DENIED_PANEL_MESSAGE.to_string());
+                Ok(()) => {}
+                Err(CaptureError::InitialBuildFailed(e)) => {
+                    eprintln!("error: initial audio tap construction failed: {e:#}");
+                    // Surface TCC denial message in the NSPanel.
+                    let _ = error_caption_tx.send_blocking(TCC_DENIED_PANEL_MESSAGE.to_string());
+                }
+                Err(CaptureError::RuntimeFailure(e)) => {
+                    eprintln!("error: audio tap capture exited: {e:#}");
+                    // For runtime failures (rebuild failed, etc.), post a generic error message.
+                    let _ = error_caption_tx.send_blocking(
+                        format!("Audio capture failed: {e}")
+                    );
+                }
             }
         })?;
 
@@ -83,7 +105,7 @@ fn run_tap_capture(
     audio_wake: Arc<AudioWake>,
     rx_cmd: Receiver<AudioCommand>,
     fallback_tx: SyncSender<FallbackEvent>,
-) -> Result<()> {
+) -> Result<(), CaptureError> {
     let mut current_source = initial_source.clone();
     let mut current_label = source_label(&current_source);
 
@@ -92,7 +114,7 @@ fn run_tap_capture(
         tap_target_for(&current_source)?,
         Arc::clone(&ring_producer),
         Arc::clone(&audio_wake),
-    ).context("initial tap construction (Audio Capture permission denied?)")?;
+    ).map_err(|e| CaptureError::InitialBuildFailed(e.context("initial tap construction (Audio Capture permission denied?)")))?;
 
     // Watchdog: every 1 second, if we're capturing a specific process,
     // check if it's still running. On disappearance, fall back to SystemOutput.
@@ -114,14 +136,39 @@ fn run_tap_capture(
                 };
                 // Rebuild: drop old tap (Drop tears down in correct order), build new.
                 drop(tap);
-                tap = tap::AudioTap::build(
+                match tap::AudioTap::build(
                     new_target,
                     Arc::clone(&ring_producer),
                     Arc::clone(&audio_wake),
-                )
-                .context("tap rebuild on source switch")?;
-                current_source = new_source;
-                current_label = source_label(&current_source);
+                ) {
+                    Ok(new_tap) => {
+                        tap = new_tap;
+                        current_source = new_source;
+                        current_label = source_label(&current_source);
+                    }
+                    Err(e) => {
+                        eprintln!("error: tap rebuild on source switch failed: {e:#}");
+                        let _ = fallback_tx.send(FallbackEvent {
+                            previous_label: "Source switch".to_string(),
+                            new_source: crate::config::AudioSource::SystemOutput,
+                        });
+                        // Rebuild for SystemOutput as fallback.
+                        match tap::AudioTap::build(
+                            tap::TapTarget::SystemMix,
+                            Arc::clone(&ring_producer),
+                            Arc::clone(&audio_wake),
+                        ) {
+                            Ok(new_tap) => {
+                                tap = new_tap;
+                                current_label = "System Output".to_string();
+                            }
+                            Err(e) => {
+                                eprintln!("error: SystemOutput fallback rebuild failed: {e:#}; audio thread exiting");
+                                return Err(CaptureError::RuntimeFailure(e));
+                            }
+                        }
+                    }
+                }
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
@@ -131,10 +178,15 @@ fn run_tap_capture(
         if last_tick.elapsed() >= watchdog_tick {
             last_tick = std::time::Instant::now();
             if let Some(pid) = tap.captured_pid() {
-                // Check if the process is still running.
+                // Check if the process is still running via Core Audio registry.
+                // Only trigger fallback if IsRunning is positively false, not on translate errors.
                 let is_running = match tap_processes::translate_pid_to_process_object(pid) {
                     Ok(obj_id) => tap_processes::process_is_running(obj_id),
-                    Err(_) => false, // Process not found in Core Audio registry.
+                    Err(e) => {
+                        // Transient HAL hiccup; log and skip this tick rather than triggering fallback.
+                        eprintln!("warn: translate_pid_to_process_object failed: {e}; skipping watchdog tick");
+                        continue;
+                    }
                 };
 
                 if !is_running {
@@ -157,14 +209,39 @@ fn run_tap_capture(
                         new_source: crate::config::AudioSource::SystemOutput,
                     });
 
-                    // Rebuild the tap for SystemOutput.
+                    // Try to rebuild for SystemOutput. If it fails, log and keep the old (now-dead)
+                    // tap rather than killing the thread. The next SwitchSource has another chance.
                     drop(tap);
-                    tap = tap::AudioTap::build(
+                    match tap::AudioTap::build(
                         tap::TapTarget::SystemMix,
                         Arc::clone(&ring_producer),
                         Arc::clone(&audio_wake),
-                    ).context("tap rebuild on source disappearance")?;
-                    current_label = "System Output".to_string();
+                    ) {
+                        Ok(new_tap) => {
+                            tap = new_tap;
+                            current_label = "System Output".to_string();
+                        }
+                        Err(e) => {
+                            eprintln!("error: SystemMix rebuild after disappearance failed: {e:#}; audio thread will be silent until next SwitchSource");
+                            let _ = fallback_tx.send(FallbackEvent {
+                                previous_label: current_label.clone(),
+                                new_source: crate::config::AudioSource::SystemOutput,
+                            });
+                            // Rebuild for the next attempt. If this also fails, the thread exits
+                            // with an error rather than running with a dead tap forever.
+                            match tap::AudioTap::build(
+                                tap::TapTarget::SystemMix,
+                                Arc::clone(&ring_producer),
+                                Arc::clone(&audio_wake),
+                            ) {
+                                Ok(new_tap) => tap = new_tap,
+                                Err(e) => {
+                                    eprintln!("error: retry rebuild also failed: {e:#}; exiting audio thread");
+                                    return Err(CaptureError::RuntimeFailure(e));
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -179,6 +256,7 @@ fn tap_target_for(src: &crate::config::AudioSource) -> Result<tap::TapTarget> {
         crate::config::AudioSource::SystemOutput => Ok(tap::TapTarget::SystemMix),
         crate::config::AudioSource::Application { .. } => {
             // Linux variant; should not appear on macOS. Treat as SystemOutput.
+            eprintln!("warn: AudioSource::Application is Linux-only; treating as SystemOutput");
             Ok(tap::TapTarget::SystemMix)
         }
         crate::config::AudioSource::App { bundle_id, .. } => {
@@ -248,18 +326,22 @@ mod tests {
 
     #[test]
     fn start_audio_thread_returns_three_tuple() {
-        // Test that start_audio_thread now returns a 3-tuple (cmd_tx, consumer, fallback_rx)
-        // instead of a 2-tuple. This is a signature verification test.
-        //
-        // We can't run the full thread without Audio Capture permission, but we can verify
-        // that the function exists with the right signature.
-        //
-        // Note: This test would require hardware to actually call, but we can at least
-        // verify the signature compiles and is callable with the right types.
+        // Verify the signature of start_audio_thread: it returns a 3-tuple
+        // (SyncSender<AudioCommand>, HeapCons<f32>, Receiver<FallbackEvent>).
+        // This is a compile-time check; the function requires Audio Capture permission
+        // to actually run, so we verify the types here.
 
-        // This test is for documentation/signature verification; actual runtime tests
-        // are hardware-gated.
-        let _has_audio_source = crate::config::AudioSource::SystemOutput;
+        // If this compiles, the types are correct. We use a const function pointer
+        // to enforce signature checking at compile time.
+        const _: fn(
+            crate::config::AudioSource,
+            std::sync::Arc<crate::stt::AudioWake>,
+            async_channel::Sender<String>,
+        ) -> anyhow::Result<(
+            std::sync::mpsc::SyncSender<crate::audio::AudioCommand>,
+            ringbuf::HeapCons<f32>,
+            std::sync::mpsc::Receiver<crate::audio::FallbackEvent>,
+        )> = start_audio_thread;
     }
 
     #[test]

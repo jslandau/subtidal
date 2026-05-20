@@ -66,12 +66,14 @@ pub fn post_user_notification(title: &str, body: &str) -> Result<()> {
 /// **Thread safety:** Must be called on the main thread. Typically called
 /// early in `main_macos.rs` startup, before audio workers begin.
 pub fn request_authorization_best_effort() {
-    let _mtm = MainThreadMarker::new();
+    let _mtm = MainThreadMarker::new()
+        .expect("request_authorization_best_effort must be called on the main thread");
 
     let center = UNUserNotificationCenter::currentNotificationCenter();
 
     // Request authorization with .alert option (banner notifications).
-    // Use a no-op completion handler. We don't care about the result.
+    // The block must outlive the async call; we leak it intentionally since it's
+    // a fire-and-forget operation. The system retains ownership during the auth flow.
     let options = objc2_user_notifications::UNAuthorizationOptions::Alert;
 
     let block = RcBlock::new(|_, _| {
@@ -79,6 +81,10 @@ pub fn request_authorization_best_effort() {
     });
 
     center.requestAuthorizationWithOptions_completionHandler(options, &block);
+
+    // Leak the block intentionally. The system holds a reference to it during the
+    // auth flow, and this function is fire-and-forget.
+    std::mem::forget(block);
 }
 
 #[cfg(test)]

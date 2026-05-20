@@ -51,7 +51,7 @@ tray/impl_macos.rs           — macOS tray implementation (NSStatusItem); skele
 
 **macOS:**
 1. **Main/AppKit thread** — NSApplication main loop.
-2. **Audio worker thread** (`screen-capture-audio` for now; Phase 5 revised: Core Audio IOProc + watcher) — Core Audio IOProc callback pushes samples to ring buffer, 1 Hz polling thread detects source disappearance and triggers fallback.
+2. **Audio worker thread** (`audio-tap-worker`) — Core Audio IOProc callback pushes samples to ring buffer, 1 Hz polling thread detects source disappearance and triggers fallback.
 3. **STT pipeline thread** (`stt-pipeline`) — same as Linux.
 4. **Tray thread** — tokio runtime (Phase 6).
 

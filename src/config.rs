@@ -24,7 +24,7 @@ pub enum AudioSource {
     SystemOutput,
     /// (Linux/PipeWire) A specific application's PipeWire node, identified by node ID.
     Application { node_id: u32, node_name: String },
-    /// (macOS/ScreenCaptureKit) A specific application, identified by bundle ID.
+    /// (macOS/Core Audio Taps) A specific application, identified by bundle ID.
     App { bundle_id: String, label: String },
 }
 
