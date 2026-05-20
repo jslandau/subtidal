@@ -12,7 +12,7 @@
 
 **What gets reverted from Phase 5 Subcomp A:** commit `c309820`'s `list_sources()` body (SCK-flavored, calls `SCShareableContent`) and the `AudioCommand::SwitchSource` variant land in this phase reworked. Neutral types `AudioSourceInfo` and `FallbackEvent` are kept as-is.
 
-**Tech Stack:** `coreaudio-sys` 0.2.17+ (raw bindgen-generated FFI), `objc2-foundation` + `objc2-user-notifications` (for the fallback `UNUserNotificationCenter` post — `NSUserNotification` is deprecated and we want a modern path now that we're rewriting), `core-foundation` (for `CFString` round-trips needed by `kAudioProcessPropertyBundleID`).
+**Tech Stack:** `coreaudio-sys` 0.2.17+ (raw bindgen-generated FFI — covers everything we need except the two Tap-create functions, which we declare inline as a 4-line `extern "C"` block; see Task 3), `objc2-foundation` + `objc2-user-notifications` (for the fallback `UNUserNotificationCenter` post — `NSUserNotification` is deprecated and we want a modern path now that we're rewriting), `objc2` raw `msg_send!` for `CATapDescription` (no binding crate covers it; use `NSClassFromString("CATapDescription")` + `initStereoMixdownOfProcesses:` / `initStereoGlobalTapButExcludeProcesses:`), `core-foundation` (for `CFString` round-trips needed by `kAudioProcessPropertyBundleID`).
 
 **Minimum macOS:** 14.4 (raised from Phase 0's 13.0). The `NSAudioCaptureUsageDescription` key and persistent Audio Capture TCC grant ship in 14.4; the Tap API itself ships in 14.2 but `UNUserNotificationCenter`-style permission UX requires 14.4. Update `resources/macos/Info.plist`'s `LSMinimumSystemVersion` accordingly.
 
@@ -40,51 +40,23 @@ This revision covers the same AC scope as `phase_05.md`, plus carrying Phase 4's
 
 ---
 
-## Pre-flight: API verification spike
+## Pre-flight: API verification (completed 2026-05-20)
 
-**Verifies:** binding availability before the rest of the phase commits to the approach.
+The spike was run against the live SDK on the build machine (macOS 14.4+ SDK, Rust 1.95, `coreaudio-sys` 0.2.17) before this plan was committed. Findings:
 
-**Files:**
-- Create: `scripts/check-tap-symbols.sh` — single-file build smoke check
+**SDK headers present:**
+- `AudioHardwareTapping.h` — exposes `AudioHardwareCreateProcessTap` / `AudioHardwareDestroyProcessTap`, marked `API_AVAILABLE(macos(14.2))`.
+- `CATapDescription.h` — defines `CATapDescription` as an **Obj-C class** (not a C struct), with purpose-built initializers `initStereoMixdownOfProcesses:` (per-app) and `initStereoGlobalTapButExcludeProcesses:` (system-wide). These are cleaner than the multi-arg form earlier reverse-engineering write-ups described; use them directly.
 
-**Implementation:**
+**`coreaudio-sys` 0.2.17 stock binding coverage (verified empirically by building and grepping the generated `coreaudio.rs`):**
+- ✅ All property selectors (`kAudioHardwarePropertyProcessObjectList`, `kAudioHardwarePropertyTranslatePIDToProcessObject`, `kAudioProcessPropertyPID`/`BundleID`/`IsRunning`, `kAudioTapPropertyUID`/`Description`/`Format`)
+- ✅ All aggregate-device dict keys (`kAudioAggregateDeviceTapListKey`, `kAudioSubTapUIDKey`, `kAudioAggregateDeviceTapAutoStartKey`, `kAudioAggregateDeviceIsPrivateKey`, `kAudioAggregateDeviceUIDKey`)
+- ✅ All aggregate-device + IOProc functions (`AudioHardwareCreateAggregateDevice`, `AudioHardwareDestroyAggregateDevice`, `AudioDeviceCreateIOProcID`, `AudioDeviceStart`, `AudioDeviceStop`)
+- ❌ Missing: `AudioHardwareCreateProcessTap` and `AudioHardwareDestroyProcessTap` — `CoreAudio.h` umbrella does not include `AudioHardwareTapping.h`.
 
-Before writing any production code, confirm that `coreaudio-sys` 0.2.17 actually exposes the Tap symbols on the target macOS SDK. The umbrella header `CoreAudio/CoreAudio.h` may or may not pull in `AudioHardwareTapping.h` depending on Apple's SDK hygiene.
+**Resolution:** Declare the two missing functions inline in `tap.rs` as a 4-line `extern "C"` block; linking is automatic via `CoreAudio.framework` (already linked by `coreaudio-sys`). Vendoring the whole crate for two symbols is unnecessary.
 
-```bash
-#!/usr/bin/env bash
-# scripts/check-tap-symbols.sh
-set -eu
-cd "$(dirname "$0")/.."
-cat > /tmp/tap_smoke.rs <<'EOF'
-use coreaudio_sys::{
-    AudioHardwareCreateProcessTap, CATapDescription,
-    kAudioHardwarePropertyTranslatePIDToProcessObject,
-    kAudioHardwarePropertyProcessObjectList,
-    kAudioProcessPropertyBundleID,
-    kAudioProcessPropertyIsRunning,
-    kAudioProcessPropertyPID,
-    AudioHardwareCreateAggregateDevice,
-    kAudioAggregateDeviceTapListKey,
-};
-fn main() { let _ = (AudioHardwareCreateProcessTap, AudioHardwareCreateAggregateDevice); }
-EOF
-# Use the smoke file as a one-shot bin in the current crate to share Cargo.lock.
-cp /tmp/tap_smoke.rs examples/tap_smoke.rs
-cargo check --example tap_smoke --target aarch64-apple-darwin
-rm examples/tap_smoke.rs
-```
-
-**Outcomes:**
-- **All symbols resolve:** proceed to Task 1 unmodified.
-- **Some symbols missing:** vendor `coreaudio-sys` as a path dependency in `vendor/coreaudio-sys/` with one extra line in `build.rs`:
-  ```rust
-  headers.push("CoreAudio/AudioHardwareTapping.h");
-  ```
-  Document the vendoring rationale in the commit body and continue.
-- **Build fails for SDK reasons (Xcode < 15.2):** stop and escalate; the toolchain on the build machine needs updating before the rest of the phase makes sense.
-
-**Commit:** `macos: add tap-symbols smoke check (pre-flight for Core Audio Taps rewrite)`
+No spike script is checked in — the findings above are the deliverable.
 
 ---
 
@@ -230,11 +202,13 @@ impl AudioTap {
         producer: Arc<Mutex<HeapProd<f32>>>,
         wake: Arc<AudioWake>,
     ) -> Result<Self> {
-        // 1. CATapDescription:
-        //    - SystemMix:  init(processes: [], andDeviceUID: nil, withStream: 0, isExclusive: true, isMixdown: true, isPrivate: true)
-        //    - Process(p): translate pid → AudioObjectID; init(processes: [obj], …, isExclusive: false, …)
-        //    Constructed via raw Obj-C dispatch (objc2 Class lookup or NSClassFromString;
-        //    no objc2 binding crate covers CATapDescription yet).
+        // 1. CATapDescription via objc2 msg_send! against NSClassFromString("CATapDescription").
+        //    Use Apple's purpose-built initializers (verified in CATapDescription.h on
+        //    macOS 14.4 SDK during pre-flight):
+        //    - SystemMix:  [CATapDescription alloc] initStereoGlobalTapButExcludeProcesses:@[]]
+        //    - Process(p): translate pid → AudioObjectID; wrap in NSNumber; init via
+        //                  [CATapDescription alloc] initStereoMixdownOfProcesses:@[@(obj)]]
+        //    No objc2 binding crate covers CATapDescription; dispatch via raw msg_send!.
         // 2. AudioHardwareCreateProcessTap(&desc, &mut tap_id)
         // 3. Read tap's UID via AudioObjectGetPropertyData(tap_id, kAudioTapPropertyUID)
         // 4. Build aggregate device dict:
@@ -276,6 +250,25 @@ extern "C" fn ioproc_fn(
     }
     ctx.wake.notify();
     0  // noErr
+}
+```
+
+**Inline `extern "C"` for the two Tap functions** (verified missing from stock `coreaudio-sys` 0.2.17 during pre-flight; everything else used by this file comes from `coreaudio_sys::*`):
+
+```rust
+use coreaudio_sys::{AudioObjectID, OSStatus};
+use objc2::runtime::AnyObject;  // for the CATapDescription* pointer
+
+extern "C" {
+    /// Declared in <CoreAudio/AudioHardwareTapping.h>, macOS 14.2+.
+    /// Missing from coreaudio-sys 0.2.17 because the CoreAudio.h umbrella
+    /// does not include the Tapping header. Links against CoreAudio.framework,
+    /// already pulled in by coreaudio-sys.
+    fn AudioHardwareCreateProcessTap(
+        inDescription: *mut AnyObject,
+        outTapID: *mut AudioObjectID,
+    ) -> OSStatus;
+    fn AudioHardwareDestroyProcessTap(inTapID: AudioObjectID) -> OSStatus;
 }
 ```
 
@@ -504,7 +497,7 @@ On the target Apple Silicon Mac (macOS 14.4+), with Safari + a YouTube tab ready
 
 ## Risks & open questions
 
-1. **`coreaudio-sys` Tap symbols may be absent** (mitigation: vendored fork with one-line header addition — see pre-flight spike).
+1. **~~`coreaudio-sys` Tap symbols may be absent~~** — resolved during pre-flight: stock `coreaudio-sys` covers everything except the two Tap-create functions, which are declared inline in `tap.rs` as `extern "C"`. No vendoring needed.
 2. **Aggregate-device naming collisions** if a user runs multiple Subtidal builds or another app that creates `com.subtidal.tap.*` aggregates. Mitigated by including a UUID/PID suffix in the aggregate UID.
 3. **Sample-rate negotiation** — Tap rate may not be 48 kHz on all hardware. First attempt: coerce via `kAudioAggregateDeviceMainSubDeviceKey`; fallback: extend the resampler to accept any input rate (small change).
 4. **Notification permission UX** — `UNUserNotificationCenter` requires its own one-time prompt for banner display. The fallback notification is a convenience, not load-bearing; if the user denies it, the in-panel caption banner (`error_caption_tx`) still surfaces the event.
