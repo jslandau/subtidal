@@ -38,6 +38,11 @@ pub fn main() {
         });
     }
 
+    // 3b. Request notification authorization (best-effort, ignore result).
+    // This surfaces the macOS notification permission prompt. If denied,
+    // notifications silently fail but the audio watchdog and captions still work.
+    audio::notify_request_authorization_best_effort();
+
     // 4. Create shared AudioWake primitive for STT thread coordination.
     let audio_wake = Arc::new(stt::AudioWake::new());
 

@@ -16,6 +16,7 @@ mod stream;           // SCStream + delegate (Task 3, Phase 4 — being supersed
 mod normalize;        // CMSampleBuffer → 48kHz stereo f32 (Task 3 + 5, Phase 4 — being superseded)
 mod tap_processes;    // Core Audio process enumeration (Task 2, Phase 5 revised)
 mod tap;              // Core Audio process tap RAII (Task 3, Phase 5 revised)
+mod notify;           // UNUserNotificationCenter helper (Task 5, Phase 5 revised)
 
 /// Commands sent to the audio thread.
 pub enum AudioCommand {
@@ -145,6 +146,13 @@ fn run_tap_capture(
                         current_label
                     );
 
+                    // Post a user notification about the disappearance.
+                    let notification_msg = format!("'{}' stopped producing audio. Falling back to System Output.", current_label);
+                    let _ = notify::post_user_notification(
+                        "Subtidal: audio source unavailable",
+                        &notification_msg,
+                    );
+
                     // Notify the caller.
                     let _ = fallback_tx.send(FallbackEvent {
                         previous_label: current_label.clone(),
@@ -194,6 +202,12 @@ fn source_label(src: &crate::config::AudioSource) -> String {
         crate::config::AudioSource::App { label, .. } => label.clone(),
         crate::config::AudioSource::Application { node_name, .. } => node_name.clone(),
     }
+}
+
+/// Public wrapper around notify::request_authorization_best_effort.
+/// Exposed at the audio module level for main_macos.rs to call at startup.
+pub fn notify_request_authorization_best_effort() {
+    notify::request_authorization_best_effort();
 }
 
 /// Enumerate audio sources visible in the tray menu.

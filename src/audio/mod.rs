@@ -36,4 +36,4 @@ pub use impl_linux::{
 mod impl_macos;
 
 #[cfg(target_os = "macos")]
-pub use impl_macos::{start_audio_thread, AudioCommand, list_sources};
+pub use impl_macos::{start_audio_thread, AudioCommand, list_sources, notify_request_authorization_best_effort};
