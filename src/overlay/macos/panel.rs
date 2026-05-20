@@ -1,8 +1,8 @@
 //! NSPanel construction and configuration for macOS overlay.
 //!
-//! Provides a Floating-mode NSPanel with caption display and configuration.
-//! Phase 2 implements Floating mode only; Phase 6 adds Docked mode and
-//! Transcript window.
+//! Provides an NSPanel with caption display and configuration.
+//! Phase 2 implements Floating mode; Phase 6 adds Docked mode geometry,
+//! mode switching, and screen-change observation.
 
 use objc2::rc::Retained;
 use objc2::{msg_send, MainThreadMarker, MainThreadOnly, ClassType};
@@ -10,10 +10,10 @@ use objc2_foundation::NSString;
 use objc2_app_kit::{
     NSPanel, NSTextField, NSWindowStyleMask, NSWindowCollectionBehavior,
     NSFloatingWindowLevel, NSStatusWindowLevel, NSColor, NSFont, NSLineBreakMode,
-    NSBackingStoreType, NSView,
+    NSBackingStoreType, NSView, NSScreen,
 };
 use objc2_core_foundation::{CGRect, CGPoint, CGSize};
-use crate::config::Config;
+use crate::config::{Config, OverlayMode};
 
 /// Inspection helper: public view of panel configuration for testing.
 #[derive(Debug, Clone)]
@@ -145,6 +145,63 @@ pub fn inspect(panel: &NSPanel) -> PanelConfig {
 }
 
 
+/// Apply geometry configuration for a given overlay mode.
+///
+/// Reconfigures the same NSPanel for Docked vs Floating mode without rebuild.
+/// In Docked mode, the panel is positioned at the top of the visible screen frame,
+/// spanning the full width. In Floating mode, it uses the position and dimensions
+/// from config. In Transcript mode, the panel is hidden (order out).
+///
+/// SAFETY: The mtm parameter proves this is called on the main thread, where
+/// AppKit mutations are safe.
+pub fn apply_geometry(
+    panel: &NSPanel,
+    mtm: MainThreadMarker,
+    mode: OverlayMode,
+    config: &Config,
+) {
+    unsafe {
+        match mode {
+            OverlayMode::Docked => {
+                let screen = NSScreen::mainScreen(mtm).expect("main screen");
+                let visible = screen.visibleFrame();  // AC2.7 — not frame
+                let height = panel_height_for_font(config.appearance.font_size);
+                let rect = CGRect::new(
+                    CGPoint::new(visible.origin.x, visible.origin.y + visible.size.height - height),
+                    CGSize::new(visible.size.width, height),
+                );
+                panel.setFrame_display(rect, true);
+                panel.setIgnoresMouseEvents(true);  // AC2.5
+                panel.setMovableByWindowBackground(false);
+                panel.setHasShadow(true);
+            }
+            OverlayMode::Floating => {
+                let rect = CGRect::new(
+                    CGPoint::new(config.position.x as f64, config.position.y as f64),
+                    CGSize::new(
+                        config.appearance.width as f64,
+                        panel_height_for_font(config.appearance.font_size),
+                    ),
+                );
+                panel.setFrame_display(rect, true);
+                panel.setIgnoresMouseEvents(true);  // AC2.5
+                panel.setMovableByWindowBackground(!config.locked);
+                panel.setHasShadow(false);
+            }
+            OverlayMode::Transcript => {
+                // Transcript mode uses a separate NSWindow; hide the caption panel.
+                panel.orderOut(None);
+            }
+        }
+    }
+}
+
+/// Calculate panel height based on font size.
+/// Returns font_size * 1.5 + 8.0 (padding) as the natural height.
+fn panel_height_for_font(font_size: f32) -> f64 {
+    (font_size * 1.5 + 8.0) as f64
+}
+
 /// Toggle the above-fullscreen layer for the panel.
 ///
 /// When `on` is true, sets the panel to NSStatusWindowLevel (renders above fullscreen).
@@ -242,5 +299,35 @@ mod tests {
         set_above_fullscreen(&panel, mtm, false);
         let pc = inspect(&panel);
         assert_eq!(pc.level, NSFloatingWindowLevel as i64, "after set_above_fullscreen(false), level should be Floating");
+    }
+
+    #[test]
+    fn mode_switch_does_not_rebuild_panel() {
+        let mtm = match MainThreadMarker::new() {
+            Some(m) => m,
+            None => {
+                eprintln!("mode_switch_does_not_rebuild_panel: skipping (not on main thread)");
+                return;
+            }
+        };
+
+        let config = Config {
+            appearance: AppearanceConfig::default(),
+            position: OverlayPosition::default(),
+            ..Default::default()
+        };
+
+        let (panel, _label) = build_overlay_panel(mtm, &config);
+        let initial_ptr = Retained::as_ptr(&panel);
+
+        // Apply geometry for different modes — panel ptr should remain unchanged.
+        apply_geometry(&panel, mtm, OverlayMode::Docked, &config);
+        assert_eq!(Retained::as_ptr(&panel), initial_ptr, "apply_geometry should not rebuild panel");
+
+        apply_geometry(&panel, mtm, OverlayMode::Floating, &config);
+        assert_eq!(Retained::as_ptr(&panel), initial_ptr, "apply_geometry should not rebuild panel");
+
+        apply_geometry(&panel, mtm, OverlayMode::Transcript, &config);
+        assert_eq!(Retained::as_ptr(&panel), initial_ptr, "apply_geometry should not rebuild panel");
     }
 }

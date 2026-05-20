@@ -4,6 +4,8 @@
 // captions-disable surface-clearing.
 
 pub mod panel;
+pub mod drag;
+pub mod transcript_window;
 mod app;
 
 pub use app::run_app;

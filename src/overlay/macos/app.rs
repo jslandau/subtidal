@@ -1,17 +1,17 @@
 //! macOS overlay application orchestration (NSApplication startup + caption bridge).
 //! Phase 2 implementation: caption bridge + OverlayCommand dispatch loop.
-//! Phase 3+ wire in real STT pipeline and system tray.
+//! Phase 6: full OverlayCommand handlers, transcript window, drag observer, caption buffer.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use objc2::MainThreadMarker;
 use objc2_app_kit::{NSApplication, NSPanel, NSTextField, NSApplicationActivationPolicy};
 use objc2::rc::Retained;
 use objc2_foundation::NSString;
-use crate::config::Config;
-use crate::overlay::{OverlayCommand, CaptionsEnabled};
-use super::panel;
+use crate::config::{Config, OverlayMode};
+use crate::overlay::{OverlayCommand, CaptionsEnabled, caption_buffer::CaptionBuffer, transcript_log::TranscriptLog};
+use super::{panel, transcript_window, drag};
 
-/// Handles to overlay UI elements (panel and caption label).
+/// Handles to overlay UI elements (panel, label, transcript window, caption buffer, log).
 /// Wrapped in Arc so references can be cloned into worker closure scopes.
 /// SAFETY: OverlayHandles is Send + Sync because all *use* of the contained
 /// Retained<T> values happens only within dispatch2::DispatchQueue::main().exec_async
@@ -22,6 +22,10 @@ use super::panel;
 struct OverlayHandles {
     panel: Retained<NSPanel>,
     label: Retained<NSTextField>,
+    transcript_state: transcript_window::TranscriptWindowState,
+    caption_buffer: Arc<Mutex<CaptionBuffer>>,
+    transcript_log: Arc<Mutex<TranscriptLog>>,
+    config: Arc<Mutex<Config>>,
 }
 
 unsafe impl Send for OverlayHandles {}
@@ -76,10 +80,35 @@ pub fn run_app(
     let (panel, label) = panel::build_overlay_panel(mtm, &config);
     panel.orderFront(None);
 
-    // Wrap panel and label in Arc so workers can share ownership.
-    let handles = Arc::new(OverlayHandles { panel, label });
+    // 4. Build the transcript window.
+    let transcript_log = Arc::new(Mutex::new(TranscriptLog::new(std::time::Duration::from_millis(1500))));
+    let transcript_state = transcript_window::build_transcript_window(mtm, Arc::clone(&transcript_log));
 
-    // 4. Spawn the caption-bridge thread. It blocks on caption_rx.recv_blocking()
+    // 5. Create caption buffer with initial config.
+    let max_chars = derive_max_chars(&config.appearance);
+    let caption_buffer = Arc::new(Mutex::new(CaptionBuffer::new(
+        config.appearance.max_lines as usize,
+        max_chars,
+        config.appearance.effective_expire_secs(),
+    )));
+
+    // 6. Create config Arc for command handlers.
+    let config_arc = Arc::new(Mutex::new(config));
+
+    // 7. Install drag observer for floating mode.
+    let _drag_observer = drag::install_drag_observer(&panel, Arc::clone(&config_arc), mtm);
+
+    // Wrap all handles in Arc so workers can share ownership.
+    let handles = Arc::new(OverlayHandles {
+        panel,
+        label,
+        transcript_state,
+        caption_buffer,
+        transcript_log,
+        config: config_arc,
+    });
+
+    // 8. Spawn the caption-bridge thread. It blocks on caption_rx.recv_blocking()
     // and posts each caption onto the main run loop via dispatch2 for UI update.
     let caption_captions_enabled = Arc::clone(&captions_enabled);
     let handles_copy = Arc::clone(&handles);
@@ -92,17 +121,69 @@ pub fn run_app(
                 }
                 let handles_closure = Arc::clone(&handles_copy);
                 dispatch2::DispatchQueue::main().exec_async(move || {
-                    let _mtm = MainThreadMarker::new()
+                    let mtm = MainThreadMarker::new()
                         .expect("dispatch main queue runs on main thread");
-                    let ns_text = NSString::from_str(&text);
-                    handles_closure.label.setStringValue(&*ns_text);
-                    // CaptionBuffer / TranscriptLog integration deferred to Phase 6.
+
+                    // Route captions through CaptionBuffer and TranscriptLog.
+                    {
+                        let mut buf = handles_closure.caption_buffer.lock().unwrap();
+                        buf.push(text.clone());
+                        let display = buf.display_text();
+                        let ns_text = NSString::from_str(&display);
+                        unsafe {
+                            handles_closure.label.setStringValue(&*ns_text);
+                        }
+                    }
+
+                    // Append to transcript log (always, regardless of mode).
+                    let mode = handles_closure.config.lock().unwrap().overlay_mode.clone();
+                    {
+                        let mut log = handles_closure.transcript_log.lock().unwrap();
+                        log.push(text.clone());
+                    }
+
+                    // If in Transcript mode, update the window.
+                    if matches!(mode, OverlayMode::Transcript) {
+                        transcript_window::append_fragment(
+                            &handles_closure.transcript_state,
+                            mtm,
+                            text,
+                            chrono::Utc::now(),  // passed but not used in append_fragment
+                        );
+                    }
                 });
             }
         })
         .expect("spawn caption-bridge thread");
 
-    // 5. Spawn the OverlayCommand dispatch loop. It blocks on cmd_rx.recv_blocking()
+    // 9. Spawn a caption-expiry timer (1 second) for CaptionBuffer.expire().
+    {
+        let handles_timer = Arc::clone(&handles);
+        std::thread::Builder::new()
+            .name("caption-expiry".into())
+            .spawn(move || {
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    let handles_closure = Arc::clone(&handles_timer);
+                    dispatch2::DispatchQueue::main().exec_async(move || {
+                        let mtm = MainThreadMarker::new()
+                            .expect("dispatch main queue runs on main thread");
+                        let mut buf = handles_closure.caption_buffer.lock().unwrap();
+                        if buf.expire() {
+                            // A line was removed; refresh the label.
+                            let display = buf.display_text();
+                            let ns_text = NSString::from_str(&display);
+                            unsafe {
+                                handles_closure.label.setStringValue(&*ns_text);
+                            }
+                        }
+                    });
+                }
+            })
+            .expect("spawn caption-expiry thread");
+    }
+
+    // 10. Spawn the OverlayCommand dispatch loop. It blocks on cmd_rx.recv_blocking()
     // and posts each command onto the main run loop for execution.
     let cmd_captions_enabled = Arc::clone(&captions_enabled);
     let handles_copy = Arc::clone(&handles);
@@ -115,41 +196,126 @@ pub fn run_app(
                 dispatch2::DispatchQueue::main().exec_async(move || {
                     let mtm = MainThreadMarker::new()
                         .expect("main queue runs on main thread");
-                    match cmd {
-                        OverlayCommand::Quit => {
-                            let app = NSApplication::sharedApplication(mtm);
-                            app.terminate(None);
-                        }
-                        OverlayCommand::SetAboveFullscreen(on) => {
-                            panel::set_above_fullscreen(&handles_closure.panel, mtm, on);
-                        }
-                        OverlayCommand::SetCaptionsEnabled(on) => {
-                            captions_enabled.store(on, std::sync::atomic::Ordering::Relaxed);
-                            if !on {
-                                // Phase 2: clear the label only.
-                                // Phase 6 extends to all 4 surfaces.
-                                let ns_empty = NSString::from_str("");
-                                handles_closure.label.setStringValue(&*ns_empty);
-                            }
-                        }
-                        // Phase 2 stubs — Phase 6 fills in real handlers.
-                        OverlayCommand::SetVisible(_)
-                        | OverlayCommand::SetMode(_)
-                        | OverlayCommand::SetLocked(_)
-                        | OverlayCommand::UpdateAppearance(_)
-                        | OverlayCommand::SetCaption(_) => {
-                            eprintln!("info: OverlayCommand {:?} deferred to Phase 6", cmd);
-                        }
-                    }
+                    handle_overlay_command(
+                        cmd,
+                        &handles_closure,
+                        mtm,
+                        &captions_enabled,
+                    );
                 });
             }
         })
         .expect("spawn overlay-cmd thread");
 
-    // 6. Call NSApplication.run() — blocks until terminate() is called from
+    // 11. Call NSApplication.run() — blocks until terminate() is called from
     // any dispatched closure (e.g. the Quit handler above).
     app.run();
 
-    // 7. After run() returns, workers exit on next iteration when the channels close.
+    // 12. After run() returns, workers exit on next iteration when the channels close.
     // The OverlayHandles Arc is dropped when the last worker closes.
+}
+
+/// Helper function to derive max_chars_per_line from appearance config.
+/// Mimics the Linux formula: (width * char_width_fraction) / estimated_char_width.
+fn derive_max_chars(appearance: &crate::config::AppearanceConfig) -> usize {
+    // Rough estimate: monospace char at default size ≈ 8 pixels wide.
+    // char_width_fraction is 0.85–0.95 to add visual padding.
+    let char_width_pixels = 8.0;  // Conservative estimate for monospace
+    let effective_width = appearance.width as f64
+        * appearance.effective_char_width_fraction() as f64;
+    (effective_width / char_width_pixels).max(20.0) as usize
+}
+
+/// Handle an OverlayCommand with full Phase 6 implementation.
+fn handle_overlay_command(
+    cmd: OverlayCommand,
+    handles: &OverlayHandles,
+    mtm: MainThreadMarker,
+    captions_enabled: &CaptionsEnabled,
+) {
+    match cmd {
+        OverlayCommand::Quit => {
+            let app = NSApplication::sharedApplication(mtm);
+            app.terminate(None);
+        }
+        OverlayCommand::SetAboveFullscreen(on) => {
+            panel::set_above_fullscreen(&handles.panel, mtm, on);
+            let mut cfg = handles.config.lock().unwrap();
+            cfg.above_fullscreen = on;
+            let _ = cfg.save();
+        }
+        OverlayCommand::SetVisible(visible) => {
+            unsafe {
+                if visible {
+                    handles.panel.orderFront(None);
+                } else {
+                    handles.panel.orderOut(None);
+                }
+            }
+        }
+        OverlayCommand::SetMode(mode) => {
+            let mut cfg = handles.config.lock().unwrap();
+            cfg.overlay_mode = mode.clone();
+            let _ = cfg.save();
+            drop(cfg);
+
+            let cfg_ref = handles.config.lock().unwrap();
+            panel::apply_geometry(&handles.panel, mtm, mode.clone(), &cfg_ref);
+
+            match mode {
+                OverlayMode::Docked | OverlayMode::Floating => {
+                    unsafe { handles.panel.orderFront(None); }
+                    transcript_window::order_out(&handles.transcript_state, mtm);
+                }
+                OverlayMode::Transcript => {
+                    transcript_window::order_front(&handles.transcript_state, mtm);
+                    unsafe { handles.panel.orderOut(None); }
+                }
+            }
+        }
+        OverlayCommand::SetLocked(locked) => {
+            {
+                let mut cfg = handles.config.lock().unwrap();
+                cfg.locked = locked;
+                let _ = cfg.save();
+            }
+
+            let cfg = handles.config.lock().unwrap();
+            if matches!(cfg.overlay_mode, OverlayMode::Floating) {
+                unsafe {
+                    handles.panel.setMovableByWindowBackground(!locked);
+                }
+            }
+        }
+        OverlayCommand::UpdateAppearance(appearance) => {
+            {
+                let mut cfg = handles.config.lock().unwrap();
+                cfg.appearance = appearance.clone();
+                let _ = cfg.save();
+            }
+
+            let max_chars = derive_max_chars(&appearance);
+            handles.caption_buffer.lock().unwrap().update_config(
+                appearance.max_lines as usize,
+                max_chars,
+                appearance.effective_expire_secs(),
+            );
+        }
+        OverlayCommand::SetCaptionsEnabled(enabled) => {
+            captions_enabled.store(enabled, std::sync::atomic::Ordering::Relaxed);
+            if !enabled {
+                // 4-surface clear on captions disable.
+                handles.transcript_log.lock().unwrap().clear();                  // surface 1
+                transcript_window::clear_view(&handles.transcript_state, mtm);    // surface 2
+                handles.caption_buffer.lock().unwrap().clear();                   // surface 3
+                let ns_empty = NSString::from_str("");
+                unsafe {
+                    handles.label.setStringValue(&*ns_empty);                     // surface 4
+                }
+            }
+        }
+        OverlayCommand::SetCaption(_text) => {
+            // SetCaption is handled via the caption-bridge; this arm is a no-op.
+        }
+    }
 }
