@@ -144,8 +144,13 @@ pub async fn shareable_content_current() -> Result<Retained<SCShareableContent>>
     let (tx, rx) = tokio::sync::oneshot::channel::<Result<Retained<SCShareableContent>>>();
     let tx_cell = std::sync::Mutex::new(Some(tx));
 
-    unsafe {
-        let block = RcBlock::new(
+    // The block (and therefore the captured Sender) MUST outlive `rx.await`.
+    // We can't assume SCK calls Block_copy synchronously — if it doesn't, the
+    // closure (with the Sender inside) is dropped at the end of the `unsafe`
+    // scope and rx.await returns RecvError immediately, which our caller
+    // surfaces as "TCC denied" even though SCK never actually denied.
+    let block = unsafe {
+        RcBlock::new(
             move |content: *mut SCShareableContent, error: *mut NSError| {
                 let Some(tx) = tx_cell.lock().ok().and_then(|mut g| g.take()) else {
                     return;
@@ -163,12 +168,16 @@ pub async fn shareable_content_current() -> Result<Retained<SCShareableContent>>
                 };
                 let _ = tx.send(result);
             },
-        );
+        )
+    };
 
+    unsafe {
         SCShareableContent::getShareableContentWithCompletionHandler(&block);
     }
 
-    rx.await.context("shareable_content_current channel closed")?
+    let result = rx.await.context("shareable_content_current channel closed")?;
+    drop(block);
+    result
 }
 
 /// Start capturing audio.
@@ -176,8 +185,9 @@ pub async fn start_capture(stream: &SCStream) -> Result<()> {
     let (tx, rx) = tokio::sync::oneshot::channel::<Result<()>>();
     let tx_cell = std::sync::Mutex::new(Some(tx));
 
-    unsafe {
-        let block = RcBlock::new(move |error: *mut NSError| {
+    // See shareable_content_current re: block lifetime; same constraint applies.
+    let block = unsafe {
+        RcBlock::new(move |error: *mut NSError| {
             let Some(tx) = tx_cell.lock().ok().and_then(|mut g| g.take()) else {
                 return;
             };
@@ -190,12 +200,16 @@ pub async fn start_capture(stream: &SCStream) -> Result<()> {
                 Ok(())
             };
             let _ = tx.send(result);
-        });
+        })
+    };
 
+    unsafe {
         stream.startCaptureWithCompletionHandler(Some(&block));
     }
 
-    rx.await.context("start_capture channel closed")?
+    let result = rx.await.context("start_capture channel closed")?;
+    drop(block);
+    result
 }
 
 /// Stop capturing audio. Best-effort; errors are surfaced to the caller.
@@ -203,8 +217,9 @@ pub async fn stop_capture(stream: &SCStream) -> Result<()> {
     let (tx, rx) = tokio::sync::oneshot::channel::<Result<()>>();
     let tx_cell = std::sync::Mutex::new(Some(tx));
 
-    unsafe {
-        let block = RcBlock::new(move |error: *mut NSError| {
+    // See shareable_content_current re: block lifetime; same constraint applies.
+    let block = unsafe {
+        RcBlock::new(move |error: *mut NSError| {
             let Some(tx) = tx_cell.lock().ok().and_then(|mut g| g.take()) else {
                 return;
             };
@@ -217,10 +232,14 @@ pub async fn stop_capture(stream: &SCStream) -> Result<()> {
                 Ok(())
             };
             let _ = tx.send(result);
-        });
+        })
+    };
 
+    unsafe {
         stream.stopCaptureWithCompletionHandler(Some(&block));
     }
 
-    rx.await.context("stop_capture channel closed")?
+    let result = rx.await.context("stop_capture channel closed")?;
+    drop(block);
+    result
 }
