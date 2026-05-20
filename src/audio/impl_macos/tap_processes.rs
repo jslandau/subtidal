@@ -13,14 +13,18 @@ use core_foundation::base::FromVoid;
 /// Basic info about an audio-producing process.
 #[derive(Debug, Clone)]
 pub struct ProcessInfo {
-    #[allow(dead_code)]
     pub audio_object_id: AudioObjectID,
     pub pid: std::ffi::c_int,
     pub bundle_id: Option<String>,
 }
 
 /// Enumerate all process AudioObjects known to Core Audio.
-/// Returns only processes with a non-empty bundle ID and `kAudioProcessPropertyIsRunning = true`.
+/// Returns processes that have a bundle ID. Does NOT filter by
+/// `kAudioProcessPropertyIsRunning`: that property only reports "audio IO
+/// is occurring at this exact instant", which is the wrong question for a
+/// source picker — it's empty whenever the user has paused playback.
+/// The presence of a process AudioObject is itself the signal that the
+/// process has instantiated an audio engine and is tap-capturable.
 ///
 /// # Errors
 /// Returns Err if Core Audio property reads fail (e.g., communication with auditd broken).
@@ -66,21 +70,16 @@ pub fn enumerate_audio_processes() -> Result<Vec<ProcessInfo>> {
             anyhow::bail!("AudioObjectGetPropertyData (list) failed: status={}", status);
         }
 
-        // Step 3: For each process, read PID, bundle ID, and IsRunning.
+        // Step 3: For each process, read PID and bundle ID. Skip entries with no
+        // bundle ID (system kernel daemons, etc. — not user-selectable). Do NOT
+        // filter by IsRunning — see function docstring.
         let mut out = vec![];
         for &obj_id in &process_ids {
             let pid = read_process_pid(obj_id)?;
-            let is_running = process_is_running(obj_id);
-
-            if !is_running {
-                continue; // Skip stale entries.
-            }
-
             let bundle_id = read_process_bundle_id(obj_id)?;
             if bundle_id.is_none() {
-                continue; // Skip entries without a bundle ID.
+                continue;
             }
-
             out.push(ProcessInfo {
                 audio_object_id: obj_id,
                 pid,
@@ -93,10 +92,13 @@ pub fn enumerate_audio_processes() -> Result<Vec<ProcessInfo>> {
 }
 
 /// Translate a PID into the corresponding Core Audio process AudioObjectID.
-/// Used at tap-creation time to map a user-selected bundle back to an object ID.
+/// Currently unused — kept around because it's the natural inverse of the
+/// PID→object_id mapping we expose via `enumerate_audio_processes()` and may
+/// be useful for future tray/source-picker work in Phase 6.
 ///
 /// # Errors
 /// Returns Err if the PID is not found or Core Audio communication fails.
+#[allow(dead_code)]
 pub fn translate_pid_to_process_object(pid: std::ffi::c_int) -> Result<AudioObjectID> {
     unsafe {
         let mut out_id: AudioObjectID = 0;
@@ -121,7 +123,13 @@ pub fn translate_pid_to_process_object(pid: std::ffi::c_int) -> Result<AudioObje
 }
 
 /// Whether the given process AudioObject reports `kAudioProcessPropertyIsRunning = true`.
-/// Cheap; safe to call from a polling watchdog.
+///
+/// NOTE: this is NOT a "process is alive" check — it means "audio I/O is
+/// occurring at this instant", which goes false whenever the user pauses
+/// playback. The watchdog uses POSIX `kill(pid, 0)` for liveness instead.
+/// Retained for the smoke test and any future use that needs the activity
+/// signal specifically.
+#[allow(dead_code)]
 pub fn process_is_running(obj: AudioObjectID) -> bool {
     unsafe {
         let mut is_running: u32 = 0;

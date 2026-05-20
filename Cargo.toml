@@ -116,6 +116,8 @@ objc2-user-notifications = { version = "0.3", features = [
 # Core Audio bindgen FFI (Phase 5 revised: Tap API support)
 coreaudio-sys = "0.2"
 core-foundation = "0.10"
+# POSIX kill() for PID liveness detection in the watchdog.
+libc = "0.2"
 # Grand Central Dispatch for caption-bridge main-thread marshaling (Phase 2+).
 dispatch2 = "0.3"
 block2 = "0.6"

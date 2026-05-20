@@ -57,7 +57,13 @@ pub fn main() {
                     }
                 });
                 if !present {
-                    eprintln!("info: persisted app '{}' is not running; falling back to SystemOutput", bundle_id);
+                    eprintln!("info: persisted app '{}' has no audio process; falling back to SystemOutput", bundle_id);
+                    eprintln!("info: available app bundle IDs from Core Audio:");
+                    for s in sources.iter().filter(|s| matches!(s.source, config::AudioSource::App { .. })) {
+                        if let config::AudioSource::App { bundle_id: b, .. } = &s.source {
+                            eprintln!("  - {}", b);
+                        }
+                    }
                     initial_audio_source = config::AudioSource::SystemOutput;
                 }
             }

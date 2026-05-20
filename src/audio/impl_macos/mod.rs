@@ -2,7 +2,7 @@
 //! Replaces ScreenCaptureKit-based capture with a more direct, lower-latency
 //! mechanism that uses system Audio Capture permission instead of Screen Recording.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 
@@ -176,22 +176,22 @@ fn run_tap_capture(
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         }
 
-        // Run watchdog tick if we're capturing a specific process.
+        // Run watchdog tick if we're capturing specific processes.
         if last_tick.elapsed() >= watchdog_tick {
             last_tick = std::time::Instant::now();
-            if let Some(pid) = tap.captured_pid() {
-                // Check if the process is still running via Core Audio registry.
-                // Only trigger fallback if IsRunning is positively false, not on translate errors.
-                let is_running = match tap_processes::translate_pid_to_process_object(pid) {
-                    Ok(obj_id) => tap_processes::process_is_running(obj_id),
-                    Err(e) => {
-                        // Transient HAL hiccup; log and skip this tick rather than triggering fallback.
-                        eprintln!("warn: translate_pid_to_process_object failed: {e}; skipping watchdog tick");
-                        continue;
-                    }
-                };
+            let pids = tap.captured_pids();
+            if !pids.is_empty() {
+                // Use POSIX kill(pid, 0) to test process liveness — Core Audio's
+                // kAudioProcessPropertyIsRunning means "audio I/O active right now",
+                // not "process exists", so it false-positives on every pause.
+                // Process is gone iff kill returns -1 with errno == ESRCH.
+                let any_alive = pids.iter().any(|&pid| {
+                    // SAFETY: kill is async-signal-safe and reading errno is fine.
+                    let rc = unsafe { libc::kill(pid, 0) };
+                    rc == 0 || unsafe { *libc::__error() } != libc::ESRCH
+                });
 
-                if !is_running {
+                if !any_alive {
                     // Source disappeared; fall back to SystemOutput.
                     eprintln!(
                         "info: audio source '{}' disappeared; switched to SystemOutput",
@@ -267,13 +267,21 @@ fn tap_target_for(src: &crate::config::AudioSource) -> Result<tap::TapTarget> {
             Ok(tap::TapTarget::SystemMix)
         }
         crate::config::AudioSource::App { bundle_id, .. } => {
-            // macOS variant: enumerate processes and find the one matching bundle_id.
+            // macOS variant: enumerate processes and collect ALL matching the
+            // bundle_id. Browsers split audio across multiple WebKit content /
+            // GPU helper processes that share one bundle_id; capturing all of
+            // them is the only way to reliably get the active tab's audio.
             let procs = tap_processes::enumerate_audio_processes()?;
-            let proc = procs
-                .iter()
-                .find(|p| p.bundle_id.as_deref() == Some(bundle_id))
-                .with_context(|| format!("app '{}' is not running", bundle_id))?;
-            Ok(tap::TapTarget::Process { pid: proc.pid })
+            let matches: Vec<_> = procs
+                .into_iter()
+                .filter(|p| p.bundle_id.as_deref() == Some(bundle_id))
+                .collect();
+            if matches.is_empty() {
+                anyhow::bail!("no audio-producing process with bundle id '{}'", bundle_id);
+            }
+            let object_ids = matches.iter().map(|p| p.audio_object_id).collect();
+            let watchdog_pids = matches.iter().map(|p| p.pid).collect();
+            Ok(tap::TapTarget::Processes { object_ids, watchdog_pids })
         }
     }
 }
@@ -302,8 +310,15 @@ pub fn list_sources() -> Result<Vec<crate::audio::AudioSourceInfo>> {
         label: "System Output".to_string(),
     }];
 
+    // Multiple AudioObjects can share a bundle_id (e.g. each WebKit content
+    // process is a distinct AudioObject but all report com.apple.WebKit.GPU).
+    // Deduplicate so the picker shows one entry per bundle.
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for proc in tap_processes::enumerate_audio_processes()? {
         if let Some(bundle) = proc.bundle_id {
+            if !seen.insert(bundle.clone()) {
+                continue;
+            }
             let label = bundle_to_label(&bundle);
             out.push(crate::audio::AudioSourceInfo {
                 source: crate::config::AudioSource::App {

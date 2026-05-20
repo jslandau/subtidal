@@ -12,7 +12,10 @@ mod tests {
     fn tap_target_enum_variants_exist() {
         // Verify that TapTarget has the expected variants.
         let _system = TapTarget::SystemMix;
-        let _process = TapTarget::Process { pid: 1234 };
+        let _processes = TapTarget::Processes {
+            object_ids: vec![42],
+            watchdog_pids: vec![1234],
+        };
         // Test passes if code compiles.
     }
 

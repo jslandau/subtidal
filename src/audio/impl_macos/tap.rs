@@ -28,12 +28,23 @@ use crate::stt::AudioWake;
 use ringbuf::traits::Producer;
 
 /// Specifies which audio to capture.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum TapTarget {
     /// System-wide audio mix (all applications and system sounds).
     SystemMix,
-    /// Audio from a specific process identified by PID.
-    Process { pid: std::ffi::c_int },
+    /// Audio from one or more specific processes. `object_ids` are Core
+    /// Audio process AudioObjectIDs (NOT system PIDs — see the
+    /// `initStereoMixdownOfProcesses:` contract). `watchdog_pids` are the
+    /// corresponding system PIDs, used by the 1 Hz liveness watchdog to
+    /// detect when ALL captured processes have exited.
+    ///
+    /// Multiple ids per target supports the common case of browsers, where
+    /// audio is split across several WebKit content / GPU helper processes
+    /// that all share one bundle id.
+    Processes {
+        object_ids: Vec<AudioObjectID>,
+        watchdog_pids: Vec<std::ffi::c_int>,
+    },
 }
 
 /// Owns a Core Audio process tap, its aggregate device, and its IOProc.
@@ -56,7 +67,9 @@ pub struct AudioTap {
     aggregate_id: AudioObjectID,
     ioproc_id: AudioDeviceIOProcID,
     callback_context_ptr: *mut CallbackContext,
-    captured_pid: Option<std::ffi::c_int>,
+    /// PIDs the watchdog polls for liveness. Empty for SystemMix. When ALL
+    /// of these PIDs are gone, the captured source is considered disappeared.
+    captured_pids: Vec<std::ffi::c_int>,
 }
 
 /// Context passed to the RT-safe IOProc callback via `clientData`.
@@ -83,16 +96,16 @@ impl AudioTap {
         producer: Arc<Mutex<ringbuf::HeapProd<f32>>>,
         wake: Arc<AudioWake>,
     ) -> Result<Self> {
-        let captured_pid = match target {
-            TapTarget::SystemMix => None,
-            TapTarget::Process { pid } => Some(pid),
+        let captured_pids: Vec<std::ffi::c_int> = match &target {
+            TapTarget::SystemMix => vec![],
+            TapTarget::Processes { watchdog_pids, .. } => watchdog_pids.clone(),
         };
 
         unsafe {
             // Step 1: Create a CATapDescription via Obj-C msg_send!.
             // No objc2 binding crate covers CATapDescription; use raw dispatch.
             // The tap_desc_owned must stay alive until after AudioHardwareCreateProcessTap returns.
-            let tap_desc_owned = create_tap_description(target)
+            let tap_desc_owned = create_tap_description(&target)
                 .context("failed to create CATapDescription")?;
 
             // Step 2: Create the process tap.
@@ -183,15 +196,16 @@ impl AudioTap {
                 aggregate_id,
                 ioproc_id,
                 callback_context_ptr: context_ptr as *mut CallbackContext,
-                captured_pid,
+                captured_pids,
             })
         }
     }
 
-    /// Returns the PID of the captured process, if this tap targets a specific app.
-    /// Returns `None` if this is a SystemMix tap.
-    pub fn captured_pid(&self) -> Option<std::ffi::c_int> {
-        self.captured_pid
+    /// PIDs the watchdog should poll. Empty for SystemMix; otherwise the PIDs
+    /// of every process AudioObject included in the tap. The captured source
+    /// is considered disappeared when ALL of these PIDs no longer exist.
+    pub fn captured_pids(&self) -> &[std::ffi::c_int] {
+        &self.captured_pids
     }
 }
 
@@ -388,7 +402,7 @@ unsafe fn verify_tap_format(tap_id: AudioObjectID) -> Result<()> {
 ///
 /// # Safety
 /// This function uses `objc2`'s `msg_send!` for raw Obj-C dispatch.
-unsafe fn create_tap_description(target: TapTarget) -> Result<objc2::rc::Retained<AnyObject>> {
+unsafe fn create_tap_description(target: &TapTarget) -> Result<objc2::rc::Retained<AnyObject>> {
     use objc2::rc::Retained;
     use objc2_foundation::{NSArray, NSNumber};
 
@@ -412,18 +426,22 @@ unsafe fn create_tap_description(target: TapTarget) -> Result<objc2::rc::Retaine
             );
             desc.context("CATapDescription initStereoGlobalTapButExcludeProcesses: returned nil")?
         }
-        TapTarget::Process { pid } => {
-            // Single-PID tap: create NSNumber and wrap in NSArray.
-            // Single init-family message for CATapDescription.
+        TapTarget::Processes { ref object_ids, .. } => {
+            // Per-app tap: NSArray of NSNumber<AudioObjectID> (NOT pids — Apple's
+            // initStereoMixdownOfProcesses: docstring is explicit that it wants
+            // Core Audio's process AudioObjectIDs, which differ from system PIDs).
             let allocated: *mut AnyObject = msg_send![tap_class, alloc];
 
-            // Use NSNumber's class method (autoreleased) instead of alloc+init dance.
-            let pid_obj = NSNumber::new_i32(pid as i32);
+            // Build NSArray of NSNumbers. NSNumber::new_u32 autoreleases.
+            let number_objs: Vec<Retained<NSNumber>> = object_ids
+                .iter()
+                .map(|&oid| NSNumber::new_u32(oid))
+                .collect();
+            let ptr_refs: Vec<&NSNumber> = number_objs.iter().map(|n| &**n).collect();
+            let arr: Retained<NSArray<NSNumber>> = NSArray::from_slice(&ptr_refs);
 
-            // Create an NSArray containing the NSNumber.
-            let arr: *mut AnyObject = msg_send![NSArray::<AnyObject>::class(), arrayWithObject: &*pid_obj];
             let desc: Option<Retained<AnyObject>> = Retained::from_raw(
-                msg_send![allocated, initStereoMixdownOfProcesses: arr]
+                msg_send![allocated, initStereoMixdownOfProcesses: &*arr]
             );
             desc.context("CATapDescription initStereoMixdownOfProcesses: returned nil")?
         }
