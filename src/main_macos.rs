@@ -1,5 +1,5 @@
 //! macOS startup entry point.
-//! Phase 4 implementation: real STT pipeline fed by ScreenCaptureKit system audio.
+//! Phase 5 (revised) implementation: real STT pipeline fed by Core Audio Process Taps.
 
 use objc2::MainThreadMarker;
 use subtidal::audio::{self, AudioCommand};
@@ -51,18 +51,32 @@ pub fn main() {
     let (caption_tx, caption_rx) = async_channel::unbounded::<String>();
     let (cmd_tx, cmd_rx) = async_channel::unbounded::<OverlayCommand>();
 
-    // 8. Start ScreenCaptureKit audio capture. This spawns the screen-capture-audio
-    // worker thread which constructs the SCStream and pushes samples into the
-    // ring buffer. First launch triggers the TCC permission prompt. The caption
+    // 8. Start Core Audio Process Tap audio capture. This spawns the audio-tap-worker
+    // thread which constructs the tap and pushes samples into the ring buffer.
+    // First launch triggers the Audio Capture TCC permission prompt. The caption
     // channel is handed over so the audio thread can post an in-panel error
     // message if TCC is denied (AC3.6).
-    let (audio_cmd_tx, ring_consumer) =
-        audio::start_audio_thread(Arc::clone(&audio_wake), caption_tx.clone())
+    let (audio_cmd_tx, ring_consumer, fallback_rx) =
+        audio::start_audio_thread(config.audio_source.clone(), Arc::clone(&audio_wake), caption_tx.clone())
             .unwrap_or_else(|e| {
                 eprintln!("error: failed to start audio capture: {e:#}");
-                eprintln!("hint: grant Screen Recording permission to Subtidal.app in System Settings → Privacy & Security.");
+                eprintln!("hint: grant Audio Capture permission to Subtidal.app in System Settings → Privacy & Security.");
                 std::process::exit(1);
             });
+
+    // 8b. Spawn a listener thread for fallback events. This thread drains the receiver
+    // and logs each event for diagnostic purposes (and future tray-state updates).
+    let _fallback_listener = std::thread::Builder::new()
+        .name("audio-fallback-listener".into())
+        .spawn(move || {
+            while let Ok(event) = fallback_rx.recv() {
+                eprintln!(
+                    "info: audio source '{}' disappeared; switched to {:?}",
+                    event.previous_label, event.new_source
+                );
+            }
+        })
+        .expect("spawn fallback listener thread");
 
     // 9. Construct the STT pipeline configuration and spawn the thread.
     let pipeline_cfg = stt::PipelineConfig {
