@@ -78,6 +78,10 @@ pub fn run_app(
 
     // 3. Build the overlay panel and retain both panel and content label.
     let (panel, label) = panel::build_overlay_panel(mtm, &config);
+    // Apply mode-specific geometry + mouse-event state on startup so the
+    // initial Floating panel is draggable without the user having to
+    // toggle Lock Position to force a property write.
+    panel::apply_geometry(&panel, mtm, config.overlay_mode.clone(), &config);
     panel.orderFront(None);
 
     // 4. Build the transcript window.
@@ -130,15 +134,19 @@ pub fn run_app(
                         .expect("dispatch main queue runs on main thread");
 
                     // Route captions through CaptionBuffer and TranscriptLog.
-                    {
+                    let display = {
                         let mut buf = handles_closure.caption_buffer.lock().unwrap();
                         buf.push(text.clone());
-                        let display = buf.display_text();
-                        let ns_text = NSString::from_str(&display);
-                        unsafe {
-                            handles_closure.label.setStringValue(&*ns_text);
-                        }
-                    }
+                        buf.display_text()
+                    };
+                    let cfg_snapshot = handles_closure.config.lock().unwrap().clone();
+                    panel::set_caption_text(
+                        &handles_closure.panel,
+                        &handles_closure.label,
+                        &display,
+                        mtm,
+                        &cfg_snapshot,
+                    );
 
                     // Append to transcript log (always, regardless of mode).
                     let mode = handles_closure.config.lock().unwrap().overlay_mode.clone();
@@ -173,14 +181,19 @@ pub fn run_app(
                     dispatch2::DispatchQueue::main().exec_async(move || {
                         let _mtm = MainThreadMarker::new()
                             .expect("dispatch main queue runs on main thread");
-                        let mut buf = handles_closure.caption_buffer.lock().unwrap();
-                        if buf.expire() {
-                            // A line was removed; refresh the label.
-                            let display = buf.display_text();
-                            let ns_text = NSString::from_str(&display);
-                            unsafe {
-                                handles_closure.label.setStringValue(&*ns_text);
-                            }
+                        let display_opt = {
+                            let mut buf = handles_closure.caption_buffer.lock().unwrap();
+                            if buf.expire() { Some(buf.display_text()) } else { None }
+                        };
+                        if let Some(display) = display_opt {
+                            let cfg_snapshot = handles_closure.config.lock().unwrap().clone();
+                            panel::set_caption_text(
+                                &handles_closure.panel,
+                                &handles_closure.label,
+                                &display,
+                                _mtm,
+                                &cfg_snapshot,
+                            );
                         }
                     });
                 }
@@ -312,10 +325,14 @@ fn handle_overlay_command(
                 handles.transcript_log.lock().unwrap().clear();                  // surface 1
                 transcript_window::clear_view(&handles.transcript_state, mtm);    // surface 2
                 handles.caption_buffer.lock().unwrap().clear();                   // surface 3
-                let ns_empty = NSString::from_str("");
-                unsafe {
-                    handles.label.setStringValue(&*ns_empty);                     // surface 4
-                }
+                let cfg_snapshot = handles.config.lock().unwrap().clone();
+                panel::set_caption_text(                                          // surface 4
+                    &handles.panel,
+                    &handles.label,
+                    "",
+                    mtm,
+                    &cfg_snapshot,
+                );
             }
         }
         OverlayCommand::SetCaption(_text) => {

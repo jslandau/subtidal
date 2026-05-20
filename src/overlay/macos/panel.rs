@@ -76,12 +76,11 @@ pub fn build_overlay_panel(
         // Mark as floating panel
         panel.setFloatingPanel(true);
 
-        // Semi-opaque dark background so the panel is visually locatable even
-        // when no captions have been emitted yet (debugging aid for Phase 4
-        // hardware bring-up; later phases may revisit once captions are
-        // reliably flowing).
-        let bg_color = NSColor::colorWithWhite_alpha(0.0, 0.75);
-        panel.setBackgroundColor(Some(&*bg_color));
+        // Transparent panel chrome — the rounded background lives on the
+        // contentView's layer so corners render correctly.
+        panel.setOpaque(false);
+        let clear = NSColor::clearColor();
+        panel.setBackgroundColor(Some(&clear));
 
         // Disable shadow (Floating mode)
         panel.setHasShadow(false);
@@ -107,6 +106,18 @@ pub fn build_overlay_panel(
         label.setSelectable(false);
         label.setBordered(false);
         label.setDrawsBackground(false);
+        label.setTextColor(Some(&NSColor::whiteColor()));
+
+        // Rounded translucent background on the label's layer. NSTextField
+        // is layer-backable; cornerRadius + masksToBounds + layer.backgroundColor
+        // gives us the soft pill look without an extra wrapper view.
+        label.setWantsLayer(true);
+        if let Some(layer) = label.layer() {
+            layer.setCornerRadius(8.0);
+            layer.setMasksToBounds(true);
+            let bg = NSColor::colorWithWhite_alpha(0.0, 0.75);
+            layer.setBackgroundColor(Some(&bg.CGColor()));
+        }
 
         // Font: monospace at configured size
         // SAFETY: msg_send! is retained here because NSFont::userFixedPitchFontOfSize
@@ -201,10 +212,62 @@ pub fn apply_geometry(
     }
 }
 
-/// Calculate panel height based on font size.
-/// Returns font_size * 1.5 + 8.0 (padding) as the natural height.
+/// Calculate panel height for a given font size and explicit line count.
+/// Used both for the initial single-line frame (line_count=1) and for
+/// growing the panel when CaptionBuffer emits a multi-line display.
 fn panel_height_for_font(font_size: f32) -> f64 {
-    (font_size * 1.5 + 8.0) as f64
+    panel_height_for_lines(font_size, 1)
+}
+
+/// Per-line height plus uniform padding.
+fn panel_height_for_lines(font_size: f32, line_count: usize) -> f64 {
+    let lines = line_count.max(1) as f64;
+    (font_size as f64) * 1.5 * lines + 8.0
+}
+
+/// Set the caption text and grow the panel height to match the line count
+/// of the display string. The panel's top edge is held fixed so the
+/// caption stays anchored where the user placed it (Floating) or against
+/// the menu bar (Docked); the bottom edge grows downward.
+///
+/// Called by the caption-bridge and expiry timer after each label update
+/// so multi-line CaptionBuffer output is fully visible.
+pub fn set_caption_text(
+    panel: &NSPanel,
+    label: &NSTextField,
+    text: &str,
+    mtm: MainThreadMarker,
+    config: &Config,
+) {
+    let ns_text = NSString::from_str(text);
+    unsafe { label.setStringValue(&ns_text) };
+
+    // Skip resize in Transcript mode — the overlay panel is hidden.
+    if matches!(config.overlay_mode, OverlayMode::Transcript) {
+        return;
+    }
+
+    let line_count = text.lines().count().max(1);
+    let new_height = panel_height_for_lines(config.appearance.font_size, line_count);
+
+    let current = panel.frame();
+    // Hold the top edge: origin.y = (top of current frame) - new_height.
+    let top = current.origin.y + current.size.height;
+    let new_frame = CGRect::new(
+        CGPoint::new(current.origin.x, top - new_height),
+        CGSize::new(current.size.width, new_height),
+    );
+    unsafe { panel.setFrame_display(new_frame, true) };
+
+    // The content view (NSTextField label) auto-sizes via the contentView
+    // -> setFrame path on macOS when the panel's content view is configured
+    // with auto-layout; for our manual layout we resize it explicitly.
+    let label_frame = CGRect::new(
+        CGPoint::new(0.0, 0.0),
+        CGSize::new(current.size.width, new_height),
+    );
+    unsafe { label.setFrame(label_frame) };
+    let _ = mtm; // marker held to enforce main-thread call site
 }
 
 /// AC1.6 — re-apply geometry on NSApplicationDidChangeScreenParametersNotification.
