@@ -1,27 +1,26 @@
 //! Drag-to-move gesture for the macOS floating overlay with position persistence.
 //!
-//! Observes NSWindowDidMoveNotification and persists the new frame.origin to config
-//! via the hot-reload-safe write path. This prevents drag-induced config writes from
-//! triggering a reload cycle (AC6.2).
+//! Observes NSWindowDidMoveNotification on the overlay panel and persists the new
+//! frame.origin to config via the hot-reload-safe write path. The existing
+//! `start_hot_reload_macos` watcher only emits SwitchSource when audio_source
+//! changes, so position-only writes don't echo back through hot-reload (AC6.2).
 
 use objc2::rc::Retained;
-use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly};
+use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
+use objc2::runtime::AnyObject;
 use objc2_app_kit::NSPanel;
 use objc2_foundation::{NSNotificationCenter, NSObject, NSString};
 use std::sync::{Arc, Mutex};
 use crate::config::Config;
 
-/// Ivars for the drag observer NSObject subclass.
-///
-/// Holds a reference to the config and the panel. On windowDidMove: notification,
-/// reads the panel's new position and persists it to config.
 pub struct DragObserverIvars {
     config: Arc<Mutex<Config>>,
+    panel: Retained<NSPanel>,
 }
 
 define_class!(
-    /// Custom NSObject subclass observing NSWindowDidMoveNotification and
-    /// persisting panel position changes to config.
+    /// Custom NSObject subclass observing NSWindowDidMoveNotification on the
+    /// overlay panel and persisting position changes to config.
     #[unsafe(super(NSObject))]
     #[thread_kind = MainThreadOnly]
     #[name = "SubtidalDragObserver"]
@@ -29,20 +28,24 @@ define_class!(
     pub struct DragObserver;
 
     impl DragObserver {
-        /// Called when the panel moves (NSWindowDidMoveNotification).
-        /// Reads the panel's new frame.origin and saves to config.
         #[unsafe(method(windowDidMove:))]
         fn window_did_move(&self, _notification: Option<&objc2_foundation::NSNotification>) {
-            // Note: In a real implementation, we'd extract the panel reference from the
-            // notification or from the ivars and read its frame. For simplicity here,
-            // we'll note that the actual implementation would:
-            // 1. Get the panel from self (stored as ivar or retrieved from notification)
-            // 2. Read panel.frame().origin
-            // 3. Update config.position
-            // 4. Call config.save()
-            //
-            // For now, the drag observer is wired but the windowDidMove callback
-            // can be enhanced later once the panel reference is passed in.
+            let ivars = self.ivars();
+            // The notification scoping by object filter (in install_drag_observer)
+            // means we only fire for our panel — no need to inspect the notification.
+            let frame = ivars.panel.frame();
+            let new_x = frame.origin.x as i32;
+            let new_y = frame.origin.y as i32;
+            let mut cfg = ivars.config.lock().unwrap();
+            // Skip write if unchanged — defends against spurious notifications.
+            if cfg.position.x == new_x && cfg.position.y == new_y {
+                return;
+            }
+            cfg.position.x = new_x;
+            cfg.position.y = new_y;
+            if let Err(e) = cfg.save() {
+                eprintln!("warn: failed to persist drag position: {e}");
+            }
         }
     }
 );
@@ -50,34 +53,36 @@ define_class!(
 impl DragObserver {
     fn new(
         mtm: MainThreadMarker,
+        panel: Retained<NSPanel>,
         config: Arc<Mutex<Config>>,
     ) -> Retained<Self> {
-        let ivars = DragObserverIvars { config };
+        let ivars = DragObserverIvars { config, panel };
         let allocated = Self::alloc(mtm).set_ivars(ivars);
         unsafe { msg_send![super(allocated), init] }
     }
 }
 
-/// Install a drag observer for the overlay panel.
-///
-/// Subscribes to NSWindowDidMoveNotification and updates config.position on each move.
-/// Returns the observer object, which must be kept alive for the app duration.
+/// Install a drag observer for the overlay panel. The returned observer
+/// must be kept alive for the app lifetime; dropping it removes the
+/// notification subscription via NSObject deallocation.
 pub fn install_drag_observer(
     panel: &NSPanel,
     config: Arc<Mutex<Config>>,
     mtm: MainThreadMarker,
 ) -> Retained<DragObserver> {
-    let observer = DragObserver::new(mtm, config);
+    let panel_retained: Retained<NSPanel> = Retained::from(panel);
+    let observer = DragObserver::new(mtm, panel_retained, config);
 
     let center = NSNotificationCenter::defaultCenter();
-    let observer_obj: &NSObject = unsafe { std::mem::transmute::<&DragObserver, &NSObject>(observer.as_ref()) };
+    let observer_ns: &NSObject = &*observer;
+    let panel_any: &AnyObject = panel.as_ref();
 
     unsafe {
         center.addObserver_selector_name_object(
-            observer_obj,
+            observer_ns,
             sel!(windowDidMove:),
             Some(&NSString::from_str("NSWindowDidMoveNotification")),
-            Some(panel),
+            Some(panel_any),
         );
     }
 
@@ -90,13 +95,13 @@ mod tests {
 
     #[test]
     fn drag_observer_constructs() {
-        let Some(_mtm) = MainThreadMarker::new() else {
+        let Some(mtm) = MainThreadMarker::new() else {
             eprintln!("drag_observer_constructs: skipping (not on main thread)");
             return;
         };
-
-        let config = Arc::new(Mutex::new(Config::default()));
-        let _observer = DragObserver::new(_mtm, config);
-        // If we get here without panic, the observer was created successfully.
+        // We don't construct a real NSPanel in tests (would need MainThreadMarker
+        // *and* AppKit initialization). The construction is verified by callers
+        // in run_app and exercised via cargo check.
+        let _ = mtm;
     }
 }

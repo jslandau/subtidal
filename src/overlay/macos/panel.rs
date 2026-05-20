@@ -14,6 +14,7 @@ use objc2_app_kit::{
 };
 use objc2_core_foundation::{CGRect, CGPoint, CGSize};
 use crate::config::{Config, OverlayMode};
+use std::sync::Arc;
 
 /// Inspection helper: public view of panel configuration for testing.
 #[derive(Debug, Clone)]
@@ -200,6 +201,77 @@ pub fn apply_geometry(
 /// Returns font_size * 1.5 + 8.0 (padding) as the natural height.
 fn panel_height_for_font(font_size: f32) -> f64 {
     (font_size * 1.5 + 8.0) as f64
+}
+
+/// AC1.6 — re-apply geometry on NSApplicationDidChangeScreenParametersNotification.
+///
+/// Used by `install_screen_observer` below; lives in the `define_class!`
+/// body which can't see Config/OverlayMode imports directly.
+fn screen_changed_reapply(panel: &NSPanel, mtm: MainThreadMarker, config: &Arc<std::sync::Mutex<Config>>) {
+    let (mode, cfg_snapshot) = {
+        let cfg = config.lock().unwrap();
+        (cfg.overlay_mode.clone(), cfg.clone())
+    };
+    apply_geometry(panel, mtm, mode, &cfg_snapshot);
+}
+
+pub struct ScreenObserverIvars {
+    panel: Retained<NSPanel>,
+    config: Arc<std::sync::Mutex<Config>>,
+}
+
+objc2::define_class!(
+    /// Observes `NSApplicationDidChangeScreenParametersNotification` and
+    /// re-applies geometry so Docked mode tracks `visibleFrame` when an
+    /// external display is attached or removed (AC1.6).
+    #[unsafe(super(objc2_foundation::NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "SubtidalScreenObserver"]
+    #[ivars = ScreenObserverIvars]
+    pub struct ScreenObserver;
+
+    impl ScreenObserver {
+        #[unsafe(method(screenParamsChanged:))]
+        fn screen_params_changed(&self, _notif: Option<&objc2_foundation::NSNotification>) {
+            use objc2::DefinedClass;
+            let mtm = MainThreadMarker::from(self);
+            let ivars = self.ivars();
+            screen_changed_reapply(&ivars.panel, mtm, &ivars.config);
+        }
+    }
+);
+
+impl ScreenObserver {
+    fn new(mtm: MainThreadMarker, panel: Retained<NSPanel>, config: Arc<std::sync::Mutex<Config>>) -> Retained<Self> {
+        use objc2::AnyThread;
+        let ivars = ScreenObserverIvars { panel, config };
+        let allocated = Self::alloc(mtm).set_ivars(ivars);
+        unsafe { msg_send![super(allocated), init] }
+    }
+}
+
+/// Install the NSScreen-change observer. Returns the observer; caller must
+/// keep it alive for the app lifetime.
+pub fn install_screen_observer(
+    panel: &NSPanel,
+    config: Arc<std::sync::Mutex<Config>>,
+    mtm: MainThreadMarker,
+) -> Retained<ScreenObserver> {
+    let panel_retained: Retained<NSPanel> = Retained::from(panel);
+    let observer = ScreenObserver::new(mtm, panel_retained, config);
+    let center = objc2_foundation::NSNotificationCenter::defaultCenter();
+    let observer_ns: &objc2_foundation::NSObject = &*observer;
+    unsafe {
+        center.addObserver_selector_name_object(
+            observer_ns,
+            objc2::sel!(screenParamsChanged:),
+            Some(&objc2_foundation::NSString::from_str(
+                "NSApplicationDidChangeScreenParametersNotification",
+            )),
+            None,
+        );
+    }
+    observer
 }
 
 /// Toggle the above-fullscreen layer for the panel.

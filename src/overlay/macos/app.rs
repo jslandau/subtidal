@@ -82,7 +82,10 @@ pub fn run_app(
 
     // 4. Build the transcript window.
     let transcript_log = Arc::new(Mutex::new(TranscriptLog::new(std::time::Duration::from_millis(1500))));
-    let transcript_state = transcript_window::build_transcript_window(mtm, Arc::clone(&transcript_log));
+    let transcript_window_bundle = transcript_window::build_transcript_window(mtm, Arc::clone(&transcript_log));
+    let transcript_state = transcript_window_bundle.state.clone();
+    // Save-button target is held weakly by NSButton; keep the actions object alive.
+    let _transcript_actions = transcript_window_bundle.actions;
 
     // 5. Create caption buffer with initial config.
     let max_chars = derive_max_chars(&config.appearance);
@@ -97,6 +100,8 @@ pub fn run_app(
 
     // 7. Install drag observer for floating mode.
     let _drag_observer = drag::install_drag_observer(&panel, Arc::clone(&config_arc), mtm);
+    // 7b. AC1.6 — re-apply geometry on display attach/detach.
+    let _screen_observer = panel::install_screen_observer(&panel, Arc::clone(&config_arc), mtm);
 
     // Wrap all handles in Arc so workers can share ownership.
     let handles = Arc::new(OverlayHandles {
@@ -166,7 +171,7 @@ pub fn run_app(
                     std::thread::sleep(std::time::Duration::from_secs(1));
                     let handles_closure = Arc::clone(&handles_timer);
                     dispatch2::DispatchQueue::main().exec_async(move || {
-                        let mtm = MainThreadMarker::new()
+                        let _mtm = MainThreadMarker::new()
                             .expect("dispatch main queue runs on main thread");
                         let mut buf = handles_closure.caption_buffer.lock().unwrap();
                         if buf.expire() {

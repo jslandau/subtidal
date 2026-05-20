@@ -23,6 +23,15 @@ pub struct TranscriptWindowState {
     pub log: Arc<Mutex<TranscriptLog>>,
 }
 
+/// Bundle returned by `build_transcript_window`: the state used to drive
+/// the window plus the Retained<TranscriptActions> that owns the Save
+/// button's action target. NSButton holds setTarget weakly, so the actions
+/// object must outlive the window — keep this whole bundle alive.
+pub struct TranscriptWindow {
+    pub state: TranscriptWindowState,
+    pub actions: Retained<TranscriptActions>,
+}
+
 /// Ivars for the save button action target.
 pub struct TranscriptActionsIvars {
     window_state: RefCell<Option<TranscriptWindowState>>,
@@ -68,7 +77,7 @@ impl TranscriptActions {
 pub fn build_transcript_window(
     mtm: MainThreadMarker,
     log: Arc<Mutex<TranscriptLog>>,
-) -> TranscriptWindowState {
+) -> TranscriptWindow {
     unsafe {
         // Window frame: 800x600 starting at (200, 200).
         let rect = CGRect::new(
@@ -135,12 +144,13 @@ pub fn build_transcript_window(
         container.addSubview(&scroll);
         container.addSubview(&save_button);
 
-        // Set up button action and target.
-        let target_obj: &NSObject = std::mem::transmute::<&TranscriptActions, &NSObject>(actions.as_ref());
+        // Set up button action and target. setTarget is weak — `actions` is
+        // owned by the returned TranscriptWindow bundle, not by the button.
+        use objc2::runtime::AnyObject;
+        let target_obj: &AnyObject = actions.as_ref();
         save_button.setTarget(Some(target_obj));
         save_button.setAction(Some(sel!(saveTranscript:)));
 
-        // Set container as window's content view.
         window.setContentView(Some(&container));
 
         let state = TranscriptWindowState {
@@ -148,36 +158,43 @@ pub fn build_transcript_window(
             text_view,
             log,
         };
-
-        // Store the state in the actions object so the save handler can access it.
         actions.set_window_state(state.clone());
 
-        // Keep the actions object alive by returning it through a leaked Retained.
-        let _actions_retained = actions;
-
-        // Window starts invisible; mode-switch logic will show it.
         state.window.setIsVisible(false);
-
-        state
+        TranscriptWindow { state, actions }
     }
 }
 
-/// Append a fragment to the transcript window with autoscroll.
+/// Re-render the transcript log into the NSTextView. The caller is
+/// responsible for having already pushed the new fragment into the log;
+/// this function only updates display. If the view was scrolled to the
+/// bottom when we started, scroll back to the bottom after the update.
 pub fn append_fragment(
     state: &TranscriptWindowState,
     _mtm: MainThreadMarker,
-    text: String,
+    _text: String,
     _ts: chrono::DateTime<chrono::Utc>,
 ) {
-    // Push text to log using local timestamp (TranscriptLog::push captures it).
-    state.log.lock().unwrap().push(text);
-    // Display update deferred; focus is on data integrity via TranscriptLog
+    let was_at_bottom = is_near_bottom(&state.text_view);
+
+    let formatted = format_paragraphs(&state.log.lock().unwrap().paragraphs());
+    let ns = NSString::from_str(&formatted);
+    unsafe { state.text_view.setString(&ns) };
+
+    if was_at_bottom {
+        let len = ns.length();
+        unsafe {
+            state.text_view.scrollRangeToVisible(NSRange { location: len, length: 0 });
+        }
+    }
 }
 
-/// Clear all text from the transcript window.
+/// Clear the displayed text. The caller is responsible for clearing the
+/// underlying `TranscriptLog` separately (it is surface 1 of the
+/// 4-surface clear; this is surface 2).
 pub fn clear_view(state: &TranscriptWindowState, _mtm: MainThreadMarker) {
-    // TranscriptLog::clear() happens at the data level.
-    // Window clearing deferred.
+    let empty = NSString::from_str("");
+    unsafe { state.text_view.setString(&empty) };
 }
 
 /// Show the transcript window (make key and order front).
@@ -205,9 +222,16 @@ pub fn format_paragraphs(paragraphs: &[crate::overlay::transcript_log::Paragraph
     out
 }
 
-/// Check if the text view is near the bottom.
-fn is_near_bottom(_text_view: &NSTextView) -> bool {
-    true
+/// True iff the user is within ~10pt of the bottom of the visible area
+/// (so we should re-stick to the bottom after appending). When the user
+/// has scrolled up to read history, this returns false and autoscroll
+/// pauses until they come back down.
+fn is_near_bottom(text_view: &NSTextView) -> bool {
+    let bounds = text_view.bounds();
+    let visible = text_view.visibleRect();
+    let bottom_of_bounds = bounds.origin.y + bounds.size.height;
+    let bottom_of_visible = visible.origin.y + visible.size.height;
+    (bottom_of_bounds - bottom_of_visible).abs() < 10.0
 }
 
 /// Save the transcript log to a JSON file via NSSavePanel.
