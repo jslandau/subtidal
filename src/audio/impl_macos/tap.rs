@@ -478,12 +478,23 @@ unsafe fn read_tap_uid(tap_id: AudioObjectID) -> Result<String> {
 unsafe fn create_aggregate_device(tap_uid: &str) -> Result<AudioObjectID> {
     use core_foundation::base::CFTypeRef;
 
+    // The aggregate-device dictionary keys are well-known Core Audio strings.
+    // coreaudio-sys exposes them as `b"..\0"` byte arrays (with trailing NUL);
+    // wrap each in a CFString for use as a dictionary key. Using the SDK
+    // constants (rather than hardcoded literals like "uid") guarantees we
+    // track Apple's authoritative spelling.
+    fn const_key(bytes: &'static [u8]) -> CFString {
+        let s = std::str::from_utf8(&bytes[..bytes.len() - 1])
+            .expect("Core Audio dict-key constants are ASCII");
+        CFString::new(s)
+    }
+
     // Generate a unique aggregate device UID.
     let pid = std::process::id();
     let aggregate_uid = format!("com.subtidal.tap.{}", pid);
 
     // Build the tap sub-dictionary: { kAudioSubTapUIDKey: tap_uid }
-    let sub_uid_key = CFString::from_static_string("kAudioSubTapUIDKey");
+    let sub_uid_key = const_key(coreaudio_sys::kAudioSubTapUIDKey);
     let sub_uid_val = CFString::new(tap_uid);
     let tap_sub_dict = CFDictionary::from_CFType_pairs(&[
         (sub_uid_key.clone(), sub_uid_val.clone())
@@ -497,19 +508,19 @@ unsafe fn create_aggregate_device(tap_uid: &str) -> Result<AudioObjectID> {
     ]);
 
     // Build the aggregate device dictionary with all required keys.
-    let uid_key = CFString::from_static_string("kAudioAggregateDeviceUIDKey");
+    let uid_key = const_key(coreaudio_sys::kAudioAggregateDeviceUIDKey);
     let uid_val = CFString::new(&aggregate_uid);
 
-    let name_key = CFString::from_static_string("kAudioAggregateDeviceNameKey");
+    let name_key = const_key(coreaudio_sys::kAudioAggregateDeviceNameKey);
     let name_val = CFString::new("Subtidal Tap");
 
-    let private_key = CFString::from_static_string("kAudioAggregateDeviceIsPrivateKey");
+    let private_key = const_key(coreaudio_sys::kAudioAggregateDeviceIsPrivateKey);
     let private_val = CFNumber::from(1i32);
 
-    let autostart_key = CFString::from_static_string("kAudioAggregateDeviceTapAutoStartKey");
+    let autostart_key = const_key(coreaudio_sys::kAudioAggregateDeviceTapAutoStartKey);
     let autostart_val = CFNumber::from(1i32);
 
-    let tap_list_key = CFString::from_static_string("kAudioAggregateDeviceTapListKey");
+    let tap_list_key = const_key(coreaudio_sys::kAudioAggregateDeviceTapListKey);
 
     // Create the top-level aggregate dictionary using CFTypeRef directly.
     let mut keys: Vec<CFTypeRef> = vec![];
