@@ -117,8 +117,21 @@ impl AudioTap {
                 return Err(e).context("tap format verification failed");
             }
 
+            // Protect the tap_id from leaking on read_tap_uid or create_aggregate_device failures.
+            // TapGuard is a scope guard that ensures AudioHardwareDestroyProcessTap is called
+            // unless explicitly defused (which happens after the IOProc is successfully created).
+            struct TapGuard(AudioObjectID, bool);  // (tap_id, defused)
+            impl Drop for TapGuard {
+                fn drop(&mut self) {
+                    if !self.1 {
+                        unsafe { let _ = AudioHardwareDestroyProcessTap(self.0); }
+                    }
+                }
+            }
+            let mut tap_guard = TapGuard(tap_id, false);
+
             // Step 4: Read the tap's UID.
-            let tap_uid = read_tap_uid(tap_id)
+            let tap_uid = read_tap_uid(tap_guard.0)
                 .context("failed to read tap UID")?;
 
             // Step 5: Create aggregate device.
@@ -145,7 +158,7 @@ impl AudioTap {
                 // Clean up: reclaim the Box and drop it.
                 let _ = Box::from_raw(context_ptr as *mut CallbackContext);
                 let _ = AudioHardwareDestroyAggregateDevice(aggregate_id);
-                let _ = AudioHardwareDestroyProcessTap(tap_id);
+                let _ = AudioHardwareDestroyProcessTap(tap_guard.0);
                 anyhow::bail!("AudioDeviceCreateIOProcID failed: status={}", status);
             }
 
@@ -155,12 +168,16 @@ impl AudioTap {
                 // Clean up in reverse order.
                 let _ = AudioDeviceDestroyIOProcID(aggregate_id, ioproc_id);
                 let _ = AudioHardwareDestroyAggregateDevice(aggregate_id);
-                let _ = AudioHardwareDestroyProcessTap(tap_id);
+                let _ = AudioHardwareDestroyProcessTap(tap_guard.0);
                 anyhow::bail!("AudioDeviceStart failed: status={}", status);
             }
 
+            // Defuse the guard — ownership of tap_id transfers to the AudioTap struct,
+            // which will clean it up via Drop.
+            tap_guard.1 = true;
+
             Ok(AudioTap {
-                tap_id,
+                tap_id: tap_guard.0,
                 aggregate_id,
                 ioproc_id,
                 callback_context_ptr: context_ptr as *mut CallbackContext,
