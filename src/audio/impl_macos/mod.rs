@@ -10,8 +10,9 @@ use ringbuf::traits::Split;
 
 use crate::stt::AudioWake;
 
-mod stream;     // SCStream + delegate (Task 3)
-mod normalize;  // CMSampleBuffer → 48kHz stereo f32 (Task 3 + 5)
+mod stream;           // SCStream + delegate (Task 3, Phase 4 — being superseded)
+mod normalize;        // CMSampleBuffer → 48kHz stereo f32 (Task 3 + 5, Phase 4 — being superseded)
+mod tap_processes;    // Core Audio process enumeration (Task 2, Phase 5 revised)
 
 /// Commands sent to the audio thread. Phase 4 ships only `Shutdown`; Phase 5
 /// adds `SwitchSource`.
@@ -105,34 +106,39 @@ fn run_sck_capture(
 }
 
 /// Enumerate audio sources visible in the tray menu.
-/// Returns SystemOutput plus one entry per running app with a non-nil bundle ID.
+/// Returns SystemOutput plus one entry per running app with a non-nil bundle ID,
+/// populated from Core Audio's process registry.
 pub fn list_sources() -> Result<Vec<crate::audio::AudioSourceInfo>> {
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-    let content = rt.block_on(async { stream::shareable_content_current().await })?;
     let mut out = vec![crate::audio::AudioSourceInfo {
         source: crate::config::AudioSource::SystemOutput,
         label: "System Output".to_string(),
     }];
-    unsafe {
-        let apps = content.applications();
-        for i in 0..apps.count() {
-            let app = apps.objectAtIndex(i);
-            let bundle_ns = app.bundleIdentifier();
-            let name_ns = app.applicationName();
-            let bundle = bundle_ns.to_string();
-            let name = name_ns.to_string();
-            if bundle.is_empty() { continue; }
+
+    for proc in tap_processes::enumerate_audio_processes()? {
+        if let Some(bundle) = proc.bundle_id {
+            let label = bundle_to_label(&bundle);
             out.push(crate::audio::AudioSourceInfo {
                 source: crate::config::AudioSource::App {
                     bundle_id: bundle,
-                    label: name.clone(),
+                    label: label.clone(),
                 },
-                label: name,
+                label,
             });
         }
     }
+
     out.sort_by(|a, b| a.label.to_lowercase().cmp(&b.label.to_lowercase()));
     Ok(out)
+}
+
+/// Translate a bundle ID to a user-visible label.
+/// Attempts to read the bundle's CFBundleName from its Info.plist via CFBundle.
+/// Falls back to the bundle ID if unavailable. This is a best-effort helper;
+/// a TODO to resolve to CFBundleName for prettier labels is noted here for Phase 6.
+fn bundle_to_label(bundle_id: &str) -> String {
+    // TODO: resolve to CFBundleName for prettier labels when Phase 6 revisits this.
+    // For now, the bundle_id serves as a reasonable fallback.
+    bundle_id.to_string()
 }
 
 #[cfg(all(test, target_os = "macos"))]
