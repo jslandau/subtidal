@@ -15,15 +15,17 @@ pub enum Engine {
     Nemotron,
 }
 
-/// The PipeWire audio source to capture from.
+/// The audio source to capture from.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AudioSource {
     /// System-wide monitor sink (default output loopback).
     #[default]
     SystemOutput,
-    /// A specific application's PipeWire node, identified by node ID.
+    /// (Linux/PipeWire) A specific application's PipeWire node, identified by node ID.
     Application { node_id: u32, node_name: String },
+    /// (macOS/ScreenCaptureKit) A specific application, identified by bundle ID.
+    App { bundle_id: String, label: String },
 }
 
 /// Overlay display mode.
@@ -517,6 +519,60 @@ mod tests {
     fn cli_parse_engine_unknown() {
         assert_eq!(Config::parse_engine("moonshine"), None);
         assert_eq!(Config::parse_engine("unknown"), None);
+    }
+
+    /// Task 1: AudioSource::App variant round-trips through TOML serde.
+    #[test]
+    fn audio_source_app_variant_serializes_correctly() {
+        let toml_input = r#"
+[audio_source]
+type = "app"
+bundle_id = "com.apple.Safari"
+label = "Safari"
+"#;
+        #[derive(serde::Deserialize)]
+        struct Wrapper { audio_source: AudioSource }
+        let w: Wrapper = toml::from_str(toml_input).expect("parse audio_source App variant");
+        assert!(
+            matches!(&w.audio_source, AudioSource::App { bundle_id, label }
+                if bundle_id == "com.apple.Safari" && label == "Safari"),
+            "Expected App variant, got: {:?}",
+            w.audio_source
+        );
+    }
+
+    /// Task 1: AudioSource::App variant deserializes and round-trips back to TOML.
+    #[test]
+    fn audio_source_app_variant_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        // Create a config with App audio source
+        let mut original = Config::default();
+        original.audio_source = AudioSource::App {
+            bundle_id: "com.apple.Safari".to_string(),
+            label: "Safari".to_string(),
+        };
+        original.config_file_path = Some(path.clone());
+
+        // Serialize to TOML
+        let text = toml::to_string_pretty(&original).unwrap();
+        fs::write(&path, &text).unwrap();
+
+        // Deserialize and verify
+        let loaded = Config::load_from(&path).unwrap();
+        assert!(
+            matches!(&loaded.audio_source, AudioSource::App { bundle_id, label }
+                if bundle_id == "com.apple.Safari" && label == "Safari"),
+            "Expected App variant after round-trip, got: {:?}",
+            loaded.audio_source
+        );
+    }
+
+    /// Task 1: SystemOutput remains the default audio source.
+    #[test]
+    fn audio_source_system_output_is_default() {
+        assert_eq!(AudioSource::default(), AudioSource::SystemOutput);
     }
 
     /// AC3.1: expire_secs field exists in AppearanceConfig with default value of 8.
