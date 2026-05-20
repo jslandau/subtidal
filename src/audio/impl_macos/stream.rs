@@ -87,11 +87,17 @@ impl Delegate {
 }
 
 /// Build an SCStream configured for system audio capture (SystemOutput only).
+///
+/// Returns `(stream, delegate)` — the caller MUST keep `delegate` alive for as
+/// long as `stream` is capturing. SCK's `addStreamOutput` does not retain the
+/// output, so dropping the `Retained<Delegate>` before stop_capture results in
+/// SCK logging "_SCStream_RemoteAudioQueueOperationHandlerWithError ...
+/// streamOutput NOT found. Dropping frame" for every audio buffer.
 pub fn build_stream(
     content: &SCShareableContent,
     producer: Arc<Mutex<HeapProd<f32>>>,
     wake: Arc<AudioWake>,
-) -> Result<Retained<SCStream>> {
+) -> Result<(Retained<SCStream>, Retained<Delegate>)> {
     unsafe {
         let displays = content.displays();
         let display = displays.firstObject().context("no displays available")?;
@@ -109,6 +115,13 @@ pub fn build_stream(
         let config = SCStreamConfiguration::new();
         config.setCapturesAudio(true);
         config.setExcludesCurrentProcessAudio(true);
+        // Note: SCStreamConfiguration has no setCapturesVideo toggle —
+        // SCK always generates video frames for a display-based filter.
+        // We don't register a video SCStreamOutput, so SCK logs benign
+        // "_SCStream_RemoteVideoQueueOperationHandler ... stream output NOT
+        // found. Dropping frame" lines. Phase 5+ could narrow this by using
+        // a filter type that doesn't include screen content if one becomes
+        // available.
         config.setSampleRate(48_000);
         config.setChannelCount(2);
 
@@ -133,7 +146,7 @@ pub fn build_stream(
             )
             .map_err(|e| anyhow::anyhow!("addStreamOutput: {}", e.localizedDescription()))?;
 
-        Ok(stream)
+        Ok((stream, delegate))
     }
 }
 

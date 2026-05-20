@@ -75,7 +75,10 @@ fn run_sck_capture(
         .build()?;
 
     // Fetch shareable content (displays) — this may prompt for TCC permission.
-    let stream = rt.block_on(async {
+    // The delegate is bound here and held in scope until after stop_capture;
+    // dropping it earlier causes SCK to drop every audio buffer with
+    // "streamOutput NOT found" (SCK does not retain the output).
+    let (stream, _delegate) = rt.block_on(async {
         let content = stream::shareable_content_current().await
             .context("SCShareableContent — is Screen Recording permission granted?")?;
         stream::build_stream(&content, Arc::clone(&ring_producer), Arc::clone(&audio_wake))
