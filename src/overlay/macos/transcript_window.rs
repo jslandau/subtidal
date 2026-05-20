@@ -7,7 +7,7 @@ use objc2::rc::Retained;
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSWindow, NSWindowStyleMask, NSScrollView, NSTextView, NSButton, NSView,
-    NSSavePanel, NSBackingStoreType,
+    NSSavePanel, NSBackingStoreType, NSAutoresizingMaskOptions,
 };
 use objc2_foundation::{NSString, NSObject, NSRange};
 use objc2_core_foundation::{CGPoint, CGSize, CGRect};
@@ -100,9 +100,10 @@ pub fn build_transcript_window(
 
         window.setTitle(&NSString::from_str("Subtidal — Transcript"));
 
-        // Create NSScrollView with NSTextView.
+        // Create NSScrollView with NSTextView. The scroll view fills the
+        // container above the save-button strip; both stretch with the window.
         let scroll_rect = CGRect::new(
-            CGPoint::new(0.0, 50.0),  // Leave space for button at bottom
+            CGPoint::new(0.0, 50.0),
             CGSize::new(rect.size.width, rect.size.height - 50.0),
         );
         let scroll = NSScrollView::initWithFrame(
@@ -111,18 +112,37 @@ pub fn build_transcript_window(
         );
         scroll.setHasVerticalScroller(true);
         scroll.setAutohidesScrollers(true);
+        scroll.setBorderType(objc2_app_kit::NSBorderType::NoBorder);
+        scroll.setAutoresizingMask(
+            NSAutoresizingMaskOptions::ViewWidthSizable
+                | NSAutoresizingMaskOptions::ViewHeightSizable,
+        );
 
+        // The NSTextView lives inside the scroll view's contentView. Configure
+        // it for word-wrap that tracks the scroll view's width:
+        //   - horizontallyResizable=false + widthTracksTextView=true makes the
+        //     text container width follow the scroll content area, so lines
+        //     reflow when the window is resized.
+        //   - verticallyResizable=true allows the text view to grow downward
+        //     as content is appended (the scroll view handles overflow).
         let text_view = NSTextView::initWithFrame(
             NSTextView::alloc(mtm),
-            scroll_rect,
+            CGRect::new(CGPoint::new(0.0, 0.0), scroll_rect.size),
         );
         text_view.setEditable(false);
         text_view.setSelectable(true);
         text_view.setRichText(false);
+        text_view.setHorizontallyResizable(false);
+        text_view.setVerticallyResizable(true);
+        text_view.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
+        if let Some(container) = text_view.textContainer() {
+            container.setWidthTracksTextView(true);
+            container.setContainerSize(CGSize::new(scroll_rect.size.width, f64::MAX));
+        }
 
         scroll.setDocumentView(Some(&text_view));
 
-        // Create a Save button.
+        // Save button — pinned to bottom-right.
         let button_rect = CGRect::new(
             CGPoint::new(rect.size.width - 120.0, 10.0),
             CGSize::new(100.0, 30.0),
@@ -132,6 +152,10 @@ pub fn build_transcript_window(
             button_rect,
         );
         save_button.setTitle(&NSString::from_str("Save…"));
+        save_button.setAutoresizingMask(
+            NSAutoresizingMaskOptions::ViewMinXMargin
+                | NSAutoresizingMaskOptions::ViewMaxYMargin,
+        );
 
         // Create action target.
         let actions = TranscriptActions::new(mtm);

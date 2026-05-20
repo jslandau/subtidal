@@ -185,7 +185,11 @@ pub fn apply_geometry(
                     ),
                 );
                 panel.setFrame_display(rect, true);
-                panel.setIgnoresMouseEvents(true);  // AC2.5
+                // Mouse events: locked → pass-through (AC2.5); unlocked → receive
+                // (so setMovableByWindowBackground can detect the drag).
+                // ignoresMouseEvents=true bypasses the window entirely, which would
+                // make drag impossible regardless of movableByWindowBackground.
+                panel.setIgnoresMouseEvents(config.locked);
                 panel.setMovableByWindowBackground(!config.locked);
                 panel.setHasShadow(false);
             }
@@ -243,7 +247,6 @@ objc2::define_class!(
 
 impl ScreenObserver {
     fn new(mtm: MainThreadMarker, panel: Retained<NSPanel>, config: Arc<std::sync::Mutex<Config>>) -> Retained<Self> {
-        use objc2::AnyThread;
         let ivars = ScreenObserverIvars { panel, config };
         let allocated = Self::alloc(mtm).set_ivars(ivars);
         unsafe { msg_send![super(allocated), init] }

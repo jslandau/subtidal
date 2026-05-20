@@ -6,7 +6,7 @@
 //! changes, so position-only writes don't echo back through hot-reload (AC6.2).
 
 use objc2::rc::Retained;
-use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
+use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2::runtime::AnyObject;
 use objc2_app_kit::NSPanel;
 use objc2_foundation::{NSNotificationCenter, NSObject, NSString};

@@ -287,9 +287,8 @@ fn handle_overlay_command(
 
             let cfg = handles.config.lock().unwrap();
             if matches!(cfg.overlay_mode, OverlayMode::Floating) {
-                unsafe {
-                    handles.panel.setMovableByWindowBackground(!locked);
-                }
+                handles.panel.setMovableByWindowBackground(!locked);
+                handles.panel.setIgnoresMouseEvents(locked);
             }
         }
         OverlayCommand::UpdateAppearance(appearance) => {
