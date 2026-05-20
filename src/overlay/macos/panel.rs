@@ -75,9 +75,12 @@ pub fn build_overlay_panel(
         // Mark as floating panel
         panel.setFloatingPanel(true);
 
-        // Set transparent background
-        let clear_color = NSColor::clearColor();
-        panel.setBackgroundColor(Some(&*clear_color));
+        // Semi-opaque dark background so the panel is visually locatable even
+        // when no captions have been emitted yet (debugging aid for Phase 4
+        // hardware bring-up; later phases may revisit once captions are
+        // reliably flowing).
+        let bg_color = NSColor::colorWithWhite_alpha(0.0, 0.75);
+        panel.setBackgroundColor(Some(&*bg_color));
 
         // Disable shadow (Floating mode)
         panel.setHasShadow(false);
