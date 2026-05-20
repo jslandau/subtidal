@@ -103,11 +103,16 @@ ort = { version = "2.0.0-rc.12", features = ["webgpu"] }
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = [
     "NSString", "NSNotification", "NSObject", "NSRunLoop", "NSArray",
+    "NSURL",
 ] }
 objc2-app-kit = { version = "0.3", features = [
     "NSApplication", "NSPanel", "NSWindow", "NSTextField", "NSScreen",
     "NSColor", "NSFont", "NSAttributedString", "NSEvent",
     "NSResponder", "NSView", "NSAppearance",
+    # Phase 6 additions:
+    "NSMenu", "NSMenuItem", "NSStatusBar", "NSStatusItem",
+    "NSScrollView", "NSTextView", "NSTextStorage",
+    "NSSavePanel", "NSImage", "NSControl", "NSCell",
 ] }
 objc2-core-foundation = "0.3"
 objc2-user-notifications = { version = "0.3", features = [

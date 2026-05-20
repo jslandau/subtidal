@@ -37,6 +37,7 @@ fi
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/subtidal"
 cp resources/macos/Info.plist "$APP/Contents/Info.plist"
+cp resources/macos/tray-icon-template.png "$APP/Contents/Resources/"
 
 # Bundle the ort WebGPU runtime dylib next to the binary and wire @rpath so the
 # binary can resolve `@rpath/libwebgpu_dawn.dylib` without DYLD_LIBRARY_PATH.
