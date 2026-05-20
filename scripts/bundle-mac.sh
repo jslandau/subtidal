@@ -5,10 +5,10 @@
 #   scripts/bundle-mac.sh                # release build
 #   scripts/bundle-mac.sh --debug        # debug build
 #
-# Bundle ID `com.subtidal.app` and ad-hoc codesign identity must stay stable
-# across rebuilds to preserve TCC (Screen Recording) grants. See
-# docs/design-plans/2026-05-18-macos-port.md §"TCC permissions and the .app
-# wrapper".
+# Bundle ID `com.subtidal.app` and ad-hoc codesign identity should stay stable
+# across rebuilds to preserve TCC grants. Audio Capture permission persists even
+# under ad-hoc signing; stable signing becomes relevant if future features
+# require other TCC services.
 
 set -euo pipefail
 
