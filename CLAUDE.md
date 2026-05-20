@@ -1,12 +1,12 @@
 # Subtidal
 
-Real-time speech-to-text overlay for Linux/Wayland.
+Real-time speech-to-text overlay for Linux/Wayland and macOS.
 
-Freshness: 2026-05-18
+Freshness: 2026-05-20
 
 ## Purpose
 
-Captures system or per-application audio via PipeWire, runs local STT inference (Nemotron GPU or CPU), and displays live captions in a GTK4 layer-shell overlay with system tray controls.
+Captures system or per-application audio via PipeWire (Linux) or Core Audio Taps (macOS), runs local STT inference (Nemotron GPU or CPU), and displays live captions in a GTK4 layer-shell overlay (Linux) or NSPanel (macOS) with system tray controls.
 
 ## Architecture
 
@@ -21,7 +21,9 @@ config.rs                    — TOML config with hot-reload (notify/debouncer);
 models/mod.rs                — HuggingFace model download (hf-hub + tokio); cross-platform with cfg-gated per-OS data dirs
 audio/mod.rs                 — neutral shell; re-exports impl_linux on Linux, impl_macos on macOS
 audio/impl_linux.rs          — PipeWire capture thread, node enumeration, source switching
-audio/impl_macos.rs          — macOS audio capture (ScreenCaptureKit); skeleton in Phase 1, populated Phase 4–5
+audio/impl_macos/mod.rs      — macOS audio capture orchestration via Core Audio Taps (Phase 5 revised)
+audio/impl_macos/tap.rs      — RAII wrapper for Core Audio process tap + aggregate device + IOProc (Task 3, Phase 5 revised)
+audio/impl_macos/tap_processes.rs — safe wrappers for Core Audio process enumeration (Task 2, Phase 5 revised)
 audio/resampler.rs           — rubato 48kHz stereo -> 16kHz mono resampler (platform-neutral)
 stt/mod.rs                   — SttEngine trait + AudioWake (neutral) + Linux-gated spawn_stt_thread / build_engine / `mod nemotron`
 stt/nemotron.rs              — Nemotron RNNT engine (ort + parakeet-rs, CUDA) [Linux-only]
@@ -41,57 +43,97 @@ tray/impl_macos.rs           — macOS tray implementation (NSStatusItem); skele
 
 ## Thread Model
 
+**Linux:**
 1. **Main/GTK thread** — GTK4 main loop. Consumes `async_channel::Receiver` for captions and overlay commands via `glib::MainContext::spawn_local` futures; no polling.
 2. **PipeWire thread** (`pipewire-audio`) — captures audio into the ring buffer and processes AudioCommand. After each successful push, calls `AudioWake::notify()`.
 3. **STT pipeline thread** (`stt-pipeline`) — blocks on `AudioWake::wait_timeout(250ms)`, drains the ring buffer, resamples via rubato, reads `ArcSwap<Engine>` to get the current engine choice, builds/rebuilds the engine as needed, runs `SttEngine::process_chunk`, sends captions via `async_channel::Sender`.
 4. **Tray thread** — ksni runs on the tokio runtime.
 
-The old "audio bridge" and "engine switch" threads, and the `Arc<Mutex<SyncSender>>` sender-swap dance, are gone. Engine changes are a lock-free `ArcSwap::store` read at the next chunk boundary.
+**macOS:**
+1. **Main/AppKit thread** — NSApplication main loop.
+2. **Audio worker thread** (`screen-capture-audio` for now; Phase 5 revised: Core Audio IOProc + watcher) — Core Audio IOProc callback pushes samples to ring buffer, 1 Hz polling thread detects source disappearance and triggers fallback.
+3. **STT pipeline thread** (`stt-pipeline`) — same as Linux.
+4. **Tray thread** — tokio runtime (Phase 6).
+
+Engine changes are a lock-free `ArcSwap::store` read at the next chunk boundary.
 
 ## Key Contracts
 
 - **SttEngine trait** (`stt/mod.rs`): `process_chunk(&mut self, pcm: &[f32]) -> Result<Option<String>>` — 160ms chunks of 16kHz mono f32 PCM. Returns Some(text) on recognized utterance, None when buffering.
-- **Audio pipeline**: PipeWire captures 48kHz stereo F32LE -> ring buffer -> STT pipeline thread resamples to 16kHz mono -> 160ms (2560 sample) chunks fed directly into the engine. No inter-thread channel between resampler and engine.
-- **Audio wake**: `stt::AudioWake` is an `AtomicBool` + `Condvar` pair. RT callback calls `notify()` without holding any mutex; consumer uses `wait_timeout_while` with the flag as predicate. The timeout handles VRAM unload and shutdown observation when audio is silent.
+- **Audio pipeline**: 
+  - Linux: PipeWire captures 48kHz stereo F32LE -> ring buffer -> STT pipeline thread resamples to 16kHz mono -> 160ms (2560 sample) chunks fed directly into the engine.
+  - macOS: Core Audio Tap captures 48kHz stereo f32 interleaved via RT-safe IOProc -> ring buffer -> same resampling and STT pipeline as Linux.
+  - No inter-thread channel between resampler and engine.
+- **Audio wake**: `stt::AudioWake` is an `AtomicBool` + `Condvar` pair. RT callback (PipeWire or Core Audio IOProc) calls `notify()` without holding any mutex; consumer uses `wait_timeout_while` with the flag as predicate. The timeout handles VRAM unload and shutdown observation when audio is silent.
+- **Audio source fallback**: 
+  - Linux: When a captured PipeWire node disappears, automatically falls back to SystemOutput with desktop notification.
+  - macOS: 1 Hz polling watchdog detects process disappearance via `kAudioProcessPropertyIsRunning`, falls back to SystemOutput with `UNUserNotification`.
 - **Engine switching**: `Arc<ArcSwap<Engine>>`. Tray calls `store()`, STT thread reads via `load()` on each chunk batch and rebuilds the engine if the choice changed. Only Nemotron is currently implemented.
-- **Config**: TOML at `~/.config/subtidal/config.toml`. Hot-reload only sends SetMode/SetLocked/UpdateAppearance when values actually changed (prevents drag feedback loop). Malformed TOML is warned and ignored.
-- **Models**: Downloaded from HuggingFace to `~/.local/share/subtidal/models/nemotron/`. Hardlinked from HF cache when possible.
-- **Nemotron engine**: 600M param RNNT model using parakeet-rs::Nemotron. Uses CUDA when available, falls back to CPU. Internally buffers 160ms chunks and emits results on 560ms boundaries.
+- **Config**: TOML at `~/.config/subtidal/config.toml` (Linux) or `~/Library/Application Support/Subtidal/config.toml` (macOS). Hot-reload only sends SetMode/SetLocked/UpdateAppearance when values actually changed (prevents drag feedback loop). Malformed TOML is warned and ignored.
+- **Models**: Downloaded from HuggingFace to `~/.local/share/subtidal/models/nemotron/` (Linux) or `~/Library/Application Support/Subtidal/models/nemotron/` (macOS). Hardlinked from HF cache when possible.
+- **Nemotron engine**: 600M param RNNT model using parakeet-rs::Nemotron. Uses CUDA when available on Linux, WebGPU on macOS, falls back to CPU. Internally buffers 160ms chunks and emits results on 560ms boundaries.
 - **Caption display**: Line-fill model — text fills lines word-by-word up to a character limit (0.85× estimated max chars), then shifts oldest line off when all lines are full. During silence, lines expire one at a time after `expire_secs` (default 8s). Engine whitespace signals word boundaries: leading space = new word, no space = continuation of previous word. RNNT overlap deduplication is preserved.
-- **Overlay drag**: Uses accumulated offset tracking to compensate for layer-shell coordinate system shift. During drag, all GTK mutations (captions, CSS, commands) are suppressed via is_dragging flag to prevent relayout jitter.
-- **Audio source fallback**: When a captured PipeWire node disappears, automatically falls back to SystemOutput with desktop notification.
-- **Above-fullscreen toggle**: `config.above_fullscreen` (tray: "Show Above Fullscreen") selects `Layer::Overlay` vs `Layer::Top` for the layer-shell overlay. Overlay layer renders above compositor-fullscreened clients (e.g. browser video); Top does not. Live-applied via `OverlayCommand::SetAboveFullscreen` (no rebuild). No-op in Transcript mode (regular toplevel).
-- **Overlay modes**: Three modes — `Docked` and `Floating` use the gtk4-layer-shell overlay; `Transcript` uses a regular GTK toplevel window with append-only timestamped paragraphs. Both windows are constructed at startup and visibility-toggled by mode. Captions always append to `TranscriptLog` regardless of mode (mid-session switch reveals full history). On captions-disable edge, all four caption surfaces are cleared (TranscriptLog, transcript view, CaptionBuffer, overlay label).
+- **Overlay drag** (Linux): Uses accumulated offset tracking to compensate for layer-shell coordinate system shift. During drag, all GTK mutations (captions, CSS, commands) are suppressed via is_dragging flag to prevent relayout jitter.
+- **Above-fullscreen toggle**: `config.above_fullscreen` (tray: "Show Above Fullscreen") selects `Layer::Overlay` vs `Layer::Top` for the layer-shell overlay (Linux only). Overlay layer renders above compositor-fullscreened clients (e.g. browser video); Top does not. Live-applied via `OverlayCommand::SetAboveFullscreen` (no rebuild). No-op in Transcript mode (regular toplevel).
+- **Overlay modes**: Three modes — `Docked` and `Floating` use the gtk4-layer-shell overlay (Linux); `Transcript` uses a regular toplevel window with append-only timestamped paragraphs. Both windows are constructed at startup and visibility-toggled by mode. Captions always append to `TranscriptLog` regardless of mode (mid-session switch reveals full history). On captions-disable edge, all caption surfaces are cleared (TranscriptLog, transcript view, CaptionBuffer, overlay label).
+- **Core Audio Tap lifecycle** (macOS, Task 3, Phase 5 revised): `AudioTap` RAII type owns process tap + aggregate device + IOProc. Drop impl tears down in correct order: Stop → DestroyIOProc → DestroyAggregateDevice → DestroyProcessTap. Source switching rebuilds the tap + aggregate device (sub-100ms latency; AC3.3 target ≤1 second caption gap).
 
 ## Dependencies (key crates)
 
-- gtk4 0.10 + gtk4-layer-shell 0.7 — Wayland overlay
-- pipewire 0.9 — audio capture
+**Cross-platform:**
 - rubato 1.0 — sample rate conversion
-- ort 2.0.0-rc.12 — ONNX Runtime inference (`cuda` feature is Linux-only via target-conditional dependency)
-- parakeet-rs 0.3 — Nemotron RNNT decoder (`cuda` feature is Linux-only via target-conditional dependency)
-- ksni 0.3 — D-Bus StatusNotifierItem tray
+- ort 2.0.0-rc.12 — ONNX Runtime inference (`cuda` on Linux, `webgpu` on macOS)
+- parakeet-rs 0.3 — Nemotron RNNT decoder (`cuda` on Linux, `webgpu` on macOS)
 - hf-hub 0.5 — model download
 - notify 6 + notify-debouncer-mini 0.4 — config file watching
 - chrono 0.4 — timestamps for transcript fragments and Save filenames
 - serde_json 1 — transcript .json export sidecar
 
+**Linux-specific:**
+- gtk4 0.10 + gtk4-layer-shell 0.7 — Wayland overlay
+- pipewire 0.9 — audio capture
+- ksni 0.3 — D-Bus StatusNotifierItem tray
+- notify-rust 4 — desktop notifications
+
+**macOS-specific:**
+- coreaudio-sys 0.2 — Core Audio FFI
+- core-foundation 0.10 — CFString, CFNumber, CFDictionary, CFArray
+- objc2 0.6 + objc2-foundation 0.3 + objc2-app-kit 0.3 — Obj-C runtime and AppKit bindings
+- objc2-user-notifications 0.3 — UNUserNotificationCenter for source-disappeared alerts
+- dispatch2 0.3 + block2 0.6 — Grand Central Dispatch for main-thread marshaling
+
 ## Invariants
 
-- PipeWire stream callback is real-time safe: no allocation, no blocking, try_lock only.
-- GTK4 calls happen only on the main thread; channels bridge other threads.
-- CUDA unavailability triggers automatic fallback to CPU execution (Nemotron runs on both GPU and CPU).
+- PipeWire stream callback is real-time safe: no allocation, no blocking, try_lock only (Linux).
+- Core Audio IOProc callback is real-time safe: no allocation, no blocking, try_lock only (macOS).
+- GTK4 calls happen only on the main thread; channels bridge other threads (Linux).
+- AppKit calls happen only on the main NSApplication thread; channels bridge other threads (macOS).
+- CUDA unavailability triggers automatic fallback to CPU execution (Nemotron on Linux).
+- WebGPU unavailability triggers automatic fallback to CPU execution (Nemotron on macOS).
 - Config save failures are warned but never fatal.
 - Ring buffer overflow drops samples silently (preferred over blocking RT callback).
 
 ## Build & Run
 
+**Linux:**
 ```bash
 cargo build --release
 ./target/release/subtidal [--engine nemotron|parakeet] [--config path] [--reset-config]
 ```
-
 Requires: PipeWire running, Wayland compositor with wlr-layer-shell support. CUDA optional (GPU acceleration for Nemotron).
+
+**macOS (Phase 5 revised onwards):**
+```bash
+scripts/bundle-mac.sh
+open target/release/Subtidal.app
+```
+Requires: macOS 14.4+, Audio Capture permission granted via System Settings → Privacy & Security. WebGPU available on Apple Silicon (M1+). CPU fallback for older hardware.
+
+**Cross-target check (macOS):**
+```bash
+cargo check --lib --target aarch64-apple-darwin
+```
+Verifies audio/overlay/tray modules compile on macOS targets without accidentally coupling Linux code.
 
 ## Platform Isolation
 
