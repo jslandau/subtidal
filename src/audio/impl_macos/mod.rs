@@ -12,8 +12,6 @@ use ringbuf::traits::Split;
 use crate::stt::AudioWake;
 use crate::audio::FallbackEvent;
 
-mod stream;           // SCStream + delegate (Task 3, Phase 4 — being superseded)
-mod normalize;        // CMSampleBuffer → 48kHz stereo f32 (Task 3 + 5, Phase 4 — being superseded)
 mod tap_processes;    // Core Audio process enumeration (Task 2, Phase 5 revised)
 mod tap;              // Core Audio process tap RAII (Task 3, Phase 5 revised)
 mod notify;           // UNUserNotificationCenter helper (Task 5, Phase 5 revised)

@@ -113,14 +113,6 @@ objc2-core-foundation = "0.3"
 objc2-user-notifications = { version = "0.3", features = [
     "UNUserNotificationCenter", "UNNotificationContent", "UNNotificationRequest",
 ] }
-objc2-screen-capture-kit = { version = "0.3", features = [
-    "SCStream", "SCShareableContent", "SCError",
-    "objc2-core-media", "block2", "dispatch2",
-] }
-objc2-core-media = { version = "0.3", features = [
-    "CMSampleBuffer", "CMBlockBuffer", "CMFormatDescription", "CMTime", "CMAttachment",
-] }
-objc2-core-audio-types = "0.3"  # AudioStreamBasicDescription, AudioBufferList
 # Core Audio bindgen FFI (Phase 5 revised: Tap API support)
 coreaudio-sys = "0.2"
 core-foundation = "0.10"
