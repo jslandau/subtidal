@@ -99,6 +99,7 @@ pub fn start_audio_thread(
     Ok((tx_cmd, ring_consumer, fallback_rx))
 }
 
+#[allow(unused_assignments)]
 fn run_tap_capture(
     initial_source: crate::config::AudioSource,
     ring_producer: Arc<Mutex<ringbuf::HeapProd<f32>>>,
@@ -160,6 +161,7 @@ fn run_tap_capture(
                         ) {
                             Ok(new_tap) => {
                                 tap = new_tap;
+                                current_source = crate::config::AudioSource::SystemOutput;
                                 current_label = "System Output".to_string();
                             }
                             Err(e) => {
@@ -219,6 +221,7 @@ fn run_tap_capture(
                     ) {
                         Ok(new_tap) => {
                             tap = new_tap;
+                            current_source = crate::config::AudioSource::SystemOutput;
                             current_label = "System Output".to_string();
                         }
                         Err(e) => {
@@ -234,7 +237,11 @@ fn run_tap_capture(
                                 Arc::clone(&ring_producer),
                                 Arc::clone(&audio_wake),
                             ) {
-                                Ok(new_tap) => tap = new_tap,
+                                Ok(new_tap) => {
+                                    tap = new_tap;
+                                    current_source = crate::config::AudioSource::SystemOutput;
+                                    current_label = "System Output".to_string();
+                                }
                                 Err(e) => {
                                     eprintln!("error: retry rebuild also failed: {e:#}; exiting audio thread");
                                     return Err(CaptureError::RuntimeFailure(e));
@@ -345,17 +352,15 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires Screen Recording permission and a running graphical session"]
+    #[ignore = "requires Audio Capture permission and a running graphical session"]
     fn list_sources_returns_system_output_plus_running_apps() {
         let sources = list_sources().expect("list_sources should succeed");
         assert!(
             sources.iter().any(|s| matches!(s.source, AudioSource::SystemOutput)),
             "SystemOutput must always appear",
         );
-        assert!(
-            sources.iter().any(|s| matches!(s.source, AudioSource::App { .. })),
-            "at least one App entry expected on a typical desktop session",
-        );
-        assert!(sources.len() >= 2);
+        // App entries are environment-dependent: they appear only if audio-producing apps are running.
+        // On CI with no GUI session or audio apps, there may be zero App entries.
+        assert!(sources.len() >= 1, "at least SystemOutput should be present");
     }
 }

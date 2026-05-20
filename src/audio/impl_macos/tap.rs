@@ -19,6 +19,7 @@ use core_foundation::base::{FromVoid, TCFType};
 use core_foundation::dictionary::CFDictionary;
 use core_foundation::number::CFNumber;
 use core_foundation::string::CFString;
+use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject};
 use objc2::{msg_send, ClassType};
 use std::sync::{Arc, Mutex};
@@ -44,9 +45,12 @@ pub enum TapTarget {
 /// 4. `AudioHardwareDestroyProcessTap(tap_id)`
 ///
 /// The `callback_context_ptr` is a raw pointer to a heap-allocated `CallbackContext`.
-/// The IOProc must be destroyed before the Box is reclaimed, which the Drop impl enforces.
-/// On successful drop, the Box is reclaimed and dropped. On stop failure, the Box is
-/// intentionally leaked to avoid use-after-free from in-flight IOProc callbacks.
+/// Safety: `AudioDeviceStop` is the relevant quiescence boundary — after it
+/// returns, the IOProc is guaranteed not to fire again, so the
+/// `CallbackContext` Box can be safely reclaimed before
+/// `AudioDeviceDestroyIOProcID`. `DestroyIOProcID` only removes the
+/// proc-id ↔ device binding; it does not affect callback safety.
+/// On stop failure, the Box is intentionally leaked to avoid use-after-free from in-flight IOProc callbacks.
 pub struct AudioTap {
     tap_id: AudioObjectID,
     aggregate_id: AudioObjectID,
@@ -87,12 +91,18 @@ impl AudioTap {
         unsafe {
             // Step 1: Create a CATapDescription via Obj-C msg_send!.
             // No objc2 binding crate covers CATapDescription; use raw dispatch.
-            let tap_desc = create_tap_description(target)
+            // The tap_desc_owned must stay alive until after AudioHardwareCreateProcessTap returns.
+            let tap_desc_owned = create_tap_description(target)
                 .context("failed to create CATapDescription")?;
 
             // Step 2: Create the process tap.
             let mut tap_id: AudioObjectID = 0;
-            let status = AudioHardwareCreateProcessTap(tap_desc, &mut tap_id);
+            let status = AudioHardwareCreateProcessTap(
+                Retained::as_ptr(&tap_desc_owned) as *mut AnyObject,
+                &mut tap_id
+            );
+            // tap_desc_owned is still alive; it will drop after this block if an error occurs,
+            // which is correct (the tap constructor doesn't retain the description).
             if status != 0 {
                 anyhow::bail!(
                     "AudioHardwareCreateProcessTap failed: status={} (Audio Capture permission denied?)",
@@ -100,15 +110,22 @@ impl AudioTap {
                 );
             }
 
-            // Step 3: Read the tap's UID.
+            // Step 3: Verify tap format early (right after tap creation, before aggregate device).
+            // If verification fails, only the tap needs cleanup, not the aggregate device or IOProc.
+            if let Err(e) = verify_tap_format(tap_id) {
+                let _ = AudioHardwareDestroyProcessTap(tap_id);
+                return Err(e).context("tap format verification failed");
+            }
+
+            // Step 4: Read the tap's UID.
             let tap_uid = read_tap_uid(tap_id)
                 .context("failed to read tap UID")?;
 
-            // Step 4: Create aggregate device.
+            // Step 5: Create aggregate device.
             let aggregate_id = create_aggregate_device(&tap_uid)
                 .context("failed to create aggregate device")?;
 
-            // Step 5: Create IOProc with a stable pointer to the callback context.
+            // Step 6: Create IOProc with a stable pointer to the callback context.
             // Use Box::into_raw to hand the Box's heap allocation to the IOProc,
             // then Box::from_raw in Drop to reclaim ownership when destroying the IOProc.
             let callback_context = Box::new(CallbackContext {
@@ -131,10 +148,6 @@ impl AudioTap {
                 let _ = AudioHardwareDestroyProcessTap(tap_id);
                 anyhow::bail!("AudioDeviceCreateIOProcID failed: status={}", status);
             }
-
-            // Step 6: Verify tap format (sample rate, channels, sample type).
-            verify_tap_format(tap_id)
-                .context("tap format verification failed")?;
 
             // Step 7: Start the IOProc.
             let status = AudioDeviceStart(aggregate_id, ioproc_id);
@@ -350,12 +363,13 @@ unsafe fn verify_tap_format(tap_id: AudioObjectID) -> Result<()> {
 /// - `initStereoGlobalTapButExcludeProcesses:` for system-wide mix
 /// - `initStereoMixdownOfProcesses:` for per-process capture
 ///
+/// Returns a `Retained<AnyObject>` to ensure proper lifetime management.
+/// The caller must keep the `Retained` alive across the `AudioHardwareCreateProcessTap` call
+/// (typically by binding it to a local variable at the call site).
+///
 /// # Safety
 /// This function uses `objc2`'s `msg_send!` for raw Obj-C dispatch.
-/// The returned pointer is an Obj-C object; the caller owns it and must
-/// release it when done (handled by passing to `AudioHardwareCreateProcessTap`,
-/// which takes ownership).
-unsafe fn create_tap_description(target: TapTarget) -> Result<*mut AnyObject> {
+unsafe fn create_tap_description(target: TapTarget) -> Result<objc2::rc::Retained<AnyObject>> {
     use objc2::rc::Retained;
     use objc2_foundation::{NSArray, NSNumber};
 
@@ -368,7 +382,7 @@ unsafe fn create_tap_description(target: TapTarget) -> Result<*mut AnyObject> {
     };
 
     // Allocate and initialize.
-    let desc: *mut AnyObject = match target {
+    let desc: Retained<AnyObject> = match target {
         TapTarget::SystemMix => {
             // Empty process list → system-wide mix.
             // Single init-family message capturing ownership in Retained.
@@ -377,8 +391,7 @@ unsafe fn create_tap_description(target: TapTarget) -> Result<*mut AnyObject> {
             let desc: Option<Retained<AnyObject>> = Retained::from_raw(
                 msg_send![allocated, initStereoGlobalTapButExcludeProcesses: empty_array]
             );
-            let desc = desc.context("CATapDescription initStereoGlobalTapButExcludeProcesses: returned nil")?;
-            Retained::as_ptr(&desc) as *mut AnyObject
+            desc.context("CATapDescription initStereoGlobalTapButExcludeProcesses: returned nil")?
         }
         TapTarget::Process { pid } => {
             // Single-PID tap: create NSNumber and wrap in NSArray.
@@ -393,14 +406,9 @@ unsafe fn create_tap_description(target: TapTarget) -> Result<*mut AnyObject> {
             let desc: Option<Retained<AnyObject>> = Retained::from_raw(
                 msg_send![allocated, initStereoMixdownOfProcesses: arr]
             );
-            let desc = desc.context("CATapDescription initStereoMixdownOfProcesses: returned nil")?;
-            Retained::as_ptr(&desc) as *mut AnyObject
+            desc.context("CATapDescription initStereoMixdownOfProcesses: returned nil")?
         }
     };
-
-    if desc.is_null() {
-        anyhow::bail!("CATapDescription allocation failed");
-    }
 
     Ok(desc)
 }
