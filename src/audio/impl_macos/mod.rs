@@ -14,9 +14,12 @@ mod stream;     // SCStream + delegate (Task 3)
 mod normalize;  // CMSampleBuffer → 48kHz stereo f32 (Task 3 + 5)
 
 /// Commands sent to the audio thread. Phase 4 ships only `Shutdown`; Phase 5
-/// adds `SwitchSource(AudioSourceId)`.
+/// adds `SwitchSource`.
 pub enum AudioCommand {
     Shutdown,
+    /// Switch the SCStream's content filter live. Uses
+    /// `SCStream.updateContentFilter` — no stop/restart.
+    SwitchSource(crate::config::AudioSource),
 }
 
 /// User-visible message posted to the NSPanel when SCK fails to start
@@ -99,4 +102,56 @@ fn run_sck_capture(
     });
 
     Ok(())
+}
+
+/// Enumerate audio sources visible in the tray menu.
+/// Returns SystemOutput plus one entry per running app with a non-nil bundle ID.
+pub fn list_sources() -> Result<Vec<crate::audio::AudioSourceInfo>> {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    let content = rt.block_on(async { stream::shareable_content_current().await })?;
+    let mut out = vec![crate::audio::AudioSourceInfo {
+        source: crate::config::AudioSource::SystemOutput,
+        label: "System Output".to_string(),
+    }];
+    unsafe {
+        let apps = content.applications();
+        for i in 0..apps.count() {
+            let app = apps.objectAtIndex(i);
+            let bundle_ns = app.bundleIdentifier();
+            let name_ns = app.applicationName();
+            let bundle = bundle_ns.to_string();
+            let name = name_ns.to_string();
+            if bundle.is_empty() { continue; }
+            out.push(crate::audio::AudioSourceInfo {
+                source: crate::config::AudioSource::App {
+                    bundle_id: bundle,
+                    label: name.clone(),
+                },
+                label: name,
+            });
+        }
+    }
+    out.sort_by(|a, b| a.label.to_lowercase().cmp(&b.label.to_lowercase()));
+    Ok(out)
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+    use crate::config::AudioSource;
+
+    #[test]
+    #[ignore = "requires Screen Recording permission and a running graphical session"]
+    fn list_sources_returns_system_output_plus_running_apps() {
+        let sources = list_sources().expect("list_sources should succeed");
+        assert!(
+            sources.iter().any(|s| matches!(s.source, AudioSource::SystemOutput)),
+            "SystemOutput must always appear",
+        );
+        assert!(
+            sources.iter().any(|s| matches!(s.source, AudioSource::App { .. })),
+            "at least one App entry expected on a typical desktop session",
+        );
+        assert!(sources.len() >= 2);
+    }
 }
