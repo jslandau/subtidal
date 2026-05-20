@@ -36,10 +36,14 @@ overlay/linux/window.rs      — GTK4 layer-shell window construction (docked/fl
 overlay/linux/drag.rs        — floating-mode drag gesture with compositor-quirk coordinate compensation
 overlay/linux/input_region.rs — Wayland input region for click-through
 overlay/linux/transcript_window.rs — GTK4 toplevel window for transcript mode: scrollable TextView, autoscroll, Save dialog
-overlay/macos/mod.rs         — macOS overlay orchestration (NSPanel/NSWindow); skeleton in Phase 1, populated Phase 2+ (panel + caption bridge)
+overlay/macos/mod.rs         — neutral shell for macOS overlay subtree
+overlay/macos/app.rs         — NSApplication wiring; OverlayCommand dispatch (SetVisible/SetMode/SetLocked/UpdateAppearance/SetCaptionsEnabled with 4-surface clear); caption bridge routes through CaptionBuffer + TranscriptLog; 1s NSTimer drives caption expiry
+overlay/macos/panel.rs       — NSPanel construction + `apply_geometry(panel, mtm, mode, config)` for Docked/Floating/Transcript without rebuild; `SubtidalScreenObserver` for NSApplicationDidChangeScreenParametersNotification
+overlay/macos/drag.rs        — `SubtidalDragObserver` on NSWindowDidMoveNotification; persists `panel.frame.origin` → `config.position` via hot-reload-safe `Config::save()`
+overlay/macos/transcript_window.rs — NSWindow + NSScrollView + NSTextView + Save NSButton; `SubtidalTranscriptActions: NSObject` save handler (NSSavePanel + `TranscriptLog::to_json`). Returns a `TranscriptWindow { state, actions }` bundle because NSButton holds setTarget weakly
 tray/mod.rs                  — neutral shell; re-exports impl_linux on Linux, impl_macos on macOS
 tray/impl_linux.rs           — ksni StatusNotifierItem system tray
-tray/impl_macos.rs           — macOS tray implementation (NSStatusItem); skeleton in Phase 1, populated Phase 6
+tray/impl_macos.rs           — NSStatusItem + NSMenu with `SubtidalTrayActions: NSObject` (canonical `objc2 0.6 define_class!` reference for the codebase); holds `TrayState` ivars + `Retained<NSMenuItem>` handles; 5s NSTimer refreshes the dynamic audio-source submenu
 ```
 
 ## Thread Model
@@ -83,6 +87,11 @@ Engine changes are a lock-free `ArcSwap::store` read at the next chunk boundary.
 - **CaptureError discrimination** (`src/audio/impl_macos/mod.rs`): the worker returns `CaptureError::InitialBuildFailed` for first-build failures (mapped to a TCC-denied user-notification message) and `CaptureError::RuntimeFailure` for in-flight failures (generic message). Anything else converts via `From<anyhow::Error> for CaptureError` as `RuntimeFailure`.
 - **Process source enumeration** (`list_sources` on macOS): deduplicates by `bundle_id` and **does not** filter by `kAudioProcessPropertyIsRunning` — the process list reflects "has ever instantiated an audio engine this session" rather than "currently producing audio". Filtering by IsRunning would hide apps mid-pause.
 - **macOS TCC boundary**: capture requires the **Audio Capture** TCC service (declared via `NSAudioCaptureUsageDescription` in `Info.plist`), *not* Screen Recording. Grant persists across launches without stable codesigning — the headline payoff vs Phase 4's ScreenCaptureKit approach.
+- **macOS tray** (`tray/impl_macos.rs`, Phase 6): NSStatusItem hosts an NSMenu driven by `SubtidalTrayActions: NSObject`. Action callbacks read/mutate shared `TrayState` ivars and update `Retained<NSMenuItem>` handles (checkmarks, dynamic source list). A 5s NSTimer refreshes the audio-source submenu to reflect process appearance/disappearance. Tray icon is a template PNG bundled at `resources/macos/tray-icon-template.png` (copied into `Subtidal.app/Contents/Resources` by `scripts/bundle-mac.sh`).
+- **macOS overlay geometry** (`overlay/macos/panel.rs`, Phase 6): `apply_geometry(panel, mtm, mode, config)` reshapes the existing NSPanel for Docked / Floating / Transcript transitions without teardown — analogous to the Linux mode-switch path. `SubtidalScreenObserver` listens for `NSApplicationDidChangeScreenParametersNotification` and re-applies geometry on display changes.
+- **macOS drag persistence** (`overlay/macos/drag.rs`, Phase 6): `SubtidalDragObserver` observes `NSWindowDidMoveNotification` and writes `panel.frame.origin` back into `config.position` through `Config::save()`. The save path is the same one hot-reload watches, so writes must round-trip without re-triggering the debouncer beyond the normal SetMode-suppression logic.
+- **macOS transcript window** (`overlay/macos/transcript_window.rs`, Phase 6): NSWindow + NSScrollView + NSTextView with a Save NSButton wired to `SubtidalTranscriptActions` which spawns an NSSavePanel and writes `TranscriptLog::to_json`. The window is returned as a `TranscriptWindow { state, actions }` bundle so the caller keeps `actions` alive — NSButton's `setTarget:` is weak.
+- **Caption bridge ownership** (`overlay/macos/app.rs`, Phase 6): the caption bridge is the sole caller of `TranscriptLog::push()`. `transcript_window::append_fragment` only re-renders the view from existing log state. Splitting these responsibilities prevents the double-push that surfaced during integration.
 
 ## Dependencies (key crates)
 
@@ -104,7 +113,7 @@ Engine changes are a lock-free `ArcSwap::store` read at the next chunk boundary.
 **macOS-specific:**
 - coreaudio-sys 0.2 — Core Audio FFI. Note: `AudioHardwareCreateProcessTap` / `AudioHardwareDestroyProcessTap` are declared inline (`extern "C"`) in `src/audio/impl_macos/tap.rs` because the `CoreAudio.h` umbrella header excludes `AudioHardwareTapping.h` and the 0.2.17 bindgen output omits them.
 - core-foundation 0.10 — CFString, CFNumber, CFDictionary, CFArray
-- objc2 0.6 + objc2-foundation 0.3 + objc2-app-kit 0.3 — Obj-C runtime and AppKit bindings. `CATapDescription` has no binding crate; it is driven through raw `objc2::msg_send!` against the Apple-named initializers `initStereoMixdownOfProcesses:` and `initStereoGlobalTapButExcludeProcesses:`.
+- objc2 0.6 + objc2-foundation 0.3 (`NSTimer`, `NSDate` enabled in Phase 6 for tray/caption-expiry timers) + objc2-app-kit 0.3 (Phase 6 adds `NSMenu`, `NSMenuItem`, `NSStatusBar`, `NSStatusItem`, `NSScrollView`, `NSTextView`, `NSTextStorage`, `NSSavePanel`, `NSImage`, `NSControl`, `NSCell`) — Obj-C runtime and AppKit bindings. `CATapDescription` has no binding crate; it is driven through raw `objc2::msg_send!` against the Apple-named initializers `initStereoMixdownOfProcesses:` and `initStereoGlobalTapButExcludeProcesses:`.
 - objc2-user-notifications 0.3 — UNUserNotificationCenter for source-disappeared alerts
 - dispatch2 0.3 + block2 0.6 — Grand Central Dispatch for main-thread marshaling
 - libc 0.2 — `kill(pid, 0)` for the process-liveness watchdog
@@ -119,6 +128,8 @@ Engine changes are a lock-free `ArcSwap::store` read at the next chunk boundary.
 - WebGPU unavailability triggers automatic fallback to CPU execution (Nemotron on macOS).
 - Config save failures are warned but never fatal.
 - Ring buffer overflow drops samples silently (preferred over blocking RT callback).
+- **AppKit `setTarget:` is weak.** Any `define_class!` action target (tray actions, transcript Save button, drag/screen observers) must be owned by something that outlives the menu/button/notification — return it in a bundle (e.g. `TranscriptWindow { state, actions }`) or stash it in a `let _binding = ...` in `main_macos.rs`. Pointing `setTarget:` at an unrelated long-lived object (NSStatusItem, the panel) raises `NSInvalidArgumentException` on first click — a real bug we hit and reverted twice.
+- **Canonical `objc2 0.6 define_class!` pattern lives at the top of `src/tray/impl_macos.rs`.** New macOS Obj-C subclasses (`SubtidalDragObserver`, `SubtidalScreenObserver`, `SubtidalTranscriptActions`, future ones) should mirror that structure rather than reinvent it — `objc2` 0.6 changed the macro shape vs. older examples on the web.
 
 ## Build & Run
 
