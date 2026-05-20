@@ -23,7 +23,8 @@ audio/mod.rs                 — neutral shell; re-exports impl_linux on Linux, 
 audio/impl_linux.rs          — PipeWire capture thread, node enumeration, source switching
 audio/impl_macos/mod.rs      — macOS audio capture orchestration via Core Audio Taps (Phase 5 revised)
 audio/impl_macos/tap.rs      — RAII wrapper for Core Audio process tap + aggregate device + IOProc (Task 3, Phase 5 revised)
-audio/impl_macos/tap_processes.rs — safe wrappers for Core Audio process enumeration (Task 2, Phase 5 revised)
+audio/impl_macos/tap_processes.rs — safe wrappers for Core Audio process enumeration (Phase 5 revised)
+audio/impl_macos/notify.rs   — UNUserNotificationCenter helper for source-disappeared/TCC-denied alerts (Phase 5 revised)
 audio/resampler.rs           — rubato 48kHz stereo -> 16kHz mono resampler (platform-neutral)
 stt/mod.rs                   — SttEngine trait + AudioWake (neutral) + Linux-gated spawn_stt_thread / build_engine / `mod nemotron`
 stt/nemotron.rs              — Nemotron RNNT engine (ort + parakeet-rs, CUDA) [Linux-only]
@@ -51,7 +52,7 @@ tray/impl_macos.rs           — macOS tray implementation (NSStatusItem); skele
 
 **macOS:**
 1. **Main/AppKit thread** — NSApplication main loop.
-2. **Audio worker thread** (`audio-tap-worker`) — Core Audio IOProc callback pushes samples to ring buffer, 1 Hz polling thread detects source disappearance and triggers fallback.
+2. **Audio worker thread** (`audio-tap-worker`) — Core Audio IOProc callback pushes samples to ring buffer; a 1 Hz polling loop in the worker uses POSIX `kill(pid, 0)` to detect process death and triggers fallback to SystemMix. (Core Audio's `kAudioProcessPropertyIsRunning` is *not* used for liveness — it tracks "audio I/O active right now" and false-positives on every playback pause.)
 3. **STT pipeline thread** (`stt-pipeline`) — same as Linux.
 4. **Tray thread** — tokio runtime (Phase 6).
 
@@ -67,16 +68,21 @@ Engine changes are a lock-free `ArcSwap::store` read at the next chunk boundary.
 - **Audio wake**: `stt::AudioWake` is an `AtomicBool` + `Condvar` pair. RT callback (PipeWire or Core Audio IOProc) calls `notify()` without holding any mutex; consumer uses `wait_timeout_while` with the flag as predicate. The timeout handles VRAM unload and shutdown observation when audio is silent.
 - **Audio source fallback**: 
   - Linux: When a captured PipeWire node disappears, automatically falls back to SystemOutput with desktop notification.
-  - macOS: 1 Hz polling watchdog detects process disappearance via `kAudioProcessPropertyIsRunning`, falls back to SystemOutput with `UNUserNotification`.
+  - macOS: 1 Hz `kill(pid, 0)` watchdog over `TapTarget::Processes { watchdog_pids }` detects process death; on any watched PID disappearing, falls back to SystemMix with a `UNUserNotification`. (Multi-PID is the common case: browsers split audio across WebKit/GPU helpers sharing one bundle id.)
 - **Engine switching**: `Arc<ArcSwap<Engine>>`. Tray calls `store()`, STT thread reads via `load()` on each chunk batch and rebuilds the engine if the choice changed. Only Nemotron is currently implemented.
-- **Config**: TOML at `~/.config/subtidal/config.toml` (Linux) or `~/Library/Application Support/Subtidal/config.toml` (macOS). Hot-reload only sends SetMode/SetLocked/UpdateAppearance when values actually changed (prevents drag feedback loop). Malformed TOML is warned and ignored.
+- **Config**: TOML at `~/.config/subtidal/config.toml` (Linux) or `~/Library/Application Support/Subtidal/config.toml` (macOS). Linux hot-reload only sends SetMode/SetLocked/UpdateAppearance when values actually changed (prevents drag feedback loop). macOS hot-reload (`config::start_hot_reload_macos`) watches `audio_source` only and emits `AudioCommand::SwitchSource`; appearance/mode fields are ignored until Phase 6 wires the overlay surface. Malformed TOML is warned and ignored.
 - **Models**: Downloaded from HuggingFace to `~/.local/share/subtidal/models/nemotron/` (Linux) or `~/Library/Application Support/Subtidal/models/nemotron/` (macOS). Hardlinked from HF cache when possible.
 - **Nemotron engine**: 600M param RNNT model using parakeet-rs::Nemotron. Uses CUDA when available on Linux, WebGPU on macOS, falls back to CPU. Internally buffers 160ms chunks and emits results on 560ms boundaries.
 - **Caption display**: Line-fill model — text fills lines word-by-word up to a character limit (0.85× estimated max chars), then shifts oldest line off when all lines are full. During silence, lines expire one at a time after `expire_secs` (default 8s). Engine whitespace signals word boundaries: leading space = new word, no space = continuation of previous word. RNNT overlap deduplication is preserved.
 - **Overlay drag** (Linux): Uses accumulated offset tracking to compensate for layer-shell coordinate system shift. During drag, all GTK mutations (captions, CSS, commands) are suppressed via is_dragging flag to prevent relayout jitter.
 - **Above-fullscreen toggle**: `config.above_fullscreen` (tray: "Show Above Fullscreen") selects `Layer::Overlay` vs `Layer::Top` for the layer-shell overlay (Linux only). Overlay layer renders above compositor-fullscreened clients (e.g. browser video); Top does not. Live-applied via `OverlayCommand::SetAboveFullscreen` (no rebuild). No-op in Transcript mode (regular toplevel).
 - **Overlay modes**: Three modes — `Docked` and `Floating` use the gtk4-layer-shell overlay (Linux); `Transcript` uses a regular toplevel window with append-only timestamped paragraphs. Both windows are constructed at startup and visibility-toggled by mode. Captions always append to `TranscriptLog` regardless of mode (mid-session switch reveals full history). On captions-disable edge, all caption surfaces are cleared (TranscriptLog, transcript view, CaptionBuffer, overlay label).
-- **Core Audio Tap lifecycle** (macOS, Task 3, Phase 5 revised): `AudioTap` RAII type owns process tap + aggregate device + IOProc. Drop impl tears down in correct order: Stop → DestroyIOProc → DestroyAggregateDevice → DestroyProcessTap. Source switching rebuilds the tap + aggregate device (sub-100ms latency; AC3.3 target ≤1 second caption gap).
+- **Core Audio Tap lifecycle** (macOS, Phase 5 revised): `AudioTap` RAII type owns process tap + aggregate device + IOProc. Drop impl tears down in correct order: Stop → DestroyIOProc → DestroyAggregateDevice → DestroyProcessTap. During `AudioTap::build`, a local `TapGuard` scope-guard destroys a freshly-created tap on any error path until IOProc creation succeeds, at which point it is `defuse()`d and ownership transfers to `AudioTap`. Source switching rebuilds the tap + aggregate device (sub-100ms latency; AC3.3 target ≤1 second caption gap).
+- **TapTarget shape**: `TapTarget::SystemMix | TapTarget::Processes { object_ids: Vec<AudioObjectID>, watchdog_pids: Vec<c_int> }`. `object_ids` are the per-process Core Audio objects the tap mixes; `watchdog_pids` are the POSIX PIDs the worker thread polls. Multi-PID is the rule, not the exception, because browsers split audio across helper processes that share a single bundle id.
+- **Tap format guard** (`verify_tap_format`): immediately after `AudioHardwareCreateProcessTap` returns, the tap's stream format is read and rejected unless it is exactly 48 kHz stereo f32. No format coercion is implemented; downstream resampling assumes this layout.
+- **CaptureError discrimination** (`src/audio/impl_macos/mod.rs`): the worker returns `CaptureError::InitialBuildFailed` for first-build failures (mapped to a TCC-denied user-notification message) and `CaptureError::RuntimeFailure` for in-flight failures (generic message). Anything else converts via `From<anyhow::Error> for CaptureError` as `RuntimeFailure`.
+- **Process source enumeration** (`list_sources` on macOS): deduplicates by `bundle_id` and **does not** filter by `kAudioProcessPropertyIsRunning` — the process list reflects "has ever instantiated an audio engine this session" rather than "currently producing audio". Filtering by IsRunning would hide apps mid-pause.
+- **macOS TCC boundary**: capture requires the **Audio Capture** TCC service (declared via `NSAudioCaptureUsageDescription` in `Info.plist`), *not* Screen Recording. Grant persists across launches without stable codesigning — the headline payoff vs Phase 4's ScreenCaptureKit approach.
 
 ## Dependencies (key crates)
 
@@ -96,11 +102,12 @@ Engine changes are a lock-free `ArcSwap::store` read at the next chunk boundary.
 - notify-rust 4 — desktop notifications
 
 **macOS-specific:**
-- coreaudio-sys 0.2 — Core Audio FFI
+- coreaudio-sys 0.2 — Core Audio FFI. Note: `AudioHardwareCreateProcessTap` / `AudioHardwareDestroyProcessTap` are declared inline (`extern "C"`) in `src/audio/impl_macos/tap.rs` because the `CoreAudio.h` umbrella header excludes `AudioHardwareTapping.h` and the 0.2.17 bindgen output omits them.
 - core-foundation 0.10 — CFString, CFNumber, CFDictionary, CFArray
-- objc2 0.6 + objc2-foundation 0.3 + objc2-app-kit 0.3 — Obj-C runtime and AppKit bindings
+- objc2 0.6 + objc2-foundation 0.3 + objc2-app-kit 0.3 — Obj-C runtime and AppKit bindings. `CATapDescription` has no binding crate; it is driven through raw `objc2::msg_send!` against the Apple-named initializers `initStereoMixdownOfProcesses:` and `initStereoGlobalTapButExcludeProcesses:`.
 - objc2-user-notifications 0.3 — UNUserNotificationCenter for source-disappeared alerts
 - dispatch2 0.3 + block2 0.6 — Grand Central Dispatch for main-thread marshaling
+- libc 0.2 — `kill(pid, 0)` for the process-liveness watchdog
 
 ## Invariants
 
