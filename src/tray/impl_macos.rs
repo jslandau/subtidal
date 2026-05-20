@@ -1,69 +1,344 @@
-//! macOS system tray via NSStatusItem + NSMenu.
+//! macOS system tray: NSStatusItem + NSMenu with Obj-C action targets.
 //!
-//! Mirrors Linux tray structure semantically: TrayState holds shared references
-//! to config, captions_enabled, command channels, engine choice, and audio sources.
-//! NSMenu construction happens on the main thread via install_tray().
+//! ## Canonical objc2 0.6 `define_class!` pattern
+//!
+//! AppKit menu items dispatch clicks by sending `[target selector:item]` —
+//! the target must be a real Obj-C object whose class implements the
+//! selector. Pointing `setTarget:` at an arbitrary Rust struct or at an
+//! unrelated AppKit object (e.g. NSStatusItem) will raise
+//! `NSInvalidArgumentException` at first click. The fix is a small custom
+//! NSObject subclass declared via `objc2::define_class!`.
+//!
+//! This file is intentionally the only place in the codebase that does
+//! this; future macOS work (drag observers in `overlay/macos/drag.rs`, a
+//! transcript-window save button, etc.) should copy this structure rather
+//! than reinvent it. Key points:
+//!
+//! - Ivars are a plain Rust struct (`TrayIvars`) accessed inside methods
+//!   via `self.ivars()`.
+//! - Construction is `Self::alloc(mtm).set_ivars(ivars)` followed by
+//!   `msg_send![super(allocated), init]`. The `mtm` argument carries the
+//!   main-thread guarantee that makes `Retained<NSMenuItem>` ivars sound.
+//! - Methods are declared with `#[unsafe(method(selector:))]`; arguments
+//!   match the Obj-C signature — menu actions take
+//!   `Option<&NSMenuItem>`, NSTimer callbacks take `Option<&NSTimer>`.
+//! - `setTarget(Some(&*actions))` is wired *after* the menu is built. The
+//!   `Retained<TrayActions>` is kept alive for the app lifetime via the
+//!   tuple returned from `install_tray`.
 
-use crate::audio::AudioSourceInfo;
-use crate::config::{Config, Engine, OverlayMode};
+use crate::audio::{AudioCommand, AudioSourceInfo};
+use crate::config::{AudioSource, Config, Engine, OverlayMode};
 use crate::overlay::OverlayCommand;
 use arc_swap::ArcSwap;
-use objc2::{MainThreadMarker, AnyThread, MainThreadOnly};
 use objc2::rc::Retained;
-use objc2::sel;
-use objc2::msg_send;
+use objc2::runtime::AnyObject;
+use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSMenu, NSMenuItem, NSStatusBar, NSStatusItem, NSImage, NSSquareStatusItemLength,
+    NSImage, NSMenu, NSMenuItem, NSSquareStatusItemLength, NSStatusBar, NSStatusItem,
 };
-use objc2_foundation::NSString;
-use std::sync::{Arc, Mutex};
-use std::sync::atomic::AtomicBool;
+use objc2_foundation::{NSObject, NSString, NSTimer};
+use std::cell::RefCell;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::SyncSender;
+use std::sync::{Arc, Mutex};
 
-/// Shared tray state. Mirrors Linux TrayState; macOS uses Arc<Mutex<>> for
-/// interior mutability since NSMenu handlers cannot capture mutable self.
+/// Shared state passed in by `main_macos.rs`.
 pub struct TrayState {
     pub config: Arc<Mutex<Config>>,
     pub captions_enabled: Arc<AtomicBool>,
     pub cmd_tx: async_channel::Sender<OverlayCommand>,
-    pub audio_cmd_tx: SyncSender<crate::audio::AudioCommand>,
+    pub audio_cmd_tx: SyncSender<AudioCommand>,
     pub engine_choice: Arc<ArcSwap<Engine>>,
     pub audio_sources: Arc<Mutex<Vec<AudioSourceInfo>>>,
 }
 
-/// Install the macOS system tray (NSStatusItem) on the main thread.
-/// Returns Retained<NSStatusItem> to keep it alive for the app lifetime.
-pub fn install_tray(state: TrayState, mtm: MainThreadMarker) -> Retained<NSStatusItem> {
-    // 1. Get the system status bar and create a status item.
+/// Ivars for the `TrayActions` NSObject subclass.
+///
+/// `Retained<NSMenuItem>` ivars are sound because `TrayActions` is
+/// `MainThreadOnly` — AppKit always invokes menu targets on the main
+/// thread, and the NSTimer fires on the main run loop. `RefCell` gives
+/// interior mutability for re-pointing the Audio Source submenu when the
+/// running-process list changes.
+pub struct TrayIvars {
+    state: TrayState,
+    audio_item: RefCell<Retained<NSMenuItem>>,
+    lock_item: RefCell<Retained<NSMenuItem>>,
+    captions_item: RefCell<Retained<NSMenuItem>>,
+    above_item: RefCell<Retained<NSMenuItem>>,
+    mode_items: RefCell<Vec<Retained<NSMenuItem>>>,
+}
+
+define_class!(
+    /// Custom NSObject subclass holding shared tray state in ivars and
+    /// implementing every menu/timer selector as an Obj-C method.
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "SubtidalTrayActions"]
+    #[ivars = TrayIvars]
+    pub struct TrayActions;
+
+    impl TrayActions {
+        #[unsafe(method(toggleCaptions:))]
+        fn toggle_captions(&self, _sender: Option<&NSMenuItem>) {
+            let ivars = self.ivars();
+            let prev = ivars.state.captions_enabled.load(Ordering::Relaxed);
+            let next = !prev;
+            ivars.state.captions_enabled.store(next, Ordering::Relaxed);
+
+            let in_transcript = {
+                let cfg = ivars.state.config.lock().unwrap();
+                matches!(cfg.overlay_mode, OverlayMode::Transcript)
+            };
+            if !in_transcript {
+                let _ = ivars.state.cmd_tx.send_blocking(OverlayCommand::SetVisible(next));
+            }
+            let _ = ivars.state.cmd_tx.send_blocking(OverlayCommand::SetCaptionsEnabled(next));
+
+            ivars.captions_item.borrow().setState(if next { 1 } else { 0 });
+        }
+
+        #[unsafe(method(selectMode:))]
+        fn select_mode(&self, sender: Option<&NSMenuItem>) {
+            let Some(sender) = sender else { return };
+            let title = sender.title().to_string();
+            let new_mode = match title.as_str() {
+                "Docked" => OverlayMode::Docked,
+                "Floating" => OverlayMode::Floating,
+                "Transcript" => OverlayMode::Transcript,
+                _ => return,
+            };
+            let ivars = self.ivars();
+            {
+                let mut cfg = ivars.state.config.lock().unwrap();
+                cfg.overlay_mode = new_mode.clone();
+                let _ = cfg.save();
+            }
+            let _ = ivars
+                .state
+                .cmd_tx
+                .send_blocking(OverlayCommand::SetMode(new_mode.clone()));
+
+            for mi in ivars.mode_items.borrow().iter() {
+                let mi_title = mi.title().to_string();
+                mi.setState(if mi_title == title { 1 } else { 0 });
+            }
+            ivars
+                .lock_item
+                .borrow()
+                .setEnabled(matches!(new_mode, OverlayMode::Floating));
+        }
+
+        #[unsafe(method(selectAudioSource:))]
+        fn select_audio_source(&self, sender: Option<&NSMenuItem>) {
+            let Some(sender) = sender else { return };
+            let title = sender.title().to_string();
+            let ivars = self.ivars();
+            let new_source = if title == "System Output" {
+                AudioSource::SystemOutput
+            } else {
+                let sources = ivars.state.audio_sources.lock().unwrap();
+                match sources.iter().find(|s| s.label == title) {
+                    Some(info) => info.source.clone(),
+                    None => return,
+                }
+            };
+            {
+                let mut cfg = ivars.state.config.lock().unwrap();
+                cfg.audio_source = new_source.clone();
+                let _ = cfg.save();
+            }
+            let _ = ivars
+                .state
+                .audio_cmd_tx
+                .send(AudioCommand::SwitchSource(new_source));
+
+            let audio = ivars.audio_item.borrow();
+            if let Some(submenu) = audio.submenu() {
+                let n = submenu.numberOfItems();
+                for i in 0..n {
+                    if let Some(mi) = submenu.itemAtIndex(i) {
+                        let on = mi.title().to_string() == title;
+                        mi.setState(if on { 1 } else { 0 });
+                    }
+                }
+            }
+        }
+
+        #[unsafe(method(toggleAboveFullscreen:))]
+        fn toggle_above_fullscreen(&self, _sender: Option<&NSMenuItem>) {
+            let ivars = self.ivars();
+            let next = {
+                let mut cfg = ivars.state.config.lock().unwrap();
+                cfg.above_fullscreen = !cfg.above_fullscreen;
+                let _ = cfg.save();
+                cfg.above_fullscreen
+            };
+            let _ = ivars
+                .state
+                .cmd_tx
+                .send_blocking(OverlayCommand::SetAboveFullscreen(next));
+            ivars.above_item.borrow().setState(if next { 1 } else { 0 });
+        }
+
+        #[unsafe(method(toggleLock:))]
+        fn toggle_lock(&self, _sender: Option<&NSMenuItem>) {
+            let ivars = self.ivars();
+            let in_floating = {
+                let cfg = ivars.state.config.lock().unwrap();
+                matches!(cfg.overlay_mode, OverlayMode::Floating)
+            };
+            if !in_floating {
+                return;
+            }
+            let next = {
+                let mut cfg = ivars.state.config.lock().unwrap();
+                cfg.locked = !cfg.locked;
+                let _ = cfg.save();
+                cfg.locked
+            };
+            let _ = ivars
+                .state
+                .cmd_tx
+                .send_blocking(OverlayCommand::SetLocked(next));
+            ivars.lock_item.borrow().setState(if next { 1 } else { 0 });
+        }
+
+        #[unsafe(method(quit:))]
+        fn quit(&self, _sender: Option<&NSMenuItem>) {
+            let ivars = self.ivars();
+            let _ = ivars.state.audio_cmd_tx.send(AudioCommand::Shutdown);
+            let _ = ivars.state.cmd_tx.send_blocking(OverlayCommand::Quit);
+        }
+
+        /// No-op for the disabled "Nemotron" engine entry. NSMenuItem
+        /// requires a non-nil action for the checkmark to render under
+        /// `setAutoenablesItems(false)`.
+        #[unsafe(method(noop:))]
+        fn noop(&self, _sender: Option<&NSMenuItem>) {}
+
+        /// AC5.4: every 5 s, re-poll audio process list and rebuild the
+        /// Audio Source submenu if it has changed.
+        #[unsafe(method(refreshAudioSources:))]
+        fn refresh_audio_sources(&self, _timer: Option<&NSTimer>) {
+            let ivars = self.ivars();
+            let new_sources = match crate::audio::list_sources() {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            let changed = {
+                let mut cached = ivars.state.audio_sources.lock().unwrap();
+                if new_sources == *cached {
+                    false
+                } else {
+                    *cached = new_sources;
+                    true
+                }
+            };
+            if !changed {
+                return;
+            }
+            let mtm = MainThreadMarker::from(self);
+            let new_submenu = build_audio_submenu_for(&ivars.state, mtm, self);
+            ivars.audio_item.borrow().setSubmenu(Some(&new_submenu));
+        }
+    }
+);
+
+impl TrayActions {
+    fn new(
+        mtm: MainThreadMarker,
+        state: TrayState,
+        captions_item: Retained<NSMenuItem>,
+        mode_items: Vec<Retained<NSMenuItem>>,
+        audio_item: Retained<NSMenuItem>,
+        above_item: Retained<NSMenuItem>,
+        lock_item: Retained<NSMenuItem>,
+    ) -> Retained<Self> {
+        let ivars = TrayIvars {
+            state,
+            audio_item: RefCell::new(audio_item),
+            lock_item: RefCell::new(lock_item),
+            captions_item: RefCell::new(captions_item),
+            above_item: RefCell::new(above_item),
+            mode_items: RefCell::new(mode_items),
+        };
+        let allocated = Self::alloc(mtm).set_ivars(ivars);
+        unsafe { msg_send![super(allocated), init] }
+    }
+}
+
+/// Build the Audio Source submenu, wiring `selectAudioSource:` to the
+/// given `TrayActions` target on each row. Used for the initial build and
+/// the timer-driven refresh.
+fn build_audio_submenu_for(
+    state: &TrayState,
+    mtm: MainThreadMarker,
+    target: &TrayActions,
+) -> Retained<NSMenu> {
+    let menu = NSMenu::new(mtm);
+    menu.setAutoenablesItems(false);
+
+    let current_source = state.config.lock().unwrap().audio_source.clone();
+    let sources = state.audio_sources.lock().unwrap().clone();
+    let target_obj: &AnyObject = target.as_ref();
+
+    let make_item = |label: &str, on: bool| -> Retained<NSMenuItem> {
+        let mi = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm),
+                &NSString::from_str(label),
+                Some(sel!(selectAudioSource:)),
+                &NSString::from_str(""),
+            )
+        };
+        mi.setState(if on { 1 } else { 0 });
+        unsafe { mi.setTarget(Some(target_obj)) };
+        mi
+    };
+
+    let system_on = matches!(current_source, AudioSource::SystemOutput);
+    menu.addItem(&make_item("System Output", system_on));
+    for info in &sources {
+        let on = info.source == current_source;
+        menu.addItem(&make_item(&info.label, on));
+    }
+    menu
+}
+
+/// Install the macOS system tray on the main thread. Returns both the
+/// status item and the actions object — the caller MUST keep both alive
+/// for the app lifetime (a `let _binding = ...` in `main` suffices).
+pub fn install_tray(
+    state: TrayState,
+    mtm: MainThreadMarker,
+) -> (Retained<NSStatusItem>, Retained<TrayActions>) {
     let bar = NSStatusBar::systemStatusBar();
     let item = bar.statusItemWithLength(NSSquareStatusItemLength);
 
-    // 2. Load the template icon from the app bundle and set it.
-    let bundle = unsafe {
+    // Template icon from Subtidal.app/Contents/Resources/.
+    let bundle: Retained<AnyObject> = unsafe {
         let cls = objc2::class!(NSBundle);
-        let bundle: Retained<objc2::runtime::AnyObject> = msg_send![cls, mainBundle];
-        bundle
+        msg_send![cls, mainBundle]
     };
-
-    let icon_name = NSString::from_str("tray-icon-template");
-    let icon_ext = NSString::from_str("png");
     let path: Option<Retained<NSString>> = unsafe {
-        msg_send![&bundle, pathForResource: &*icon_name, ofType: &*icon_ext]
+        msg_send![
+            &bundle,
+            pathForResource: &*NSString::from_str("tray-icon-template"),
+            ofType: &*NSString::from_str("png")
+        ]
     };
-
     if let Some(path) = path {
         if let Some(image) = NSImage::initWithContentsOfFile(NSImage::alloc(), &path) {
-            image.setTemplate(true);  // Auto light/dark coloring
-            let button = item.button(mtm).expect("statusItem button");
-            button.setImage(Some(&image));
+            image.setTemplate(true);
+            if let Some(button) = item.button(mtm) {
+                button.setImage(Some(&image));
+            }
         }
     }
 
-    // 3. Build the NSMenu.
     let menu = NSMenu::new(mtm);
-    menu.setAutoenablesItems(false);  // Explicit enable/disable per AC5.8
+    menu.setAutoenablesItems(false);
 
-    // Captions on/off
     let captions_item = unsafe {
         NSMenuItem::initWithTitle_action_keyEquivalent(
             NSMenuItem::alloc(mtm),
@@ -72,12 +347,11 @@ pub fn install_tray(state: TrayState, mtm: MainThreadMarker) -> Retained<NSStatu
             &NSString::from_str(""),
         )
     };
-    let captions_enabled_state = state.captions_enabled.load(std::sync::atomic::Ordering::Relaxed);
-    captions_item.setState(if captions_enabled_state { 1 } else { 0 });
+    captions_item.setState(if state.captions_enabled.load(Ordering::Relaxed) { 1 } else { 0 });
     menu.addItem(&captions_item);
 
     // Mode submenu
-    let mode_item = unsafe {
+    let mode_parent = unsafe {
         NSMenuItem::initWithTitle_action_keyEquivalent(
             NSMenuItem::alloc(mtm),
             &NSString::from_str("Mode"),
@@ -86,7 +360,9 @@ pub fn install_tray(state: TrayState, mtm: MainThreadMarker) -> Retained<NSStatu
         )
     };
     let mode_menu = NSMenu::new(mtm);
+    mode_menu.setAutoenablesItems(false);
     let current_mode = state.config.lock().unwrap().overlay_mode.clone();
+    let mut mode_items: Vec<Retained<NSMenuItem>> = Vec::new();
     for (label, mode_kind) in [
         ("Docked", OverlayMode::Docked),
         ("Floating", OverlayMode::Floating),
@@ -102,12 +378,13 @@ pub fn install_tray(state: TrayState, mtm: MainThreadMarker) -> Retained<NSStatu
         };
         mi.setState(if current_mode == mode_kind { 1 } else { 0 });
         mode_menu.addItem(&mi);
+        mode_items.push(mi);
     }
-    mode_item.setSubmenu(Some(&mode_menu));
-    menu.addItem(&mode_item);
+    mode_parent.setSubmenu(Some(&mode_menu));
+    menu.addItem(&mode_parent);
 
-    // Engine submenu (Nemotron only)
-    let engine_item = unsafe {
+    // Engine submenu (Nemotron only, disabled)
+    let engine_parent = unsafe {
         NSMenuItem::initWithTitle_action_keyEquivalent(
             NSMenuItem::alloc(mtm),
             &NSString::from_str("Engine"),
@@ -116,6 +393,7 @@ pub fn install_tray(state: TrayState, mtm: MainThreadMarker) -> Retained<NSStatu
         )
     };
     let engine_menu = NSMenu::new(mtm);
+    engine_menu.setAutoenablesItems(false);
     let nemo = unsafe {
         NSMenuItem::initWithTitle_action_keyEquivalent(
             NSMenuItem::alloc(mtm),
@@ -125,12 +403,12 @@ pub fn install_tray(state: TrayState, mtm: MainThreadMarker) -> Retained<NSStatu
         )
     };
     nemo.setState(1);
-    nemo.setEnabled(false);  // No switching; Nemotron is the only engine
+    nemo.setEnabled(false);
     engine_menu.addItem(&nemo);
-    engine_item.setSubmenu(Some(&engine_menu));
-    menu.addItem(&engine_item);
+    engine_parent.setSubmenu(Some(&engine_menu));
+    menu.addItem(&engine_parent);
 
-    // Audio Source submenu
+    // Audio Source — submenu populated after actions exists
     let audio_item = unsafe {
         NSMenuItem::initWithTitle_action_keyEquivalent(
             NSMenuItem::alloc(mtm),
@@ -139,11 +417,8 @@ pub fn install_tray(state: TrayState, mtm: MainThreadMarker) -> Retained<NSStatu
             &NSString::from_str(""),
         )
     };
-    let audio_menu = build_audio_submenu(&state, mtm);
-    audio_item.setSubmenu(Some(&audio_menu));
     menu.addItem(&audio_item);
 
-    // Show Above Fullscreen
     let above_item = unsafe {
         NSMenuItem::initWithTitle_action_keyEquivalent(
             NSMenuItem::alloc(mtm),
@@ -152,11 +427,10 @@ pub fn install_tray(state: TrayState, mtm: MainThreadMarker) -> Retained<NSStatu
             &NSString::from_str(""),
         )
     };
-    let above_fs = state.config.lock().unwrap().above_fullscreen;
-    above_item.setState(if above_fs { 1 } else { 0 });
+    let above_initial = state.config.lock().unwrap().above_fullscreen;
+    above_item.setState(if above_initial { 1 } else { 0 });
     menu.addItem(&above_item);
 
-    // Lock Position (Floating-only)
     let lock_item = unsafe {
         NSMenuItem::initWithTitle_action_keyEquivalent(
             NSMenuItem::alloc(mtm),
@@ -165,14 +439,13 @@ pub fn install_tray(state: TrayState, mtm: MainThreadMarker) -> Retained<NSStatu
             &NSString::from_str(""),
         )
     };
-    let locked = state.config.lock().unwrap().locked;
-    lock_item.setState(if locked { 1 } else { 0 });
+    let locked_initial = state.config.lock().unwrap().locked;
+    lock_item.setState(if locked_initial { 1 } else { 0 });
     lock_item.setEnabled(matches!(current_mode, OverlayMode::Floating));
     menu.addItem(&lock_item);
 
     menu.addItem(&NSMenuItem::separatorItem(mtm));
 
-    // Quit
     let quit_item = unsafe {
         NSMenuItem::initWithTitle_action_keyEquivalent(
             NSMenuItem::alloc(mtm),
@@ -185,45 +458,49 @@ pub fn install_tray(state: TrayState, mtm: MainThreadMarker) -> Retained<NSStatu
 
     item.setMenu(Some(&menu));
 
-    item
-}
+    // Build the action target. Clone Retained handles for ivars — NSMenu
+    // retains its items independently, so these clones are sound.
+    let actions = TrayActions::new(
+        mtm,
+        state,
+        captions_item.clone(),
+        mode_items.clone(),
+        audio_item.clone(),
+        above_item.clone(),
+        lock_item.clone(),
+    );
 
-fn build_audio_submenu(state: &TrayState, mtm: MainThreadMarker) -> Retained<NSMenu> {
-    let menu = NSMenu::new(mtm);
-
-    let sources = state.audio_sources.lock().unwrap();
-    let current_source = &state.config.lock().unwrap().audio_source;
-
-    // System Output first
-    let system_item = unsafe {
-        NSMenuItem::initWithTitle_action_keyEquivalent(
-            NSMenuItem::alloc(mtm),
-            &NSString::from_str("System Output"),
-            Some(sel!(selectAudioSource:)),
-            &NSString::from_str(""),
-        )
-    };
-    let is_system = matches!(current_source, crate::config::AudioSource::SystemOutput);
-    system_item.setState(if is_system { 1 } else { 0 });
-    menu.addItem(&system_item);
-
-    // App sources
-    for source_info in sources.iter() {
-        let label = source_info.label.clone();
-        let item = unsafe {
-            NSMenuItem::initWithTitle_action_keyEquivalent(
-                NSMenuItem::alloc(mtm),
-                &NSString::from_str(&label),
-                Some(sel!(selectAudioSource:)),
-                &NSString::from_str(""),
-            )
-        };
-        let is_current = source_info.source == *current_source;
-        item.setState(if is_current { 1 } else { 0 });
-        menu.addItem(&item);
+    {
+        let ivars = actions.ivars();
+        let submenu = build_audio_submenu_for(&ivars.state, mtm, &actions);
+        audio_item.setSubmenu(Some(&submenu));
     }
 
-    menu
+    let target_obj: &AnyObject = actions.as_ref();
+    unsafe {
+        captions_item.setTarget(Some(target_obj));
+        above_item.setTarget(Some(target_obj));
+        lock_item.setTarget(Some(target_obj));
+        quit_item.setTarget(Some(target_obj));
+        nemo.setTarget(Some(target_obj));
+        for mi in &mode_items {
+            mi.setTarget(Some(target_obj));
+        }
+    }
+
+    // AC5.4: schedule a repeating 5 s timer on the main run loop.
+    unsafe {
+        let _: Retained<NSTimer> =
+            NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
+                5.0,
+                target_obj,
+                sel!(refreshAudioSources:),
+                None,
+                true,
+            );
+    }
+
+    (item, actions)
 }
 
 #[cfg(test)]
@@ -231,47 +508,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_tray_state_creation() {
-        let (_cmd_tx, _cmd_rx) = async_channel::unbounded();
-        let (_audio_tx, _audio_rx) = std::sync::mpsc::sync_channel(1);
-        let engine_choice = Arc::new(ArcSwap::from_pointee(Engine::Nemotron));
-        let config = Arc::new(Mutex::new(Config::default()));
-        let captions_enabled = Arc::new(AtomicBool::new(true));
-        let audio_sources = Arc::new(Mutex::new(vec![]));
-
+    fn tray_state_constructs() {
+        let (cmd_tx, _cmd_rx) = async_channel::unbounded();
+        let (audio_tx, _audio_rx) = std::sync::mpsc::sync_channel(1);
         let _state = TrayState {
-            config,
-            captions_enabled,
-            cmd_tx: _cmd_tx,
-            audio_cmd_tx: _audio_tx,
-            engine_choice,
-            audio_sources,
+            config: Arc::new(Mutex::new(Config::default())),
+            captions_enabled: Arc::new(AtomicBool::new(true)),
+            cmd_tx,
+            audio_cmd_tx: audio_tx,
+            engine_choice: Arc::new(ArcSwap::from_pointee(Engine::Nemotron)),
+            audio_sources: Arc::new(Mutex::new(vec![])),
         };
-
-        // If we get here, TrayState construction succeeded.
-    }
-
-    #[test]
-    fn test_audio_submenu_with_system_only() {
-        let config = Arc::new(Mutex::new(Config::default()));
-        let sources = Arc::new(Mutex::new(vec![]));
-        let (_cmd_tx, _cmd_rx) = async_channel::unbounded();
-        let (_audio_tx, _audio_rx) = std::sync::mpsc::sync_channel(1);
-        let engine_choice = Arc::new(ArcSwap::from_pointee(Engine::Nemotron));
-        let captions_enabled = Arc::new(AtomicBool::new(true));
-
-        let state = TrayState {
-            config,
-            captions_enabled,
-            cmd_tx: _cmd_tx,
-            audio_cmd_tx: _audio_tx,
-            engine_choice,
-            audio_sources: sources,
-        };
-
-        // Note: We can't actually build menus without MainThreadMarker in tests,
-        // but this verifies the TrayState structure compiles and is sound.
-        let sources_lock = state.audio_sources.lock().unwrap();
-        assert_eq!(sources_lock.len(), 0);
     }
 }

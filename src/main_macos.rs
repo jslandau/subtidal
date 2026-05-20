@@ -173,7 +173,7 @@ pub fn main() {
         audio_sources,
     };
 
-    let _tray = tray::install_tray(tray_state, mtm);
+    let (_tray_item, _tray_actions) = tray::install_tray(tray_state, mtm);
 
     // 13. Call overlay::run_app to build the panel and run NSApplication.run().
     // This blocks until Quit is posted by the ctrlc handler.
