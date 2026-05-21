@@ -5,8 +5,8 @@
 //! mode switching, and screen-change observation.
 
 use objc2::rc::Retained;
-use objc2::{msg_send, MainThreadMarker, MainThreadOnly, ClassType};
-use objc2_foundation::NSString;
+use objc2::{msg_send, AnyThread, MainThreadMarker, MainThreadOnly, ClassType};
+use objc2_foundation::{NSString, NSAttributedString, NSDictionary};
 use objc2_app_kit::{
     NSPanel, NSTextField, NSWindowStyleMask, NSWindowCollectionBehavior,
     NSFloatingWindowLevel, NSStatusWindowLevel, NSColor, NSFont, NSLineBreakMode,
@@ -137,7 +137,42 @@ pub fn build_overlay_panel(
 }
 
 /// Visual padding between the rounded background edge and the caption text.
-const INSET: f64 = 10.0;
+pub const INSET: f64 = 14.0;
+
+/// Measure rendered text height for `text` rendered into `label`'s font at
+/// `width` pixels. Uses NSAttributedString::boundingRectWithSize with line
+/// fragment + font leading options — the same rendering path NSTextField
+/// uses, so this is the authoritative "does it fit?" signal.
+fn measure_text_height(label: &NSTextField, text: &str, width: f64) -> f64 {
+    use objc2_app_kit::NSStringDrawingOptions;
+    let ns_text = NSString::from_str(text);
+    let font = unsafe { label.font() };
+    let attrs: Retained<NSDictionary<NSString, objc2::runtime::AnyObject>> = match font {
+        Some(f) => {
+            let key = NSString::from_str("NSFont");
+            let f_any: Retained<objc2::runtime::AnyObject> =
+                unsafe { Retained::cast_unchecked(f) };
+            unsafe {
+                NSDictionary::from_slices(&[&*key], &[&*f_any])
+            }
+        }
+        None => NSDictionary::new(),
+    };
+    let attr_str = unsafe {
+        NSAttributedString::initWithString_attributes(
+            NSAttributedString::alloc(),
+            &ns_text,
+            Some(&attrs),
+        )
+    };
+    let opts: NSStringDrawingOptions = NSStringDrawingOptions::UsesLineFragmentOrigin
+        | NSStringDrawingOptions::UsesFontLeading;
+    let constraint = CGSize::new(width, 100_000.0);
+    let rect: CGRect = unsafe {
+        msg_send![&*attr_str, boundingRectWithSize: constraint, options: opts.0]
+    };
+    rect.size.height.max(0.0)
+}
 
 /// Parse a CSS color string into an NSColor. Falls back to white if
 /// the input is unparseable.
@@ -308,7 +343,11 @@ fn parse_css_color(s: &str) -> Option<(f64, f64, f64, f64)> {
 /// padding term covers the visual inset around the rounded background.
 fn panel_height_for_lines(font_size: f32, line_count: usize) -> f64 {
     let lines = line_count.max(1) as f64;
-    (font_size as f64) * 1.3 * lines + 16.0
+    // Padding MUST be 2 * INSET so the resulting label height
+    // (= panel_height - 2*INSET) matches the budgeted text rect. A
+    // mismatch here clips the bottom of the last line and produces
+    // "line N doesn't appear until full" symptoms.
+    (font_size as f64) * 1.3 * lines + 2.0 * INSET
 }
 
 /// Set the caption text and resize the panel to fit the actual line
@@ -333,13 +372,22 @@ pub fn set_caption_text(
         return;
     }
 
-    let line_count = text.lines().count().max(1);
-    let capped_lines = line_count.min(config.appearance.max_lines as usize);
-    let target_height = panel_height_for_lines(config.appearance.font_size, capped_lines);
-
+    // Measure actual rendered text height to count *visual* lines (post-wrap)
+    // rather than the logical `\n` count from CaptionBuffer — the two
+    // disagree whenever the character-width heuristic overshoots, and the
+    // visual count is what NSTextField will actually draw. Feed that into
+    // the proven panel_height_for_lines formula so padding behavior is
+    // unchanged for any given line count.
     let current = panel.frame();
+    let label_width = (current.size.width - 2.0 * INSET).max(40.0);
+    let measured_h = measure_text_height(label, text, label_width);
+    let nat_line_h = (config.appearance.font_size as f64) * 1.2;
+    let visual_lines = ((measured_h / nat_line_h).round() as usize)
+        .max(text.lines().count().max(1))
+        .min(config.appearance.max_lines as usize);
+    let target_height = panel_height_for_lines(config.appearance.font_size, visual_lines);
+
     if (current.size.height - target_height).abs() > 0.5 {
-        // Hold top edge fixed: origin.y = top - new_height.
         let top = current.origin.y + current.size.height;
         let new_frame = CGRect::new(
             CGPoint::new(current.origin.x, top - target_height),

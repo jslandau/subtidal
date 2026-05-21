@@ -241,8 +241,15 @@ pub fn run_app(
 /// mid-line, producing more visual lines than the buffer budgeted for
 /// and clipping the bottom of the panel.
 fn derive_max_chars(appearance: &crate::config::AppearanceConfig) -> usize {
-    let char_width_pixels = (appearance.font_size as f64 * 0.6).max(6.0);
-    let effective_width = appearance.width as f64
+    // Glyph width: monospace digits/letters in SF Mono / Menlo measure ~0.62×
+    // font_size; round up to 0.65 to leave headroom for wider glyphs (m, w)
+    // and avoid the just-barely-overflow case that NSTextField silently wraps.
+    let char_width_pixels = (appearance.font_size as f64 * 0.65).max(6.0);
+    // Subtract the wrapper inset on each side (panel::INSET) so the budget
+    // matches the label's actual rendered width, not the panel width.
+    let label_width = (appearance.width as f64 - 2.0 * crate::overlay::macos::panel::INSET)
+        .max(40.0);
+    let effective_width = label_width
         * appearance.effective_char_width_fraction() as f64;
     (effective_width / char_width_pixels).max(20.0) as usize
 }
