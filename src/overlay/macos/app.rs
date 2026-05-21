@@ -273,12 +273,10 @@ fn handle_overlay_command(
             let _ = cfg.save();
         }
         OverlayCommand::SetVisible(visible) => {
-            unsafe {
-                if visible {
-                    handles.panel.orderFront(None);
-                } else {
-                    handles.panel.orderOut(None);
-                }
+            if visible {
+                handles.panel.orderFront(None);
+            } else {
+                handles.panel.orderOut(None);
             }
         }
         OverlayCommand::SetMode(mode) => {
@@ -297,12 +295,12 @@ fn handle_overlay_command(
 
             match mode {
                 OverlayMode::Docked | OverlayMode::Floating => {
-                    unsafe { handles.panel.orderFront(None); }
+                    handles.panel.orderFront(None);
                     transcript_window::order_out(&handles.transcript_state, mtm);
                 }
                 OverlayMode::Transcript => {
                     transcript_window::order_front(&handles.transcript_state, mtm);
-                    unsafe { handles.panel.orderOut(None); }
+                    handles.panel.orderOut(None);
                 }
             }
         }

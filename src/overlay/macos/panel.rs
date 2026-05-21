@@ -36,104 +36,102 @@ pub fn build_overlay_panel(
     mtm: MainThreadMarker,
     config: &Config,
 ) -> (Retained<NSPanel>, Retained<NSTextField>) {
-    unsafe {
-        // Compute initial window frame from config.
-        let x = config.position.x as f64;
-        let y = config.position.y as f64;
-        let width = config.appearance.width as f64;
-        // Natural height: font_size * 1.5 for single line, plus padding
-        let height = (config.appearance.font_size * 1.5 + 8.0) as f64;
-        let frame = CGRect::new(CGPoint::new(x, y), CGSize::new(width, height));
+    // Compute initial window frame from config.
+    let x = config.position.x as f64;
+    let y = config.position.y as f64;
+    let width = config.appearance.width as f64;
+    // Natural height: font_size * 1.5 for single line, plus padding
+    let height = (config.appearance.font_size * 1.5 + 8.0) as f64;
+    let frame = CGRect::new(CGPoint::new(x, y), CGSize::new(width, height));
 
-        // Determine initial level based on above_fullscreen config.
-        let level = if config.above_fullscreen {
-            NSStatusWindowLevel as isize
-        } else {
-            NSFloatingWindowLevel as isize
-        };
+    // Determine initial level based on above_fullscreen config.
+    let level = if config.above_fullscreen {
+        NSStatusWindowLevel as isize
+    } else {
+        NSFloatingWindowLevel as isize
+    };
 
-        // Create the NSPanel with appropriate style and behavior.
-        let style_mask = NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel;
-        let backing = NSBackingStoreType::Buffered;
+    // Create the NSPanel with appropriate style and behavior.
+    let style_mask = NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel;
+    let backing = NSBackingStoreType::Buffered;
 
-        // Allocate and initialize NSPanel using typed init method.
-        let panel: Retained<NSPanel> = NSPanel::initWithContentRect_styleMask_backing_defer(
-            NSPanel::alloc(mtm),
-            frame,
-            style_mask,
-            backing,
-            false
-        );
+    // Allocate and initialize NSPanel using typed init method.
+    let panel: Retained<NSPanel> = NSPanel::initWithContentRect_styleMask_backing_defer(
+        NSPanel::alloc(mtm),
+        frame,
+        style_mask,
+        backing,
+        false
+    );
 
-        // Set window level (floating or status depending on above_fullscreen)
-        panel.setLevel(level);
+    // Set window level (floating or status depending on above_fullscreen)
+    panel.setLevel(level);
 
-        // Configure collection behavior for multi-space and fullscreen support
-        let collection_behavior = NSWindowCollectionBehavior::CanJoinAllSpaces
-            | NSWindowCollectionBehavior::FullScreenAuxiliary;
-        panel.setCollectionBehavior(collection_behavior);
+    // Configure collection behavior for multi-space and fullscreen support
+    let collection_behavior = NSWindowCollectionBehavior::CanJoinAllSpaces
+        | NSWindowCollectionBehavior::FullScreenAuxiliary;
+    panel.setCollectionBehavior(collection_behavior);
 
-        // Mark as floating panel
-        panel.setFloatingPanel(true);
+    // Mark as floating panel
+    panel.setFloatingPanel(true);
 
-        // Transparent panel chrome — the rounded background lives on the
-        // contentView's layer so corners render correctly.
-        panel.setOpaque(false);
-        let clear = NSColor::clearColor();
-        panel.setBackgroundColor(Some(&clear));
+    // Transparent panel chrome — the rounded background lives on the
+    // contentView's layer so corners render correctly.
+    panel.setOpaque(false);
+    let clear = NSColor::clearColor();
+    panel.setBackgroundColor(Some(&clear));
 
-        // Disable shadow (Floating mode)
-        panel.setHasShadow(false);
+    // Disable shadow (Floating mode)
+    panel.setHasShadow(false);
 
-        // Click-through: ignore mouse events
-        panel.setIgnoresMouseEvents(true);
+    // Click-through: ignore mouse events
+    panel.setIgnoresMouseEvents(true);
 
-        // Allow repositioning by background click
-        panel.setMovableByWindowBackground(true);
+    // Allow repositioning by background click
+    panel.setMovableByWindowBackground(true);
 
-        // Wrapper NSView holds the rounded translucent background; the label
-        // sits inside at INSET margin. The wrapper resizes with the panel
-        // (it's the contentView), and the label autoresizes to track the
-        // wrapper's bounds via flexible width+height.
-        let full_frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(width, height));
-        let wrapper: Retained<NSView> = NSView::initWithFrame(NSView::alloc(mtm), full_frame);
-        wrapper.setWantsLayer(true);
-        apply_background_color(&wrapper, &config.appearance.background_color);
+    // Wrapper NSView holds the rounded translucent background; the label
+    // sits inside at INSET margin. The wrapper resizes with the panel
+    // (it's the contentView), and the label autoresizes to track the
+    // wrapper's bounds via flexible width+height.
+    let full_frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(width, height));
+    let wrapper: Retained<NSView> = NSView::initWithFrame(NSView::alloc(mtm), full_frame);
+    wrapper.setWantsLayer(true);
+    apply_background_color(&wrapper, &config.appearance.background_color);
 
-        let label_frame = CGRect::new(
-            CGPoint::new(INSET, INSET),
-            CGSize::new(width - 2.0 * INSET, height - 2.0 * INSET),
-        );
-        let label: Retained<NSTextField> = NSTextField::initWithFrame(
-            NSTextField::alloc(mtm),
-            label_frame,
-        );
-        label.setAutoresizingMask(
-            objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable
-                | objc2_app_kit::NSAutoresizingMaskOptions::ViewHeightSizable,
-        );
+    let label_frame = CGRect::new(
+        CGPoint::new(INSET, INSET),
+        CGSize::new(width - 2.0 * INSET, height - 2.0 * INSET),
+    );
+    let label: Retained<NSTextField> = NSTextField::initWithFrame(
+        NSTextField::alloc(mtm),
+        label_frame,
+    );
+    label.setAutoresizingMask(
+        objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable
+            | objc2_app_kit::NSAutoresizingMaskOptions::ViewHeightSizable,
+    );
 
-        let empty_str = NSString::from_str("");
-        label.setStringValue(&*empty_str);
-        label.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
-        label.setEditable(false);
-        label.setSelectable(false);
-        label.setBordered(false);
-        label.setDrawsBackground(false);
-        label.setTextColor(Some(&resolve_text_color(&config.appearance.text_color)));
+    let empty_str = NSString::from_str("");
+    label.setStringValue(&*empty_str);
+    label.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
+    label.setEditable(false);
+    label.setSelectable(false);
+    label.setBordered(false);
+    label.setDrawsBackground(false);
+    label.setTextColor(Some(&resolve_text_color(&config.appearance.text_color)));
 
-        let font = resolve_font(
-            &config.appearance.font_family,
-            config.appearance.font_size as f64,
-            mtm,
-        );
-        label.setFont(Some(&*font));
+    let font = resolve_font(
+        &config.appearance.font_family,
+        config.appearance.font_size as f64,
+        mtm,
+    );
+    label.setFont(Some(&*font));
 
-        wrapper.addSubview(&label);
-        panel.setContentView(Some(&wrapper));
+    wrapper.addSubview(&label);
+    panel.setContentView(Some(&wrapper));
 
-        (panel, label)
-    }
+    (panel, label)
 }
 
 /// Visual padding between the rounded background edge and the caption text.
@@ -146,15 +144,13 @@ pub const INSET: f64 = 14.0;
 fn measure_text_height(label: &NSTextField, text: &str, width: f64) -> f64 {
     use objc2_app_kit::NSStringDrawingOptions;
     let ns_text = NSString::from_str(text);
-    let font = unsafe { label.font() };
+    let font = label.font();
     let attrs: Retained<NSDictionary<NSString, objc2::runtime::AnyObject>> = match font {
         Some(f) => {
             let key = NSString::from_str("NSFont");
             let f_any: Retained<objc2::runtime::AnyObject> =
                 unsafe { Retained::cast_unchecked(f) };
-            unsafe {
-                NSDictionary::from_slices(&[&*key], &[&*f_any])
-            }
+            NSDictionary::from_slices(&[&*key], &[&*f_any])
         }
         None => NSDictionary::new(),
     };
@@ -168,9 +164,7 @@ fn measure_text_height(label: &NSTextField, text: &str, width: f64) -> f64 {
     let opts: NSStringDrawingOptions = NSStringDrawingOptions::UsesLineFragmentOrigin
         | NSStringDrawingOptions::UsesFontLeading;
     let constraint = CGSize::new(width, 100_000.0);
-    let rect: CGRect = unsafe {
-        msg_send![&*attr_str, boundingRectWithSize: constraint, options: opts.0]
-    };
+    let rect: CGRect = unsafe { msg_send![&*attr_str, boundingRectWithSize: constraint, options: opts.0] };
     rect.size.height.max(0.0)
 }
 
@@ -178,7 +172,7 @@ fn measure_text_height(label: &NSTextField, text: &str, width: f64) -> f64 {
 /// the input is unparseable.
 pub fn resolve_text_color(css: &str) -> Retained<NSColor> {
     let (r, g, b, a) = parse_css_color(css).unwrap_or((1.0, 1.0, 1.0, 1.0));
-    unsafe { NSColor::colorWithCalibratedRed_green_blue_alpha(r, g, b, a) }
+    NSColor::colorWithCalibratedRed_green_blue_alpha(r, g, b, a)
 }
 
 /// Resolve a font family name to an NSFont at the requested point size.
@@ -191,12 +185,10 @@ pub fn resolve_text_color(css: &str) -> Retained<NSColor> {
 pub fn resolve_font(family: &str, size: f64, _mtm: MainThreadMarker) -> Retained<NSFont> {
     let family_trimmed = family.trim();
     if family_trimmed.is_empty() || family_trimmed.eq_ignore_ascii_case("monospace") {
-        return unsafe {
-            msg_send![NSFont::class(), userFixedPitchFontOfSize: size]
-        };
+        return unsafe { msg_send![NSFont::class(), userFixedPitchFontOfSize: size] };
     }
     if family_trimmed.eq_ignore_ascii_case("system") {
-        return unsafe { NSFont::systemFontOfSize(size) };
+        return NSFont::systemFontOfSize(size);
     }
     let name_ns = NSString::from_str(family_trimmed);
     let found: Option<Retained<NSFont>> = unsafe {
@@ -250,39 +242,37 @@ pub fn apply_geometry(
         config.appearance.max_lines as usize,
     );
 
-    unsafe {
-        match mode {
-            OverlayMode::Docked => {
-                let screen = NSScreen::mainScreen(mtm).expect("main screen");
-                let visible = screen.visibleFrame();  // AC2.7
-                let band_width = (config.appearance.width as f64).min(visible.size.width);
-                let x = visible.origin.x + (visible.size.width - band_width) * 0.5;
-                let rect = CGRect::new(
-                    CGPoint::new(x, visible.origin.y + visible.size.height - max_height),
-                    CGSize::new(band_width, max_height),
-                );
-                panel.setFrame_display(rect, true);
-                panel.setIgnoresMouseEvents(true);  // AC2.5
-                panel.setMovableByWindowBackground(false);
-                panel.setHasShadow(true);
-                label.setAlignment(objc2_app_kit::NSTextAlignment::Center);
-            }
-            OverlayMode::Floating => {
-                let rect = CGRect::new(
-                    CGPoint::new(config.position.x as f64, config.position.y as f64),
-                    CGSize::new(config.appearance.width as f64, max_height),
-                );
-                panel.setFrame_display(rect, true);
-                // Mouse events: locked → pass-through (AC2.5); unlocked → receive
-                // (so setMovableByWindowBackground can detect the drag).
-                panel.setIgnoresMouseEvents(config.locked);
-                panel.setMovableByWindowBackground(!config.locked);
-                panel.setHasShadow(false);
-                label.setAlignment(objc2_app_kit::NSTextAlignment::Left);
-            }
-            OverlayMode::Transcript => {
-                panel.orderOut(None);
-            }
+    match mode {
+        OverlayMode::Docked => {
+            let screen = NSScreen::mainScreen(mtm).expect("main screen");
+            let visible = screen.visibleFrame();  // AC2.7
+            let band_width = (config.appearance.width as f64).min(visible.size.width);
+            let x = visible.origin.x + (visible.size.width - band_width) * 0.5;
+            let rect = CGRect::new(
+                CGPoint::new(x, visible.origin.y + visible.size.height - max_height),
+                CGSize::new(band_width, max_height),
+            );
+            panel.setFrame_display(rect, true);
+            panel.setIgnoresMouseEvents(true);  // AC2.5
+            panel.setMovableByWindowBackground(false);
+            panel.setHasShadow(true);
+            label.setAlignment(objc2_app_kit::NSTextAlignment::Center);
+        }
+        OverlayMode::Floating => {
+            let rect = CGRect::new(
+                CGPoint::new(config.position.x as f64, config.position.y as f64),
+                CGSize::new(config.appearance.width as f64, max_height),
+            );
+            panel.setFrame_display(rect, true);
+            // Mouse events: locked → pass-through (AC2.5); unlocked → receive
+            // (so setMovableByWindowBackground can detect the drag).
+            panel.setIgnoresMouseEvents(config.locked);
+            panel.setMovableByWindowBackground(!config.locked);
+            panel.setHasShadow(false);
+            label.setAlignment(objc2_app_kit::NSTextAlignment::Left);
+        }
+        OverlayMode::Transcript => {
+            panel.orderOut(None);
         }
     }
 }
@@ -296,9 +286,7 @@ pub fn apply_background_color(view: &NSView, css: &str) {
     if let Some(layer) = view.layer() {
         layer.setCornerRadius(8.0);
         layer.setMasksToBounds(true);
-        let color = unsafe {
-            NSColor::colorWithCalibratedRed_green_blue_alpha(r, g, b, a)
-        };
+        let color = NSColor::colorWithCalibratedRed_green_blue_alpha(r, g, b, a);
         layer.setBackgroundColor(Some(&color.CGColor()));
     }
 }
@@ -368,7 +356,7 @@ pub fn set_caption_text(
     if matches!(config.overlay_mode, OverlayMode::Transcript) {
         // Panel is hidden; just update text so it's right when we switch back.
         let ns_text = NSString::from_str(text);
-        unsafe { label.setStringValue(&ns_text) };
+        label.setStringValue(&ns_text);
         return;
     }
 
@@ -393,11 +381,11 @@ pub fn set_caption_text(
             CGPoint::new(current.origin.x, top - target_height),
             CGSize::new(current.size.width, target_height),
         );
-        unsafe { panel.setFrame_display(new_frame, true) };
+        panel.setFrame_display(new_frame, true);
     }
 
     let ns_text = NSString::from_str(text);
-    unsafe { label.setStringValue(&ns_text) };
+    label.setStringValue(&ns_text);
 }
 
 /// AC1.6 — re-apply geometry on NSApplicationDidChangeScreenParametersNotification.

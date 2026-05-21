@@ -374,9 +374,7 @@ const CURATED_FONTS: &[&str] = &["System", "SF Mono", "Menlo", "Monaco", "Courie
 fn all_monospace_fonts(mtm: MainThreadMarker) -> Vec<String> {
     use objc2_app_kit::{NSFontManager, NSFontTraitMask};
     let mgr = NSFontManager::sharedFontManager(mtm);
-    let names = unsafe {
-        mgr.availableFontNamesWithTraits(NSFontTraitMask::FixedPitchFontMask)
-    };
+    let names = mgr.availableFontNamesWithTraits(NSFontTraitMask::FixedPitchFontMask);
     let Some(names) = names else { return Vec::new() };
     let mut out = Vec::with_capacity(names.count() as usize);
     for i in 0..names.count() {

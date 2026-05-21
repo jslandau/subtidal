@@ -203,13 +203,11 @@ pub fn append_fragment(
 
     let formatted = format_paragraphs(&state.log.lock().unwrap().paragraphs());
     let ns = NSString::from_str(&formatted);
-    unsafe { state.text_view.setString(&ns) };
+    state.text_view.setString(&ns);
 
     if was_at_bottom {
         let len = ns.length();
-        unsafe {
-            state.text_view.scrollRangeToVisible(NSRange { location: len, length: 0 });
-        }
+        state.text_view.scrollRangeToVisible(NSRange { location: len, length: 0 });
     }
 }
 
@@ -218,21 +216,17 @@ pub fn append_fragment(
 /// 4-surface clear; this is surface 2).
 pub fn clear_view(state: &TranscriptWindowState, _mtm: MainThreadMarker) {
     let empty = NSString::from_str("");
-    unsafe { state.text_view.setString(&empty) };
+    state.text_view.setString(&empty);
 }
 
 /// Show the transcript window (make key and order front).
 pub fn order_front(state: &TranscriptWindowState, _mtm: MainThreadMarker) {
-    unsafe {
-        state.window.makeKeyAndOrderFront(None);
-    }
+    state.window.makeKeyAndOrderFront(None);
 }
 
 /// Hide the transcript window.
 pub fn order_out(state: &TranscriptWindowState, _mtm: MainThreadMarker) {
-    unsafe {
-        state.window.orderOut(None);
-    }
+    state.window.orderOut(None);
 }
 
 /// Format paragraphs as timestamped lines.

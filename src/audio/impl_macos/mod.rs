@@ -348,14 +348,13 @@ fn bundle_to_label(bundle_id: &str) -> String {
     use objc2_foundation::{NSArray, NSString};
 
     let id_ns = NSString::from_str(bundle_id);
-    let apps: Retained<NSArray<NSRunningApplication>> = unsafe {
-        NSRunningApplication::runningApplicationsWithBundleIdentifier(&id_ns)
-    };
+    let apps: Retained<NSArray<NSRunningApplication>> =
+        NSRunningApplication::runningApplicationsWithBundleIdentifier(&id_ns);
     if apps.count() == 0 {
         return bundle_id.to_string();
     }
     let app = apps.objectAtIndex(0);
-    match unsafe { app.localizedName() } {
+    match app.localizedName() {
         Some(name) => name.to_string(),
         None => bundle_id.to_string(),
     }
