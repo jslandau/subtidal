@@ -80,7 +80,7 @@ pub fn run_app(
     // Apply mode-specific geometry + mouse-event state on startup so the
     // initial Floating panel is draggable without the user having to
     // toggle Lock Position to force a property write.
-    panel::apply_geometry(&panel, mtm, config.overlay_mode.clone(), &config);
+    panel::apply_geometry(&panel, &label, mtm, config.overlay_mode.clone(), &config);
     panel.orderFront(None);
 
     // 4. Build the transcript window.
@@ -104,7 +104,7 @@ pub fn run_app(
     // 7. Install drag observer for floating mode.
     let _drag_observer = drag::install_drag_observer(&panel, Arc::clone(&config_arc), mtm);
     // 7b. AC1.6 — re-apply geometry on display attach/detach.
-    let _screen_observer = panel::install_screen_observer(&panel, Arc::clone(&config_arc), mtm);
+    let _screen_observer = panel::install_screen_observer(&panel, &label, Arc::clone(&config_arc), mtm);
 
     // Wrap all handles in Arc so workers can share ownership.
     let handles = Arc::new(OverlayHandles {
@@ -281,7 +281,7 @@ fn handle_overlay_command(
             drop(cfg);
 
             let cfg_ref = handles.config.lock().unwrap();
-            panel::apply_geometry(&handles.panel, mtm, mode.clone(), &cfg_ref);
+            panel::apply_geometry(&handles.panel, &handles.label, mtm, mode.clone(), &cfg_ref);
 
             match mode {
                 OverlayMode::Docked | OverlayMode::Floating => {
@@ -333,6 +333,7 @@ fn handle_overlay_command(
             let cfg_snapshot = handles.config.lock().unwrap().clone();
             panel::apply_geometry(
                 &handles.panel,
+                &handles.label,
                 mtm,
                 cfg_snapshot.overlay_mode.clone(),
                 &cfg_snapshot,

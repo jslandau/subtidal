@@ -163,13 +163,15 @@ pub fn inspect(panel: &NSPanel) -> PanelConfig {
 /// AppKit mutations are safe.
 pub fn apply_geometry(
     panel: &NSPanel,
+    label: &NSTextField,
     mtm: MainThreadMarker,
     mode: OverlayMode,
     config: &Config,
 ) {
-    // Height is pre-sized for max_lines so caption text never has to
-    // resize the panel (resize-while-paint causes the flicker bug).
-    let height = panel_height_for_lines(
+    // Height is sized for max_lines as the cap. set_caption_text shrinks
+    // height to the actual line count after each update so we don't show
+    // a "dead" empty line at the bottom when text doesn't fill.
+    let max_height = panel_height_for_lines(
         config.appearance.font_size,
         config.appearance.max_lines as usize,
     );
@@ -178,31 +180,23 @@ pub fn apply_geometry(
         match mode {
             OverlayMode::Docked => {
                 let screen = NSScreen::mainScreen(mtm).expect("main screen");
-                let visible = screen.visibleFrame();  // AC2.7 — not frame
-                // Docked is a banner pinned to the top of the screen.
-                // Use the configured width, centered horizontally — full
-                // screen width left captions clinging to a tiny portion of
-                // a huge band.
+                let visible = screen.visibleFrame();  // AC2.7
                 let band_width = (config.appearance.width as f64).min(visible.size.width);
                 let x = visible.origin.x + (visible.size.width - band_width) * 0.5;
                 let rect = CGRect::new(
-                    CGPoint::new(x, visible.origin.y + visible.size.height - height),
-                    CGSize::new(band_width, height),
+                    CGPoint::new(x, visible.origin.y + visible.size.height - max_height),
+                    CGSize::new(band_width, max_height),
                 );
                 panel.setFrame_display(rect, true);
                 panel.setIgnoresMouseEvents(true);  // AC2.5
                 panel.setMovableByWindowBackground(false);
                 panel.setHasShadow(true);
-                if let Some(content) = panel.contentView() {
-                    if let Ok(label) = content.downcast::<NSTextField>() {
-                        label.setAlignment(objc2_app_kit::NSTextAlignment::Center);
-                    }
-                }
+                label.setAlignment(objc2_app_kit::NSTextAlignment::Center);
             }
             OverlayMode::Floating => {
                 let rect = CGRect::new(
                     CGPoint::new(config.position.x as f64, config.position.y as f64),
-                    CGSize::new(config.appearance.width as f64, height),
+                    CGSize::new(config.appearance.width as f64, max_height),
                 );
                 panel.setFrame_display(rect, true);
                 // Mouse events: locked → pass-through (AC2.5); unlocked → receive
@@ -210,14 +204,9 @@ pub fn apply_geometry(
                 panel.setIgnoresMouseEvents(config.locked);
                 panel.setMovableByWindowBackground(!config.locked);
                 panel.setHasShadow(false);
-                if let Some(content) = panel.contentView() {
-                    if let Ok(label) = content.downcast::<NSTextField>() {
-                        label.setAlignment(objc2_app_kit::NSTextAlignment::Left);
-                    }
-                }
+                label.setAlignment(objc2_app_kit::NSTextAlignment::Left);
             }
             OverlayMode::Transcript => {
-                // Transcript mode uses a separate NSWindow; hide the caption panel.
                 panel.orderOut(None);
             }
         }
@@ -283,17 +272,43 @@ fn panel_height_for_lines(font_size: f32, line_count: usize) -> f64 {
     (font_size as f64) * 1.7 * lines + 12.0
 }
 
-/// Set the caption text on the label. The panel is pre-sized for
-/// `max_lines` at startup / mode-switch, so no per-caption frame change
-/// is needed here — that avoids resize jitter and the off-screen rendering
-/// flicker we hit when growing height while text was being painted.
+/// Set the caption text and resize the panel to fit the actual line
+/// count. Resize happens *before* setStringValue so the label is
+/// painted into the final frame in one pass — avoids the
+/// resize-during-paint flicker we hit on the first attempt.
+///
+/// Height is capped at `max_lines` worth and the top edge is held
+/// fixed (Floating: anchored to user position; Docked: anchored to
+/// menu bar) so the panel grows downward, never jumping upward.
 pub fn set_caption_text(
-    _panel: &NSPanel,
+    panel: &NSPanel,
     label: &NSTextField,
     text: &str,
     _mtm: MainThreadMarker,
-    _config: &Config,
+    config: &Config,
 ) {
+    if matches!(config.overlay_mode, OverlayMode::Transcript) {
+        // Panel is hidden; just update text so it's right when we switch back.
+        let ns_text = NSString::from_str(text);
+        unsafe { label.setStringValue(&ns_text) };
+        return;
+    }
+
+    let line_count = text.lines().count().max(1);
+    let capped_lines = line_count.min(config.appearance.max_lines as usize);
+    let target_height = panel_height_for_lines(config.appearance.font_size, capped_lines);
+
+    let current = panel.frame();
+    if (current.size.height - target_height).abs() > 0.5 {
+        // Hold top edge fixed: origin.y = top - new_height.
+        let top = current.origin.y + current.size.height;
+        let new_frame = CGRect::new(
+            CGPoint::new(current.origin.x, top - target_height),
+            CGSize::new(current.size.width, target_height),
+        );
+        unsafe { panel.setFrame_display(new_frame, true) };
+    }
+
     let ns_text = NSString::from_str(text);
     unsafe { label.setStringValue(&ns_text) };
 }
@@ -302,16 +317,22 @@ pub fn set_caption_text(
 ///
 /// Used by `install_screen_observer` below; lives in the `define_class!`
 /// body which can't see Config/OverlayMode imports directly.
-fn screen_changed_reapply(panel: &NSPanel, mtm: MainThreadMarker, config: &Arc<std::sync::Mutex<Config>>) {
+fn screen_changed_reapply(
+    panel: &NSPanel,
+    label: &NSTextField,
+    mtm: MainThreadMarker,
+    config: &Arc<std::sync::Mutex<Config>>,
+) {
     let (mode, cfg_snapshot) = {
         let cfg = config.lock().unwrap();
         (cfg.overlay_mode.clone(), cfg.clone())
     };
-    apply_geometry(panel, mtm, mode, &cfg_snapshot);
+    apply_geometry(panel, label, mtm, mode, &cfg_snapshot);
 }
 
 pub struct ScreenObserverIvars {
     panel: Retained<NSPanel>,
+    label: Retained<NSTextField>,
     config: Arc<std::sync::Mutex<Config>>,
 }
 
@@ -331,14 +352,19 @@ objc2::define_class!(
             use objc2::DefinedClass;
             let mtm = MainThreadMarker::from(self);
             let ivars = self.ivars();
-            screen_changed_reapply(&ivars.panel, mtm, &ivars.config);
+            screen_changed_reapply(&ivars.panel, &ivars.label, mtm, &ivars.config);
         }
     }
 );
 
 impl ScreenObserver {
-    fn new(mtm: MainThreadMarker, panel: Retained<NSPanel>, config: Arc<std::sync::Mutex<Config>>) -> Retained<Self> {
-        let ivars = ScreenObserverIvars { panel, config };
+    fn new(
+        mtm: MainThreadMarker,
+        panel: Retained<NSPanel>,
+        label: Retained<NSTextField>,
+        config: Arc<std::sync::Mutex<Config>>,
+    ) -> Retained<Self> {
+        let ivars = ScreenObserverIvars { panel, label, config };
         let allocated = Self::alloc(mtm).set_ivars(ivars);
         unsafe { msg_send![super(allocated), init] }
     }
@@ -348,11 +374,13 @@ impl ScreenObserver {
 /// keep it alive for the app lifetime.
 pub fn install_screen_observer(
     panel: &NSPanel,
+    label: &NSTextField,
     config: Arc<std::sync::Mutex<Config>>,
     mtm: MainThreadMarker,
 ) -> Retained<ScreenObserver> {
     let panel_retained: Retained<NSPanel> = Retained::from(panel);
-    let observer = ScreenObserver::new(mtm, panel_retained, config);
+    let label_retained: Retained<NSTextField> = Retained::from(label);
+    let observer = ScreenObserver::new(mtm, panel_retained, label_retained, config);
     let center = objc2_foundation::NSNotificationCenter::defaultCenter();
     let observer_ns: &objc2_foundation::NSObject = &*observer;
     unsafe {
@@ -487,13 +515,13 @@ mod tests {
         let initial_ptr = Retained::as_ptr(&panel);
 
         // Apply geometry for different modes — panel ptr should remain unchanged.
-        apply_geometry(&panel, mtm, OverlayMode::Docked, &config);
+        apply_geometry(&panel, &_label, mtm, OverlayMode::Docked, &config);
         assert_eq!(Retained::as_ptr(&panel), initial_ptr, "apply_geometry should not rebuild panel");
 
-        apply_geometry(&panel, mtm, OverlayMode::Floating, &config);
+        apply_geometry(&panel, &_label, mtm, OverlayMode::Floating, &config);
         assert_eq!(Retained::as_ptr(&panel), initial_ptr, "apply_geometry should not rebuild panel");
 
-        apply_geometry(&panel, mtm, OverlayMode::Transcript, &config);
+        apply_geometry(&panel, &_label, mtm, OverlayMode::Transcript, &config);
         assert_eq!(Retained::as_ptr(&panel), initial_ptr, "apply_geometry should not rebuild panel");
     }
 }
