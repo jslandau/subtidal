@@ -1,8 +1,10 @@
 # macOS Port — Phase 7: Polish + CI matrix + AC validation
 
-**Goal:** Extend cross-target CI to cover both Apple Silicon and Intel macOS targets, walk every Acceptance Criterion against the running `.app` and record results, document discovered macOS-specific landmines for the user's auto-memory, and refresh `CLAUDE.md` so it accurately describes the cross-platform (Linux + macOS) codebase rather than "Linux currently, macOS planned."
+**Goal:** Walk every Acceptance Criterion against the running `.app` and record results, document discovered macOS-specific landmines for the user's auto-memory, and refresh `CLAUDE.md` so it accurately describes the cross-platform (Linux + macOS) codebase rather than "Linux currently, macOS planned."
 
-**Architecture:** Three artifacts move: (1) `.github/workflows/macos-check.yml` gains an `aarch64-apple-darwin` matrix entry alongside the existing `x86_64-apple-darwin` check so any future Linux-coupling regression in either direction breaks CI; (2) a transient `docs/macos-port-ac-results.md` walkthrough checklist tracks live AC validation on the target Mac and is deleted before merge (it is purely a tracking artifact, not a deliverable); (3) `CLAUDE.md` is rewritten in place to describe a Linux+macOS codebase — file map gets a `_macos` column, Platform Isolation gains a macOS example, the "Recipe for adding a new platform" prose becomes a "Platform implementations: Linux and macOS" section, and the Freshness date is bumped. Landmines discovered during Phases 0–6 (Metal VRAM pooling, parakeet-rs WebGPU empirics, TCC re-prompt scenarios, anything else surfaced) are emitted as memory-note prompts so the user can ingest them into auto-memory the same way `project_ort_argv0_quirk.md` and `project_gpu_cuda_landmines.md` were ingested.
+**Architecture:** Two artifacts move: (1) a transient `docs/macos-port-ac-results.md` walkthrough checklist tracks live AC validation on the target Mac and is deleted before merge (it is purely a tracking artifact, not a deliverable); (2) `CLAUDE.md` is rewritten in place to describe a Linux+macOS codebase — file map gets a `_macos` column, Platform Isolation gains a macOS example, the "Recipe for adding a new platform" prose becomes a "Platform implementations: Linux and macOS" section, and the Freshness date is bumped. Landmines discovered during Phases 0–6 (Metal VRAM pooling, parakeet-rs WebGPU empirics, TCC re-prompt scenarios, anything else surfaced) are emitted as memory-note prompts so the user can ingest them into auto-memory the same way `project_ort_argv0_quirk.md` and `project_gpu_cuda_landmines.md` were ingested.
+
+**Decision (2026-05-21):** Intel Mac support is out of scope. CI remains a single `aarch64-apple-darwin` cross-check (the workflow already in place from earlier phases). The x86_64 matrix expansion originally planned as Tasks 1–2 / AC9 is dropped — user has no Intel Mac target.
 
 **Tech Stack:** GitHub Actions matrix strategy (`strategy.matrix.target`), `dtolnay/rust-toolchain@stable` with multi-target `targets:` input, `Swatinem/rust-cache@v2`, Markdown for the AC checklist and CLAUDE.md edits, the user's auto-memory ingestion path for landmine documentation.
 
@@ -14,10 +16,10 @@
 
 ## Acceptance Criteria Coverage
 
-### macos-port.AC9: CI matrix coverage
-- **macos-port.AC9.1 Success:** `cargo check --lib --target x86_64-apple-darwin` passes on `ubuntu-latest` (existing check, no regression).
-- **macos-port.AC9.2 Success:** `cargo check --lib --target aarch64-apple-darwin` passes on `ubuntu-latest` (new matrix entry).
-- **macos-port.AC9.3 Failure:** Accidentally introducing Linux coupling into a notionally-neutral module (e.g., importing `pipewire::*` from `audio/mod.rs`) breaks both cross-target checks.
+### macos-port.AC9: CI coverage (Intel scope dropped 2026-05-21)
+- ~~AC9.1 (x86_64-apple-darwin)~~ — dropped; Intel Mac out of scope.
+- **macos-port.AC9.2 Success:** `cargo check --lib --target aarch64-apple-darwin` passes (already in place; no Phase 7 change required).
+- **macos-port.AC9.3 Failure:** Accidentally introducing Linux coupling into a notionally-neutral module (e.g., importing `pipewire::*` from `audio/mod.rs`) breaks the aarch64 check.
 
 ### macos-port.AC10: Documentation and self-containment
 - **macos-port.AC10.1 Success:** `CLAUDE.md` is updated at end of Phase 7 to describe the codebase as cross-platform (Linux + macOS), not "Linux currently with macOS planned".

@@ -2,7 +2,7 @@
 
 Real-time speech-to-text overlay for Linux/Wayland and macOS.
 
-Freshness: 2026-05-20
+Freshness: 2026-05-21
 
 ## Purpose
 
@@ -26,8 +26,8 @@ audio/impl_macos/tap.rs      — RAII wrapper for Core Audio process tap + aggre
 audio/impl_macos/tap_processes.rs — safe wrappers for Core Audio process enumeration (Phase 5 revised)
 audio/impl_macos/notify.rs   — UNUserNotificationCenter helper for source-disappeared/TCC-denied alerts (Phase 5 revised)
 audio/resampler.rs           — rubato 48kHz stereo -> 16kHz mono resampler (platform-neutral)
-stt/mod.rs                   — SttEngine trait + AudioWake (neutral) + Linux-gated spawn_stt_thread / build_engine / `mod nemotron`
-stt/nemotron.rs              — Nemotron RNNT engine (ort + parakeet-rs, CUDA) [Linux-only]
+stt/mod.rs                   — SttEngine trait + AudioWake + spawn_stt_thread / build_engine / `mod nemotron` (all platform-neutral; engine selects CUDA vs WebGPU vs CPU at runtime)
+stt/nemotron.rs              — Nemotron RNNT engine (ort + parakeet-rs); CUDA on Linux, WebGPU on macOS, CPU fallback on both
 overlay/mod.rs               — neutral: OverlayCommand, CaptionsEnabled; re-exports overlay/linux on Linux, overlay/macos on macOS
 overlay/caption_buffer.rs    — pure text buffer: line-fill, overlap dedup, expiry (GTK-free, well-tested) [neutral]
 overlay/transcript_log.rs    — pure data: timestamped fragments, paragraph coalescing, .json serialization (GTK-free, well-tested) [neutral]
@@ -160,30 +160,30 @@ Verifies audio/overlay/tray modules compile on macOS targets without accidentall
 
 ## Platform Isolation
 
-Subtidal's source tree is structured so that all Linux-specific code is gated behind `#[cfg(target_os = "linux")]`. The crate exposes both a `[lib]` (`src/lib.rs`) and a `[[bin]]` (`src/main.rs`); the binary additionally carries a `#[cfg(not(target_os = "linux"))] compile_error!` guard that hard-fails non-Linux binary builds with a clear "macOS support is planned" message.
+Subtidal supports Linux and macOS. All platform-specific code is cfg-gated; the crate exposes both a `[lib]` (`src/lib.rs`) and a `[[bin]]` (`src/main.rs`). The binary carries a `#[cfg(not(any(target_os = "linux", target_os = "macos")))] compile_error!` guard that hard-fails builds on any other OS with a clear message.
 
 **Cfg-gating boundaries.** Each platform-bound subsystem follows one of three patterns:
 
-- **Shell-and-re-export** (`audio/`, `tray/`): `mod.rs` is a thin shell that declares `#[cfg(target_os = "linux")] mod impl_linux;` and re-exports the public surface. The Linux implementation body lives in `impl_linux.rs`.
-- **Subtree-and-re-export** (`overlay/`): `mod.rs` keeps neutral items (`OverlayCommand`, `CaptionsEnabled`, `caption_buffer`, `transcript_log`) at the module root and gates a `linux/` subdirectory holding the GTK orchestration (`run_gtk_app`, `handle_overlay_command`) and per-window submodules (`window`, `drag`, `input_region`, `transcript_window`).
-- **In-place gating** (`stt/`): the module mixes neutral types (`SttEngine` trait, `AudioWake`, `PipelineConfig`) with Linux-only items (`mod nemotron`, `spawn_stt_thread`, `build_engine`). Linux-only items carry `#[cfg(target_os = "linux")]` directly; neutral items are unguarded.
+- **Shell-and-re-export** (`audio/`, `tray/`): `mod.rs` is a thin shell that declares `#[cfg(target_os = "linux")] mod impl_linux;` and `#[cfg(target_os = "macos")] mod impl_macos;` and re-exports the public surface. Implementation bodies live in `impl_linux.rs` / `impl_macos.rs` (or `impl_macos/` subdir for audio).
+- **Subtree-and-re-export** (`overlay/`): `mod.rs` keeps neutral items (`OverlayCommand`, `CaptionsEnabled`, `caption_buffer`, `transcript_log`) at the module root and gates `linux/` (GTK orchestration: `window`, `drag`, `input_region`, `transcript_window`) and `macos/` (AppKit orchestration: `app`, `panel`, `drag`, `transcript_window`) subdirectories.
+- **In-place gating** (`stt/`): the module exposes platform-neutral types and functions (`SttEngine` trait, `AudioWake`, `PipelineConfig`, `spawn_stt_thread`, `build_engine`, `mod nemotron`); the underlying engine selects CUDA vs WebGPU vs CPU at runtime based on what's available.
 
-**Cargo dependencies.** Linux-only crates (`pipewire`, `gtk4`, `gtk4-layer-shell`, `ksni`, `libc`) live in `[target.'cfg(target_os = "linux")'.dependencies]`. The `cuda` feature on `ort` and `parakeet-rs` is Linux-conditional via additive feature unification: each crate appears once in `[dependencies]` (without `cuda`) and once in the Linux-conditional block (with `cuda`). Resolver v2 (edition 2021 default) keeps the `cuda` feature from bleeding onto non-Linux targets.
+**Cargo dependencies.** Linux-only crates (`pipewire`, `gtk4`, `gtk4-layer-shell`, `ksni`, `libc`, `notify-rust`) live in `[target.'cfg(target_os = "linux")'.dependencies]`. macOS-only crates (`coreaudio-sys`, `core-foundation`, `objc2*`, `objc2-app-kit`, `objc2-foundation`, `objc2-quartz-core`, `objc2-user-notifications`, `dispatch2`, `block2`, `libc`) live in `[target.'cfg(target_os = "macos")'.dependencies]`. The `cuda` feature on `ort` and `parakeet-rs` is Linux-conditional and the `webgpu` feature is macOS-conditional via additive feature unification: each crate appears once in `[dependencies]` (without backend features) and once in each per-OS block (with the appropriate feature). Resolver v2 (edition 2021 default) keeps backend features from bleeding cross-target.
 
-**Verification mechanism.** A GitHub Actions workflow at `.github/workflows/macos-check.yml` runs `cargo check --lib --target aarch64-apple-darwin` on `macos-latest` for every push and pull request. The aarch64 target is used because ort 2.0.0-rc.12 provides wgpu prebuilts for aarch64 but not x86_64 (Phase 7 adds x86_64 once ort supplies those prebuilts). The workflow uses `--lib` (not bare `cargo check`) so the binary's `compile_error!` guard does not fire. Any future commit that accidentally introduces Linux coupling into a notionally-neutral module fails the check.
+**Verification mechanism.** A GitHub Actions workflow at `.github/workflows/macos-check.yml` runs `cargo check --lib --target aarch64-apple-darwin` on `macos-latest` for every push and pull request. The aarch64 target reflects the supported macOS surface (Apple Silicon only; Intel Mac is explicitly out of scope). The workflow uses `--lib` (not bare `cargo check`) so the binary's `compile_error!` guard does not fire. Any future commit that accidentally introduces Linux coupling into a notionally-neutral module — or vice versa — fails the check.
 
-**Build-script gate.** `build.rs` early-returns on non-Linux targets via `env::var("TARGET").unwrap_or_default().contains("linux")`. The `cfg!(target_os = "linux")` macro is intentionally NOT used here — it reflects the build host, not the cross-compilation target, and would silently fail to skip CUDA-provider scanning during `cargo check --target x86_64-apple-darwin` from a Linux host.
+**Build-script gate.** `build.rs` early-returns on non-Linux targets via `env::var("TARGET").unwrap_or_default().contains("linux")`. The `cfg!(target_os = "linux")` macro is intentionally NOT used here — it reflects the build host, not the cross-compilation target, and would silently fail to skip CUDA-provider scanning during `cargo check --target aarch64-apple-darwin` from a Linux host.
 
 **`compile_error!` location.** `src/main.rs` contains the platform-availability guard immediately after all `mod` declarations (`mod main_linux;` and `mod main_macos;`) and before any `use` or other logic. Placement before `mod` declarations causes confusing cascading errors from rustc's mod-resolution pass.
 
-**Recipe for adding a new platform (e.g., macOS).**
+**Platform implementations: Linux and macOS.** The cfg-gating patterns above are realized by two concrete platform implementations:
 
-1. Remove the line `compile_error!("Subtidal currently only supports Linux. macOS support is planned.");` from `src/main.rs` (or refine its cfg predicate to exclude the new platform).
-2. For each cfg-gated subsystem, mirror the Linux structure with a sibling implementation:
-   - `audio/`: add `src/audio/impl_macos.rs` and gate it from `src/audio/mod.rs` with `#[cfg(target_os = "macos")]`.
-   - `tray/`: same shape — add `src/tray/impl_macos.rs`.
-   - `overlay/`: add `src/overlay/macos/` subdirectory and gate `mod macos;` from `src/overlay/mod.rs`.
-   - `stt/`: add a `mod coreml;` (or analogous) and gate the Linux-specific items behind their existing cfgs.
-3. Add a `[target.'cfg(target_os = "macos")'.dependencies]` block in `Cargo.toml` listing macOS-only crates (e.g., `core-foundation`, `cocoa`).
-4. Move the Linux-specific main helpers analogously into `src/main_macos.rs` and add the corresponding `#[cfg(target_os = "macos")] mod main_macos;` declaration in `src/main.rs`.
-5. Add the new target as an entry (or matrix value) in `.github/workflows/macos-check.yml` (which can be renamed to e.g. `cross-target-check.yml` once it serves multiple targets).
+- **Linux:** `impl_linux.rs` / `linux/` subtrees under `audio/`, `overlay/`, `tray/`; `main_linux.rs`. Audio via PipeWire, overlay via GTK4 layer-shell, tray via ksni StatusNotifierItem. CUDA on `ort` + `parakeet-rs` when available; CPU fallback automatic.
+- **macOS:** `impl_macos.rs` / `impl_macos/` / `macos/` subtrees under the same; `main_macos.rs`. Audio via Core Audio Process Taps (`AudioHardwareCreateProcessTap` + aggregate device + IOProc), overlay via NSPanel (Floating/Docked with rounded translucent CALayer) and NSWindow+NSScrollView (Transcript), tray via NSStatusItem + NSMenu. WebGPU on `ort` + `parakeet-rs` for Apple Silicon GPU; CPU fallback automatic. TCC service required: **Audio Capture** (declared via `NSAudioCaptureUsageDescription` in `Info.plist`).
+
+To add a third platform (e.g., Windows):
+1. Refine the `compile_error!` predicate in `src/main.rs` to exclude the new OS.
+2. Add `impl_<os>.rs` (or `<os>/` subtree) siblings under `audio/`, `overlay/`, `tray/`, and add corresponding gated `mod` declarations + re-exports in each `mod.rs`.
+3. Add a `[target.'cfg(target_os = "<os>")'.dependencies]` block with that platform's crates and (if applicable) the matching backend feature on `ort`/`parakeet-rs`.
+4. Add `src/main_<os>.rs` and the corresponding `#[cfg(target_os = "<os>")] mod main_<os>;` declaration in `src/main.rs`, plus a dispatch arm in `main()`.
+5. Add the new target to `.github/workflows/macos-check.yml` (or rename it to e.g. `cross-target-check.yml` and convert to a matrix) so cross-coupling regressions break CI.
