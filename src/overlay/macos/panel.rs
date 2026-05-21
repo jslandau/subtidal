@@ -120,13 +120,13 @@ pub fn build_overlay_panel(
         label.setSelectable(false);
         label.setBordered(false);
         label.setDrawsBackground(false);
-        label.setTextColor(Some(&NSColor::whiteColor()));
+        label.setTextColor(Some(&resolve_text_color(&config.appearance.text_color)));
 
-        let font_size = config.appearance.font_size as f64;
-        let font: Retained<NSFont> = msg_send![
-            NSFont::class(),
-            userFixedPitchFontOfSize: font_size
-        ];
+        let font = resolve_font(
+            &config.appearance.font_family,
+            config.appearance.font_size as f64,
+            mtm,
+        );
         label.setFont(Some(&*font));
 
         wrapper.addSubview(&label);
@@ -138,6 +138,39 @@ pub fn build_overlay_panel(
 
 /// Visual padding between the rounded background edge and the caption text.
 const INSET: f64 = 10.0;
+
+/// Parse a CSS color string into an NSColor. Falls back to white if
+/// the input is unparseable.
+pub fn resolve_text_color(css: &str) -> Retained<NSColor> {
+    let (r, g, b, a) = parse_css_color(css).unwrap_or((1.0, 1.0, 1.0, 1.0));
+    unsafe { NSColor::colorWithCalibratedRed_green_blue_alpha(r, g, b, a) }
+}
+
+/// Resolve a font family name to an NSFont at the requested point size.
+///
+/// Conventions matching the config docstring:
+/// - `"monospace"` or empty → system fixed-pitch font (userFixedPitchFont).
+/// - `"system"` → system proportional font.
+/// - anything else → `[NSFont fontWithName:size:]`, falling back to
+///   monospace if the lookup returns nil.
+pub fn resolve_font(family: &str, size: f64, _mtm: MainThreadMarker) -> Retained<NSFont> {
+    let family_trimmed = family.trim();
+    if family_trimmed.is_empty() || family_trimmed.eq_ignore_ascii_case("monospace") {
+        return unsafe {
+            msg_send![NSFont::class(), userFixedPitchFontOfSize: size]
+        };
+    }
+    if family_trimmed.eq_ignore_ascii_case("system") {
+        return unsafe { NSFont::systemFontOfSize(size) };
+    }
+    let name_ns = NSString::from_str(family_trimmed);
+    let found: Option<Retained<NSFont>> = unsafe {
+        msg_send![NSFont::class(), fontWithName: &*name_ns, size: size]
+    };
+    found.unwrap_or_else(|| unsafe {
+        msg_send![NSFont::class(), userFixedPitchFontOfSize: size]
+    })
+}
 
 /// Inspect panel configuration for testing and verification.
 #[allow(dead_code)]  // Used in #[cfg(all(test, target_os = "macos"))] tests

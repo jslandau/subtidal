@@ -320,16 +320,10 @@ fn handle_overlay_command(
                 cfg.appearance = appearance.clone();
             }
 
-            // Re-apply font to the label.
-            let font_size = appearance.font_size as f64;
-            let font: objc2::rc::Retained<objc2_app_kit::NSFont> = unsafe {
-                use objc2::ClassType;
-                objc2::msg_send![
-                    objc2_app_kit::NSFont::class(),
-                    userFixedPitchFontOfSize: font_size
-                ]
-            };
+            // Re-apply font + text color.
+            let font = panel::resolve_font(&appearance.font_family, appearance.font_size as f64, mtm);
             handles.label.setFont(Some(&font));
+            handles.label.setTextColor(Some(&panel::resolve_text_color(&appearance.text_color)));
 
             // Re-apply background color from CSS string. The wrapper view
             // (panel's contentView) carries the rounded translucent layer.

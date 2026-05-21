@@ -89,6 +89,16 @@ pub struct AppearanceConfig {
     /// Lower values add more visual padding. Default 0.95 (5% padding).
     #[serde(default = "default_char_width_fraction")]
     pub char_width_fraction: f32,
+    /// Font family. Special values: "monospace" (default) → system fixed-pitch;
+    /// "system" → system proportional. Anything else is passed to the platform
+    /// font lookup (`NSFont::fontWithName:` on macOS, CSS `font-family` on Linux)
+    /// with fallback to monospace if not found.
+    #[serde(default = "default_font_family")]
+    pub font_family: String,
+}
+
+fn default_font_family() -> String {
+    "monospace".to_string()
 }
 
 fn default_width() -> i32 {
@@ -114,6 +124,7 @@ impl Default for AppearanceConfig {
             height: 0,
             expire_secs: 8,
             char_width_fraction: 0.95,
+            font_family: default_font_family(),
         }
     }
 }
