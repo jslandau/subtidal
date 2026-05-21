@@ -331,8 +331,11 @@ fn handle_overlay_command(
             };
             handles.label.setFont(Some(&font));
 
-            // Re-apply background color from CSS string.
-            panel::apply_background_color(&handles.label, &appearance.background_color);
+            // Re-apply background color from CSS string. The wrapper view
+            // (panel's contentView) carries the rounded translucent layer.
+            if let Some(wrapper) = handles.panel.contentView() {
+                panel::apply_background_color(&wrapper, &appearance.background_color);
+            }
 
             // Re-apply geometry so width / max_lines changes take effect.
             let cfg_snapshot = handles.config.lock().unwrap().clone();

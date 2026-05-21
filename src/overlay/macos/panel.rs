@@ -91,14 +91,28 @@ pub fn build_overlay_panel(
         // Allow repositioning by background click
         panel.setMovableByWindowBackground(true);
 
-        // Create and configure the content NSTextField
-        let label_frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(width, height));
+        // Wrapper NSView holds the rounded translucent background; the label
+        // sits inside at INSET margin. The wrapper resizes with the panel
+        // (it's the contentView), and the label autoresizes to track the
+        // wrapper's bounds via flexible width+height.
+        let full_frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(width, height));
+        let wrapper: Retained<NSView> = NSView::initWithFrame(NSView::alloc(mtm), full_frame);
+        wrapper.setWantsLayer(true);
+        apply_background_color(&wrapper, &config.appearance.background_color);
+
+        let label_frame = CGRect::new(
+            CGPoint::new(INSET, INSET),
+            CGSize::new(width - 2.0 * INSET, height - 2.0 * INSET),
+        );
         let label: Retained<NSTextField> = NSTextField::initWithFrame(
             NSTextField::alloc(mtm),
-            label_frame
+            label_frame,
+        );
+        label.setAutoresizingMask(
+            objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable
+                | objc2_app_kit::NSAutoresizingMaskOptions::ViewHeightSizable,
         );
 
-        // Text properties
         let empty_str = NSString::from_str("");
         label.setStringValue(&*empty_str);
         label.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
@@ -108,15 +122,6 @@ pub fn build_overlay_panel(
         label.setDrawsBackground(false);
         label.setTextColor(Some(&NSColor::whiteColor()));
 
-        // Rounded translucent background on the label's layer. NSTextField
-        // is layer-backable; cornerRadius + masksToBounds + layer.backgroundColor
-        // gives us the soft pill look without an extra wrapper view.
-        label.setWantsLayer(true);
-        apply_background_color(&label, &config.appearance.background_color);
-
-        // Font: monospace at configured size
-        // SAFETY: msg_send! is retained here because NSFont::userFixedPitchFontOfSize
-        // doesn't have a typed equivalent in objc2-app-kit 0.3.
         let font_size = config.appearance.font_size as f64;
         let font: Retained<NSFont> = msg_send![
             NSFont::class(),
@@ -124,14 +129,15 @@ pub fn build_overlay_panel(
         ];
         label.setFont(Some(&*font));
 
-        // Set label as panel's content view
-        // SAFETY: NSTextField is a subclass of NSView, so we can transmute the reference.
-        let view_ref: &NSView = std::mem::transmute::<&NSTextField, &NSView>(&label);
-        panel.setContentView(Some(view_ref));
+        wrapper.addSubview(&label);
+        panel.setContentView(Some(&wrapper));
 
         (panel, label)
     }
 }
+
+/// Visual padding between the rounded background edge and the caption text.
+const INSET: f64 = 10.0;
 
 /// Inspect panel configuration for testing and verification.
 #[allow(dead_code)]  // Used in #[cfg(all(test, target_os = "macos"))] tests
@@ -213,13 +219,13 @@ pub fn apply_geometry(
     }
 }
 
-/// Apply a CSS-style color string to the caption label's CALayer
-/// (cornerRadius + masksToBounds preserved). Supports the two formats
-/// the Linux config uses: `rgba(R, G, B, A)` and `#RRGGBB`. Anything
-/// unparseable falls back to the default translucent dark.
-pub fn apply_background_color(label: &NSTextField, css: &str) {
+/// Apply a CSS-style color string to a view's CALayer (cornerRadius +
+/// masksToBounds preserved). Used on the wrapper view that holds the
+/// rounded translucent background. Supports `rgba(R, G, B, A)` and
+/// `#RRGGBB[AA]`. Unparseable input falls back to translucent dark.
+pub fn apply_background_color(view: &NSView, css: &str) {
     let (r, g, b, a) = parse_css_color(css).unwrap_or((0.0, 0.0, 0.0, 0.75));
-    if let Some(layer) = label.layer() {
+    if let Some(layer) = view.layer() {
         layer.setCornerRadius(8.0);
         layer.setMasksToBounds(true);
         let color = unsafe {
@@ -264,12 +270,12 @@ fn parse_css_color(s: &str) -> Option<(f64, f64, f64, f64)> {
     Some((r, g, b, a))
 }
 
-/// Per-line height plus uniform padding. The 1.7 factor is generous
-/// enough to absorb font ascent/descent + line leading so NSTextField
-/// doesn't clip the bottom of multi-line wrapped text.
+/// Per-line height plus uniform padding. Factor matches NSFont's natural
+/// line height (~1.3 × pointSize for monospace including leading); the
+/// padding term covers the visual inset around the rounded background.
 fn panel_height_for_lines(font_size: f32, line_count: usize) -> f64 {
     let lines = line_count.max(1) as f64;
-    (font_size as f64) * 1.7 * lines + 12.0
+    (font_size as f64) * 1.3 * lines + 16.0
 }
 
 /// Set the caption text and resize the panel to fit the actual line
