@@ -31,13 +31,16 @@ define_class!(
         #[unsafe(method(windowDidMove:))]
         fn window_did_move(&self, _notification: Option<&objc2_foundation::NSNotification>) {
             let ivars = self.ivars();
-            // The notification scoping by object filter (in install_drag_observer)
-            // means we only fire for our panel — no need to inspect the notification.
             let frame = ivars.panel.frame();
             let new_x = frame.origin.x as i32;
             let new_y = frame.origin.y as i32;
             let mut cfg = ivars.config.lock().unwrap();
-            // Skip write if unchanged — defends against spurious notifications.
+            // Only persist position in Floating mode — Docked/Transcript moves
+            // are programmatic (apply_geometry repositioning) and must not
+            // overwrite the user's saved Floating coords.
+            if !matches!(cfg.overlay_mode, crate::config::OverlayMode::Floating) {
+                return;
+            }
             if cfg.position.x == new_x && cfg.position.y == new_y {
                 return;
             }

@@ -275,13 +275,18 @@ fn handle_overlay_command(
             }
         }
         OverlayCommand::SetMode(mode) => {
-            let mut cfg = handles.config.lock().unwrap();
-            cfg.overlay_mode = mode.clone();
-            let _ = cfg.save();
-            drop(cfg);
+            // Snapshot then drop the lock before apply_geometry. setFrame_display
+            // synchronously fires NSWindowDidMoveNotification, which the drag
+            // observer handles by locking the same config — holding the lock
+            // here would re-enter and deadlock (or crash on macOS pthread).
+            let cfg_snapshot = {
+                let mut cfg = handles.config.lock().unwrap();
+                cfg.overlay_mode = mode.clone();
+                let _ = cfg.save();
+                cfg.clone()
+            };
 
-            let cfg_ref = handles.config.lock().unwrap();
-            panel::apply_geometry(&handles.panel, &handles.label, mtm, mode.clone(), &cfg_ref);
+            panel::apply_geometry(&handles.panel, &handles.label, mtm, mode.clone(), &cfg_snapshot);
 
             match mode {
                 OverlayMode::Docked | OverlayMode::Floating => {
