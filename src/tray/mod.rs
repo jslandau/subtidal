@@ -10,3 +10,9 @@ mod impl_linux;
 
 #[cfg(target_os = "linux")]
 pub use impl_linux::{spawn_tray, TrayState};
+
+#[cfg(target_os = "macos")]
+pub mod impl_macos;
+
+#[cfg(target_os = "macos")]
+pub use impl_macos::{install_tray, TrayState};

@@ -15,6 +15,12 @@ mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::run_gtk_app;
 
+#[cfg(target_os = "macos")]
+mod macos;
+
+#[cfg(target_os = "macos")]
+pub use macos::run_app;
+
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 

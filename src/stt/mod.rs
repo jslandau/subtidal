@@ -1,23 +1,23 @@
 //! STT engine abstraction and the combined audio-resample-inference thread.
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod nemotron;
 
 use anyhow::Result;
 use arc_swap::ArcSwap;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use ringbuf::HeapCons;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use ringbuf::traits::Consumer;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::thread;
 use std::time::Duration;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::time::Instant;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::audio::resampler::AudioResampler;
 use crate::config::Engine;
 
@@ -32,6 +32,7 @@ pub trait SttEngine: Send + 'static {
 /// `data_ready` is the boolean predicate the Condvar protects; the RT side sets
 /// it with SeqCst and signals without holding the mutex (a missed wakeup is
 /// harmless because the consumer re-checks the flag on every timeout).
+#[derive(Default)]
 pub struct AudioWake {
     data_ready: AtomicBool,
     shutdown: AtomicBool,
@@ -45,12 +46,7 @@ pub struct AudioWake {
 
 impl AudioWake {
     pub fn new() -> Self {
-        Self {
-            data_ready: AtomicBool::new(false),
-            shutdown: AtomicBool::new(false),
-            mutex: Mutex::new(()),
-            condvar: Condvar::new(),
-        }
+        Self::default()
     }
 
     /// Called from the PipeWire real-time callback. Sets the ready flag and
@@ -108,7 +104,7 @@ pub struct PipelineConfig {
 ///
 /// Engine swap is handled by swapping the `ArcSwap<Engine>` from the tray; this
 /// thread notices on each chunk boundary and rebuilds its local engine.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn spawn_stt_thread(
     mut ring_consumer: HeapCons<f32>,
     wake: Arc<AudioWake>,
@@ -233,7 +229,7 @@ pub fn spawn_stt_thread(
         .expect("spawning stt-pipeline thread")
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn build_engine(
     choice: &Engine,
     model_dir: &std::path::Path,
@@ -244,9 +240,11 @@ fn build_engine(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests {
     use super::*;
+    use std::thread;
+    use std::time::Instant;
 
     #[test]
     fn audio_wake_notify_wakes_waiter() {

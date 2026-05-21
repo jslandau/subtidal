@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use notify_debouncer_mini::{new_debouncer, DebounceEventResult};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::time::Duration;
 
 /// Which STT engine to use for inference.
@@ -15,15 +15,17 @@ pub enum Engine {
     Nemotron,
 }
 
-/// The PipeWire audio source to capture from.
+/// The audio source to capture from.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AudioSource {
     /// System-wide monitor sink (default output loopback).
     #[default]
     SystemOutput,
-    /// A specific application's PipeWire node, identified by node ID.
+    /// (Linux/PipeWire) A specific application's PipeWire node, identified by node ID.
     Application { node_id: u32, node_name: String },
+    /// (macOS/Core Audio Taps) A specific application, identified by bundle ID.
+    App { bundle_id: String, label: String },
 }
 
 /// Overlay display mode.
@@ -87,6 +89,16 @@ pub struct AppearanceConfig {
     /// Lower values add more visual padding. Default 0.95 (5% padding).
     #[serde(default = "default_char_width_fraction")]
     pub char_width_fraction: f32,
+    /// Font family. Special values: "monospace" (default) → system fixed-pitch;
+    /// "system" → system proportional. Anything else is passed to the platform
+    /// font lookup (`NSFont::fontWithName:` on macOS, CSS `font-family` on Linux)
+    /// with fallback to monospace if not found.
+    #[serde(default = "default_font_family")]
+    pub font_family: String,
+}
+
+fn default_font_family() -> String {
+    "monospace".to_string()
 }
 
 fn default_width() -> i32 {
@@ -112,6 +124,7 @@ impl Default for AppearanceConfig {
             height: 0,
             expire_secs: 8,
             char_width_fraction: 0.95,
+            font_family: default_font_family(),
         }
     }
 }
@@ -226,11 +239,22 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Returns the path to the config file: ~/.config/subtidal/config.toml
+    /// Returns the path to the config file.
+    /// Linux: ~/.config/subtidal/config.toml (XDG convention)
+    /// macOS: ~/Library/Application Support/Subtidal/config.toml (Apple convention)
+    #[cfg(target_os = "linux")]
     pub fn config_path() -> PathBuf {
         dirs::config_dir()
             .unwrap_or_else(|| PathBuf::from(".config"))
             .join("subtidal")
+            .join("config.toml")
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn config_path() -> PathBuf {
+        dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("Subtidal")
             .join("config.toml")
     }
 
@@ -415,6 +439,97 @@ pub fn start_hot_reload(
     Ok(debouncer)
 }
 
+/// Start watching config.toml for `audio_source` changes (macOS).
+///
+/// Sends `AudioCommand::SwitchSource` to the audio worker when the
+/// persisted `audio_source` differs from the previous reload. Other
+/// config fields (appearance, mode) are ignored here — the macOS overlay
+/// surface doesn't react to those yet (Phase 6).
+///
+/// Returns the debouncer (must be kept alive for the lifetime of the watch).
+#[cfg(target_os = "macos")]
+pub fn start_hot_reload_macos(
+    audio_cmd_tx: std::sync::mpsc::SyncSender<crate::audio::AudioCommand>,
+    overlay_tx: async_channel::Sender<crate::overlay::OverlayCommand>,
+) -> anyhow::Result<notify_debouncer_mini::Debouncer<notify::RecommendedWatcher>> {
+    let config_path = Config::config_path();
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let initial_cfg = Config::load();
+    let prev_source = std::sync::Mutex::new(initial_cfg.audio_source.clone());
+    let prev_appearance = std::sync::Mutex::new(initial_cfg.appearance.clone());
+    let prev_mode = std::sync::Mutex::new(initial_cfg.overlay_mode.clone());
+    let prev_locked = std::sync::Mutex::new(initial_cfg.locked);
+    let prev_above_fullscreen = std::sync::Mutex::new(initial_cfg.above_fullscreen);
+
+    let mut debouncer = new_debouncer(Duration::from_millis(500), move |result: DebounceEventResult| {
+        match result {
+            Ok(_events) => match Config::load_from(&Config::config_path()) {
+                Ok(new_cfg) => {
+                    // Only emit when a value actually changed — defends against
+                    // the drag-save echo (position-only writes match position-only
+                    // in new_cfg and produce no commands).
+                    if let Ok(mut prev) = prev_source.lock() {
+                        if *prev != new_cfg.audio_source {
+                            eprintln!(
+                                "info: hot-reload: audio_source {:?} -> {:?}",
+                                *prev, new_cfg.audio_source
+                            );
+                            let _ = audio_cmd_tx.send(
+                                crate::audio::AudioCommand::SwitchSource(new_cfg.audio_source.clone())
+                            );
+                            *prev = new_cfg.audio_source.clone();
+                        }
+                    }
+                    if let Ok(mut prev) = prev_appearance.lock() {
+                        if *prev != new_cfg.appearance {
+                            let _ = overlay_tx.send_blocking(
+                                crate::overlay::OverlayCommand::UpdateAppearance(new_cfg.appearance.clone())
+                            );
+                            *prev = new_cfg.appearance.clone();
+                        }
+                    }
+                    if let Ok(mut prev) = prev_mode.lock() {
+                        if *prev != new_cfg.overlay_mode {
+                            let _ = overlay_tx.send_blocking(
+                                crate::overlay::OverlayCommand::SetMode(new_cfg.overlay_mode.clone())
+                            );
+                            *prev = new_cfg.overlay_mode.clone();
+                        }
+                    }
+                    if let Ok(mut prev) = prev_locked.lock() {
+                        if *prev != new_cfg.locked {
+                            let _ = overlay_tx.send_blocking(
+                                crate::overlay::OverlayCommand::SetLocked(new_cfg.locked)
+                            );
+                            *prev = new_cfg.locked;
+                        }
+                    }
+                    if let Ok(mut prev) = prev_above_fullscreen.lock() {
+                        if *prev != new_cfg.above_fullscreen {
+                            let _ = overlay_tx.send_blocking(
+                                crate::overlay::OverlayCommand::SetAboveFullscreen(new_cfg.above_fullscreen)
+                            );
+                            *prev = new_cfg.above_fullscreen;
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("warn: config hot-reload failed (malformed TOML): {e}");
+                }
+            },
+            Err(e) => eprintln!("warn: config file watch error: {e:?}"),
+        }
+    })?;
+
+    debouncer
+        .watcher()
+        .watch(&config_path, notify::RecursiveMode::NonRecursive)?;
+    Ok(debouncer)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -506,6 +621,60 @@ mod tests {
     fn cli_parse_engine_unknown() {
         assert_eq!(Config::parse_engine("moonshine"), None);
         assert_eq!(Config::parse_engine("unknown"), None);
+    }
+
+    /// Task 1: AudioSource::App variant round-trips through TOML serde.
+    #[test]
+    fn audio_source_app_variant_serializes_correctly() {
+        let toml_input = r#"
+[audio_source]
+type = "app"
+bundle_id = "com.apple.Safari"
+label = "Safari"
+"#;
+        #[derive(serde::Deserialize)]
+        struct Wrapper { audio_source: AudioSource }
+        let w: Wrapper = toml::from_str(toml_input).expect("parse audio_source App variant");
+        assert!(
+            matches!(&w.audio_source, AudioSource::App { bundle_id, label }
+                if bundle_id == "com.apple.Safari" && label == "Safari"),
+            "Expected App variant, got: {:?}",
+            w.audio_source
+        );
+    }
+
+    /// Task 1: AudioSource::App variant deserializes and round-trips back to TOML.
+    #[test]
+    fn audio_source_app_variant_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        // Create a config with App audio source
+        let mut original = Config::default();
+        original.audio_source = AudioSource::App {
+            bundle_id: "com.apple.Safari".to_string(),
+            label: "Safari".to_string(),
+        };
+        original.config_file_path = Some(path.clone());
+
+        // Serialize to TOML
+        let text = toml::to_string_pretty(&original).unwrap();
+        fs::write(&path, &text).unwrap();
+
+        // Deserialize and verify
+        let loaded = Config::load_from(&path).unwrap();
+        assert!(
+            matches!(&loaded.audio_source, AudioSource::App { bundle_id, label }
+                if bundle_id == "com.apple.Safari" && label == "Safari"),
+            "Expected App variant after round-trip, got: {:?}",
+            loaded.audio_source
+        );
+    }
+
+    /// Task 1: SystemOutput remains the default audio source.
+    #[test]
+    fn audio_source_system_output_is_default() {
+        assert_eq!(AudioSource::default(), AudioSource::SystemOutput);
     }
 
     /// AC3.1: expire_secs field exists in AppearanceConfig with default value of 8.

@@ -1,19 +1,29 @@
 name: macOS target check
 
+# Runs on macos-latest (Apple Silicon) rather than ubuntu-latest because
+# several C-build-script dependencies (ring, onig_sys, possibly others
+# pulled in via hf-hub / tokenizers / parakeet-rs) invoke `cc` with
+# darwin-specific flags (-arch arm64, -mmacosx-version-min, -gfull) that
+# Linux's plain `cc` does not understand. macOS's native cc handles them,
+# and `cargo check --target aarch64-apple-darwin` from the native macos-latest
+# (Apple Silicon) host exercises full cfg-gated module isolation. ort 2.0.0-rc.12
+# provides wgpu prebuilts for aarch64 but not x86_64; Phase 7 adds an x86_64
+# matrix entry once ort supplies x86_64 wgpu prebuilt binaries.
+
 on:
   push:
   pull_request:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v6
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-apple-darwin
+          targets: aarch64-apple-darwin
 
       - uses: Swatinem/rust-cache@v2
 
-      - run: cargo check --lib --target x86_64-apple-darwin --verbose
+      - run: cargo check --lib --target aarch64-apple-darwin --verbose

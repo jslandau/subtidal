@@ -1,8 +1,8 @@
 [package]
 name = "subtidal"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2021"
-description = "Real-time speech-to-text overlay for Linux/Wayland"
+description = "Real-time speech-to-text overlay for Linux/Wayland and macOS"
 license = "MIT"
 
 [lib]
@@ -56,6 +56,15 @@ arc-swap = "1"
 # Async channels for glib main-loop consumption
 async-channel = "2"
 
+# Model management (cross-platform).
+# `default-features = false` drops hf-hub's `ureq` path (which forces rustls →
+# ring); the `tokio` feature alone routes through reqwest, which uses the
+# system TLS stack (Secure Transport on macOS, OpenSSL on Linux). ring's build
+# script invokes `cc` with macOS-only flags (-arch, -mmacosx-version-min,
+# -gfull) that fail when cross-compiling from Linux→x86_64-apple-darwin under
+# the macos-check CI, so we deliberately avoid the rustls path.
+hf-hub = { version = "0.5", default-features = false, features = ["tokio"] }
+
 # Linux-only crates and CUDA feature additions.
 # Resolver v2 (edition 2021 default) isolates the `cuda` feature on `ort` and
 # `parakeet-rs` to Linux-target compilations only; on non-Linux targets these
@@ -78,11 +87,48 @@ parakeet-rs = { version = "0.3.4", features = ["cuda"] }
 # Desktop notifications (notify-rust pulls in mac-notification-sys whose build
 # script fails when cross-compiling from Linux to darwin).
 notify-rust = "4"
-# Model management (hf-hub → ureq → rustls → ring, whose build script invokes
-# `cc` with macOS-only flags that fail on a Linux CI host).
-hf-hub = { version = "0.5", features = ["tokio"] }
 # Process exit without atexit handlers (avoids CUDA cleanup race)
 libc = "0.2"
+
+# Resolver v2 isolates the `webgpu` feature on `ort` and `parakeet-rs` to
+# macOS-target compilations only; this mirrors the Linux/cuda pattern above.
+# Note: webgpu is targeted for Phase 4-5 inference (STT pipeline on GPU via WebGPU).
+# Phase 2 does not use it (test caption harness only). Phase 2 cross-target check
+# (aarch64-apple-darwin) is constrained by ort's prebuilt binary availability; Phase 7
+# adds x86_64-apple-darwin once ort supplies x86_64 wgpu prebuilts.
+[target.'cfg(target_os = "macos")'.dependencies]
+parakeet-rs = { version = "0.3.4", features = ["webgpu"] }
+ort = { version = "2.0.0-rc.12", features = ["webgpu"] }
+# AppKit bindings (used Phase 2+); declared up-front so cross-target check exercises them.
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = [
+    "NSString", "NSNotification", "NSObject", "NSRunLoop", "NSArray",
+    "NSURL", "NSTimer", "NSDate",
+] }
+objc2-app-kit = { version = "0.3", features = [
+    "NSApplication", "NSPanel", "NSWindow", "NSTextField", "NSScreen",
+    "NSColor", "NSFont", "NSAttributedString", "NSEvent",
+    "NSResponder", "NSView", "NSAppearance",
+    # Phase 6 additions:
+    "NSMenu", "NSMenuItem", "NSStatusBar", "NSStatusItem",
+    "NSScrollView", "NSTextView", "NSTextStorage",
+    "NSSavePanel", "NSImage", "NSControl", "NSCell",
+    # Phase 7 polish additions:
+    "NSRunningApplication", "NSFontManager", "NSFontDescriptor",
+] }
+objc2-core-foundation = "0.3"
+objc2-quartz-core = { version = "0.3", features = ["CALayer", "objc2-core-foundation"] }
+objc2-user-notifications = { version = "0.3", features = [
+    "UNUserNotificationCenter", "UNNotificationContent", "UNNotificationRequest",
+] }
+# Core Audio bindgen FFI (Phase 5 revised: Tap API support)
+coreaudio-sys = "0.2"
+core-foundation = "0.10"
+# POSIX kill() for PID liveness detection in the watchdog.
+libc = "0.2"
+# Grand Central Dispatch for caption-bridge main-thread marshaling (Phase 2+).
+dispatch2 = "0.3"
+block2 = "0.6"
 
 [profile.release]
 opt-level = 3
