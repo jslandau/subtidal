@@ -113,6 +113,8 @@ objc2-app-kit = { version = "0.3", features = [
     "NSMenu", "NSMenuItem", "NSStatusBar", "NSStatusItem",
     "NSScrollView", "NSTextView", "NSTextStorage",
     "NSSavePanel", "NSImage", "NSControl", "NSCell",
+    # Phase 7 polish additions:
+    "NSRunningApplication", "NSFontManager", "NSFontDescriptor",
 ] }
 objc2-core-foundation = "0.3"
 objc2-quartz-core = { version = "0.3", features = ["CALayer", "objc2-core-foundation"] }

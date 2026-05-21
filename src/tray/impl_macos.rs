@@ -66,6 +66,8 @@ pub struct TrayIvars {
     captions_item: RefCell<Retained<NSMenuItem>>,
     above_item: RefCell<Retained<NSMenuItem>>,
     mode_items: RefCell<Vec<Retained<NSMenuItem>>>,
+    font_item: RefCell<Retained<NSMenuItem>>,
+    lines_item: RefCell<Retained<NSMenuItem>>,
 }
 
 define_class!(
@@ -203,6 +205,60 @@ define_class!(
             ivars.lock_item.borrow().setState(if next { 1 } else { 0 });
         }
 
+        #[unsafe(method(selectFont:))]
+        fn select_font(&self, sender: Option<&NSMenuItem>) {
+            let Some(sender) = sender else { return };
+            let title = sender.title().to_string();
+            // "System" is a sentinel resolved by panel::resolve_font; every
+            // other title is a literal NSFont family name.
+            let family = if title == "System" { "system".to_string() } else { title.clone() };
+
+            let appearance = {
+                let mut cfg = self.ivars().state.config.lock().unwrap();
+                cfg.appearance.font_family = family;
+                let _ = cfg.save();
+                cfg.appearance.clone()
+            };
+            let _ = self.ivars().state.cmd_tx.send_blocking(
+                OverlayCommand::UpdateAppearance(appearance),
+            );
+
+            // Walk every item in both the curated list and the All Fonts
+            // submenu (if present) to update checkmarks. Cheap because the
+            // curated list is short and "All Fonts" is only walked when the
+            // user has clicked into it at least once.
+            let mtm = MainThreadMarker::from(self);
+            let font_item = self.ivars().font_item.borrow();
+            if let Some(submenu) = font_item.submenu() {
+                update_font_checkmarks(&submenu, &title, mtm);
+            }
+        }
+
+        #[unsafe(method(selectLines:))]
+        fn select_lines(&self, sender: Option<&NSMenuItem>) {
+            let Some(sender) = sender else { return };
+            let Ok(n) = sender.title().to_string().trim().parse::<u32>() else { return };
+            let appearance = {
+                let mut cfg = self.ivars().state.config.lock().unwrap();
+                cfg.appearance.max_lines = n;
+                let _ = cfg.save();
+                cfg.appearance.clone()
+            };
+            let _ = self.ivars().state.cmd_tx.send_blocking(
+                OverlayCommand::UpdateAppearance(appearance),
+            );
+            let lines_item = self.ivars().lines_item.borrow();
+            if let Some(submenu) = lines_item.submenu() {
+                let count = submenu.numberOfItems();
+                for i in 0..count {
+                    if let Some(mi) = submenu.itemAtIndex(i) {
+                        let on = mi.title().to_string().trim().parse::<u32>().ok() == Some(n);
+                        mi.setState(if on { 1 } else { 0 });
+                    }
+                }
+            }
+        }
+
         #[unsafe(method(quit:))]
         fn quit(&self, _sender: Option<&NSMenuItem>) {
             let ivars = self.ivars();
@@ -253,6 +309,8 @@ impl TrayActions {
         audio_item: Retained<NSMenuItem>,
         above_item: Retained<NSMenuItem>,
         lock_item: Retained<NSMenuItem>,
+        font_item: Retained<NSMenuItem>,
+        lines_item: Retained<NSMenuItem>,
     ) -> Retained<Self> {
         let ivars = TrayIvars {
             state,
@@ -261,6 +319,8 @@ impl TrayActions {
             captions_item: RefCell::new(captions_item),
             above_item: RefCell::new(above_item),
             mode_items: RefCell::new(mode_items),
+            font_item: RefCell::new(font_item),
+            lines_item: RefCell::new(lines_item),
         };
         let allocated = Self::alloc(mtm).set_ivars(ivars);
         unsafe { msg_send![super(allocated), init] }
@@ -301,6 +361,134 @@ fn build_audio_submenu_for(
     for info in &sources {
         let on = info.source == current_source;
         menu.addItem(&make_item(&info.label, on));
+    }
+    menu
+}
+
+/// Curated font picks shown at the top of the Font submenu. "System" is
+/// a sentinel resolved by `panel::resolve_font` to the system monospace.
+const CURATED_FONTS: &[&str] = &["System", "SF Mono", "Menlo", "Monaco", "Courier New"];
+
+/// List every monospaced font family installed on the system, in
+/// alphabetical order. Uses NSFontManager with the FixedPitch trait mask.
+fn all_monospace_fonts(mtm: MainThreadMarker) -> Vec<String> {
+    use objc2_app_kit::{NSFontManager, NSFontTraitMask};
+    let mgr = NSFontManager::sharedFontManager(mtm);
+    let names = unsafe {
+        mgr.availableFontNamesWithTraits(NSFontTraitMask::FixedPitchFontMask)
+    };
+    let Some(names) = names else { return Vec::new() };
+    let mut out = Vec::with_capacity(names.count() as usize);
+    for i in 0..names.count() {
+        let s = names.objectAtIndex(i);
+        out.push(s.to_string());
+    }
+    out.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+    out
+}
+
+/// Currently-selected font family for checkmark purposes. The config
+/// stores "system" (sentinel) which displays as "System" in the menu.
+fn current_font_label(config: &Arc<Mutex<Config>>) -> String {
+    let cfg = config.lock().unwrap();
+    let f = cfg.appearance.font_family.trim();
+    if f.is_empty() || f.eq_ignore_ascii_case("system") || f.eq_ignore_ascii_case("monospace") {
+        "System".to_string()
+    } else {
+        f.to_string()
+    }
+}
+
+fn build_font_submenu(
+    state: &TrayState,
+    mtm: MainThreadMarker,
+    target: &TrayActions,
+) -> Retained<NSMenu> {
+    let menu = NSMenu::new(mtm);
+    menu.setAutoenablesItems(false);
+    let target_obj: &AnyObject = target.as_ref();
+    let current = current_font_label(&state.config);
+
+    let make_item = |label: &str, on: bool| -> Retained<NSMenuItem> {
+        let mi = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm),
+                &NSString::from_str(label),
+                Some(sel!(selectFont:)),
+                &NSString::from_str(""),
+            )
+        };
+        mi.setState(if on { 1 } else { 0 });
+        unsafe { mi.setTarget(Some(target_obj)) };
+        mi
+    };
+
+    for label in CURATED_FONTS {
+        menu.addItem(&make_item(label, *label == current));
+    }
+    menu.addItem(&NSMenuItem::separatorItem(mtm));
+
+    // "All Fonts" cascading submenu — built eagerly because NSFontManager
+    // enumeration is cheap (<5 ms even with hundreds of fonts) and we
+    // benefit from checkmark consistency if the user's selection lives
+    // there.
+    let all_parent = unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            &NSString::from_str("All Fonts"),
+            None,
+            &NSString::from_str(""),
+        )
+    };
+    let all_menu = NSMenu::new(mtm);
+    all_menu.setAutoenablesItems(false);
+    for name in all_monospace_fonts(mtm) {
+        // Skip curated entries to avoid duplicate visual rows + checkmark drift.
+        if CURATED_FONTS.iter().any(|c| c.eq_ignore_ascii_case(&name)) {
+            continue;
+        }
+        all_menu.addItem(&make_item(&name, name == current));
+    }
+    all_parent.setSubmenu(Some(&all_menu));
+    menu.addItem(&all_parent);
+    menu
+}
+
+fn update_font_checkmarks(menu: &NSMenu, selected_title: &str, mtm: MainThreadMarker) {
+    let _ = mtm;
+    let n = menu.numberOfItems();
+    for i in 0..n {
+        if let Some(mi) = menu.itemAtIndex(i) {
+            let t = mi.title().to_string();
+            mi.setState(if t == selected_title { 1 } else { 0 });
+            if let Some(sub) = mi.submenu() {
+                update_font_checkmarks(&sub, selected_title, mtm);
+            }
+        }
+    }
+}
+
+fn build_lines_submenu(
+    state: &TrayState,
+    mtm: MainThreadMarker,
+    target: &TrayActions,
+) -> Retained<NSMenu> {
+    let menu = NSMenu::new(mtm);
+    menu.setAutoenablesItems(false);
+    let target_obj: &AnyObject = target.as_ref();
+    let current = state.config.lock().unwrap().appearance.max_lines;
+    for n in 1u32..=5 {
+        let mi = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm),
+                &NSString::from_str(&n.to_string()),
+                Some(sel!(selectLines:)),
+                &NSString::from_str(""),
+            )
+        };
+        mi.setState(if n == current { 1 } else { 0 });
+        unsafe { mi.setTarget(Some(target_obj)) };
+        menu.addItem(&mi);
     }
     menu
 }
@@ -419,6 +607,28 @@ pub fn install_tray(
     };
     menu.addItem(&audio_item);
 
+    // Font submenu — built after actions exists so each row can target it.
+    let font_item = unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            &NSString::from_str("Font"),
+            None,
+            &NSString::from_str(""),
+        )
+    };
+    menu.addItem(&font_item);
+
+    // Lines submenu (1-5).
+    let lines_item = unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            &NSString::from_str("Lines"),
+            None,
+            &NSString::from_str(""),
+        )
+    };
+    menu.addItem(&lines_item);
+
     let above_item = unsafe {
         NSMenuItem::initWithTitle_action_keyEquivalent(
             NSMenuItem::alloc(mtm),
@@ -468,12 +678,18 @@ pub fn install_tray(
         audio_item.clone(),
         above_item.clone(),
         lock_item.clone(),
+        font_item.clone(),
+        lines_item.clone(),
     );
 
     {
         let ivars = actions.ivars();
-        let submenu = build_audio_submenu_for(&ivars.state, mtm, &actions);
-        audio_item.setSubmenu(Some(&submenu));
+        let audio_submenu = build_audio_submenu_for(&ivars.state, mtm, &actions);
+        audio_item.setSubmenu(Some(&audio_submenu));
+        let font_submenu = build_font_submenu(&ivars.state, mtm, &actions);
+        font_item.setSubmenu(Some(&font_submenu));
+        let lines_submenu = build_lines_submenu(&ivars.state, mtm, &actions);
+        lines_item.setSubmenu(Some(&lines_submenu));
     }
 
     let target_obj: &AnyObject = actions.as_ref();

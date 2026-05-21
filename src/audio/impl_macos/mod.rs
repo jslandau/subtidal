@@ -335,10 +335,30 @@ pub fn list_sources() -> Result<Vec<crate::audio::AudioSourceInfo>> {
 }
 
 /// Translate a bundle ID to a user-visible label.
-/// For now, returns the bundle ID as-is. Future versions (Phase 6+) can
-/// resolve to CFBundleName from the bundle's Info.plist for prettier labels.
+///
+/// Looks up the first `NSRunningApplication` with the given bundle id and
+/// returns its `localizedName`. This is what the user sees in the Dock /
+/// Finder — e.g. "Music" instead of "com.apple.Music", "Firefox" instead
+/// of "org.mozilla.firefox". Falls back to the bundle id if no running
+/// instance is found (rare, since this function is only called for ids
+/// returned by Core Audio's running-process list).
 fn bundle_to_label(bundle_id: &str) -> String {
-    bundle_id.to_string()
+    use objc2::rc::Retained;
+    use objc2_app_kit::NSRunningApplication;
+    use objc2_foundation::{NSArray, NSString};
+
+    let id_ns = NSString::from_str(bundle_id);
+    let apps: Retained<NSArray<NSRunningApplication>> = unsafe {
+        NSRunningApplication::runningApplicationsWithBundleIdentifier(&id_ns)
+    };
+    if apps.count() == 0 {
+        return bundle_id.to_string();
+    }
+    let app = apps.objectAtIndex(0);
+    match unsafe { app.localizedName() } {
+        Some(name) => name.to_string(),
+        None => bundle_id.to_string(),
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]
