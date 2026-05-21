@@ -24,7 +24,7 @@ All processing happens locally — no cloud services, no network requests (excep
 
 ### macOS
 - macOS 14.4+ on Apple Silicon (M1 or newer). Intel Macs are not supported.
-- Audio Capture permission granted via System Settings → Privacy & Security → Microphone? — no, **Audio Capture** specifically (not Screen Recording). Subtidal will prompt on first launch.
+- Audio Capture permission granted via System Settings → Privacy & Security → Screen & System Audio Recording, grant Subtidal permission for System Audio Recording Only. Subtidal will prompt on first launch.
 - WebGPU is automatic on Apple Silicon; CPU fallback otherwise.
 - Rust toolchain
 
