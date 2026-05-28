@@ -111,149 +111,20 @@ fn ensure_icons_installed() -> String {
     }).clone()
 }
 
-/// Render the CC tray icon as ARGB32 pixel data at 64x64.
-///
-/// Uses signed distance fields for anti-aliased rendering of:
-/// - Rounded rectangle frame (2px stroke equivalent, radius ~4.5)
-/// - Two "C" glyphs using arc math
-/// - Optional diagonal strikethrough for the "off" state
-///
-/// The `opacity` parameter (0.0–1.0) scales alpha for the off-state dimming.
+/// Render the CC tray icon as ARGB32 pixel data (ksni format) at 64×64.
+/// Delegates geometry to the shared RGBA renderer, then converts byte order.
 fn render_cc_icon(opacity: f32, strikethrough: bool, gpu: bool) -> ksni::Icon {
-    const S: i32 = 64;
-    const SF: f32 = S as f32;
-    let mut data = vec![0u8; (S * S * 4) as usize];
-
     let (r, g, b) = if gpu { (100u8, 255u8, 100u8) } else { (255u8, 255u8, 255u8) };
-
-    // Blend a pixel with anti-aliased alpha (SDF coverage).
-    let blend = |data: &mut Vec<u8>, x: i32, y: i32, coverage: f32, op: f32| {
-        if x < 0 || x >= S || y < 0 || y >= S { return; }
-        let idx = ((y * S + x) * 4) as usize;
-        let a = (coverage.clamp(0.0, 1.0) * op * 255.0) as u8;
-        // Composite: max alpha wins (all shapes are the same color).
-        if a > data[idx] {
-            data[idx] = a;
-            data[idx + 1] = b;
-            data[idx + 2] = g;
-            data[idx + 3] = r;
-        }
-    };
-
-    // --- Rounded rectangle frame ---
-    // The SVG viewBox is 0..16, mapped to 0..64 (scale 4x).
-    // Outer rect: (0,4)..(64,60), corner radius 12px, stroke width ~5px.
-    let rect_top = 4.0_f32;
-    let rect_bot = 60.0_f32;
-    let rect_left = 0.0_f32;
-    let rect_right = SF;
-    let r_outer = 12.0_f32; // outer corner radius
-    let stroke = 5.0_f32;
-    let r_inner = r_outer - stroke;
-
-    for y in 0..S {
-        for x in 0..S {
-            let px = x as f32 + 0.5;
-            let py = y as f32 + 0.5;
-
-            // SDF for rounded rectangle
-            let sdf_rounded_rect = |left: f32, top: f32, right: f32, bot: f32, r: f32| -> f32 {
-                let cx = px.clamp(left + r, right - r);
-                let cy = py.clamp(top + r, bot - r);
-                let dx = (px - cx).abs();
-                let dy = (py - cy).abs();
-                (dx * dx + dy * dy).sqrt() - r
-            };
-
-            let d_outer = sdf_rounded_rect(rect_left, rect_top, rect_right, rect_bot, r_outer);
-            let d_inner = sdf_rounded_rect(rect_left + stroke, rect_top + stroke,
-                                            rect_right - stroke, rect_bot - stroke, r_inner.max(0.0));
-
-            // Inside outer, outside inner = border
-            let outer_cov = 0.5 - d_outer; // positive inside
-            let inner_cov = 0.5 - d_inner;
-            let border_cov = outer_cov.min(1.0 - inner_cov.clamp(0.0, 1.0));
-            if border_cov > 0.0 {
-                blend(&mut data, x, y, border_cov, opacity);
-            }
-        }
+    let rgba = super::icon::render_cc_icon_rgba(r, g, b, opacity, strikethrough);
+    // ksni Icon.data is ARGB in network (big-endian) byte order: [A, R, G, B].
+    let mut argb = vec![0u8; rgba.len()];
+    for i in (0..rgba.len()).step_by(4) {
+        argb[i]     = rgba[i + 3]; // A
+        argb[i + 1] = rgba[i];     // R
+        argb[i + 2] = rgba[i + 1]; // G
+        argb[i + 3] = rgba[i + 2]; // B
     }
-
-    // --- "C" glyph renderer ---
-    // A proper "C" is a thick arc spanning ~280° — the tips curve past the
-    // horizontal centerline, creating a narrow opening on the right.
-    // The SVG C shapes are centered at (6.1, 8.0) and (11.1, 8.0) in a
-    // 16-unit viewBox, scaled 4x to our 64px canvas.
-    let draw_c = |data: &mut Vec<u8>, center_x: f32, center_y: f32, op: f32| {
-        let mid_r = 7.5_f32;     // center of the stroke ring
-        let half_w = 2.8_f32;    // half the stroke width
-        // Arc spans from -140° to +140° (280° total), leaving a 80° gap
-        // on the right side. The tips curve back past the centerline.
-        let arc_half_angle = 140.0_f32 * std::f32::consts::PI / 180.0;
-
-        for y in 0..S {
-            for x in 0..S {
-                let px = x as f32 + 0.5;
-                let py = y as f32 + 0.5;
-                let dx = px - center_x;
-                let dy = py - center_y;
-                let dist = (dx * dx + dy * dy).sqrt();
-                if dist < 0.01 { continue; }
-
-                // Distance to the ring centerline
-                let ring_dist = (dist - mid_r).abs();
-                if ring_dist > half_w + 1.0 { continue; }
-
-                // Angle from center (0 = right, positive = clockwise/down)
-                let angle = dy.atan2(dx);
-
-                // Check if within the arc span
-                // The gap is centered at angle=0 (right side)
-                let in_arc = angle.abs() > (std::f32::consts::PI - arc_half_angle);
-
-                if !in_arc { continue; }
-
-                // Anti-aliased coverage from ring edges
-                let ring_cov = (half_w - ring_dist + 0.5).clamp(0.0, 1.0);
-
-                // Soft edge at arc endpoints
-                let angle_from_end = angle.abs() - (std::f32::consts::PI - arc_half_angle);
-                let arc_cov = (angle_from_end * mid_r + 0.5).clamp(0.0, 1.0);
-
-                let coverage = ring_cov.min(arc_cov);
-                if coverage > 0.0 {
-                    blend(data, x, y, coverage, op);
-                }
-            }
-        }
-    };
-
-    draw_c(&mut data, 20.0, 32.0, opacity);
-    draw_c(&mut data, 44.0, 32.0, opacity);
-
-    // --- Diagonal strikethrough ---
-    if strikethrough {
-        let line_width = 3.0_f32;
-        for y in 0..S {
-            for x in 0..S {
-                let px = x as f32 + 0.5;
-                let py = y as f32 + 0.5;
-                // Line from (5, 59) to (59, 5) — bottom-left to top-right
-                // Distance from point to line: |px + py - 64| / sqrt(2)
-                let dist = ((px + py) - SF).abs() / std::f32::consts::SQRT_2;
-                if dist < line_width {
-                    let cov = (line_width - dist).clamp(0.0, 1.0);
-                    blend(&mut data, x, y, cov, opacity);
-                }
-            }
-        }
-    }
-
-    ksni::Icon {
-        width: S,
-        height: S,
-        data,
-    }
+    ksni::Icon { width: 64, height: 64, data: argb }
 }
 
 /// Whether the tray host is known to resolve icon names via icon_theme_path.

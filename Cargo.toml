@@ -103,7 +103,7 @@ ort = { version = "2.0.0-rc.12", features = ["webgpu"] }
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = [
     "NSString", "NSNotification", "NSObject", "NSRunLoop", "NSArray",
-    "NSURL", "NSTimer", "NSDate",
+    "NSURL", "NSTimer", "NSDate", "NSData",
 ] }
 objc2-app-kit = { version = "0.3", features = [
     "NSApplication", "NSPanel", "NSWindow", "NSTextField", "NSScreen",
@@ -137,3 +137,4 @@ codegen-units = 1
 
 [dev-dependencies]
 tempfile = "3"
+png = "0.17"

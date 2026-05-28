@@ -5,6 +5,8 @@
 //! sibling `impl_<os>.rs`, gate it with `#[cfg(target_os = "<os>")]`, and re-export
 //! the same public surface here.
 
+pub mod icon;
+
 #[cfg(target_os = "linux")]
 mod impl_linux;
 
