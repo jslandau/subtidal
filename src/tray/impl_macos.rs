@@ -34,9 +34,10 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
+    NSApplication, NSEventMask, NSEventType,
     NSImage, NSMenu, NSMenuItem, NSSquareStatusItemLength, NSStatusBar, NSStatusItem,
 };
-use objc2_foundation::{NSObject, NSString, NSTimer};
+use objc2_foundation::{NSObject, NSPoint, NSString, NSTimer};
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::SyncSender;
@@ -68,6 +69,8 @@ pub struct TrayIvars {
     mode_items: RefCell<Vec<Retained<NSMenuItem>>>,
     font_item: RefCell<Retained<NSMenuItem>>,
     lines_item: RefCell<Retained<NSMenuItem>>,
+    context_menu: RefCell<Retained<NSMenu>>,
+    status_item: RefCell<Retained<NSStatusItem>>,
 }
 
 define_class!(
@@ -82,21 +85,35 @@ define_class!(
     impl TrayActions {
         #[unsafe(method(toggleCaptions:))]
         fn toggle_captions(&self, _sender: Option<&NSMenuItem>) {
-            let ivars = self.ivars();
-            let prev = ivars.state.captions_enabled.load(Ordering::Relaxed);
-            let next = !prev;
-            ivars.state.captions_enabled.store(next, Ordering::Relaxed);
+            self.do_toggle_captions();
+        }
 
-            let in_transcript = {
-                let cfg = ivars.state.config.lock().unwrap();
-                matches!(cfg.overlay_mode, OverlayMode::Transcript)
-            };
-            if !in_transcript {
-                let _ = ivars.state.cmd_tx.send_blocking(OverlayCommand::SetVisible(next));
+        /// Fires on left- or right-click of the status-bar icon (registered
+        /// via `sendActionOn`). Left click toggles captions; right click pops
+        /// the context menu at the button's origin.
+        #[unsafe(method(statusItemClicked:))]
+        fn status_item_clicked(&self, _sender: Option<&AnyObject>) {
+            let mtm = MainThreadMarker::from(self);
+            let is_right = NSApplication::sharedApplication(mtm).currentEvent()
+                .map(|e| e.r#type() == NSEventType::RightMouseUp)
+                .unwrap_or(false);
+            if is_right {
+                let ivars = self.ivars();
+                let menu = ivars.context_menu.borrow();
+                let si = ivars.status_item.borrow();
+                if let Some(btn) = si.button(mtm) {
+                    unsafe {
+                        let _: bool = msg_send![
+                            &**menu,
+                            popUpMenuPositioningItem: std::ptr::null::<NSMenuItem>(),
+                            atLocation: NSPoint::new(0.0, 0.0),
+                            inView: &*btn
+                        ];
+                    }
+                }
+            } else {
+                self.do_toggle_captions();
             }
-            let _ = ivars.state.cmd_tx.send_blocking(OverlayCommand::SetCaptionsEnabled(next));
-
-            ivars.captions_item.borrow().setState(if next { 1 } else { 0 });
         }
 
         #[unsafe(method(selectMode:))]
@@ -311,6 +328,8 @@ impl TrayActions {
         lock_item: Retained<NSMenuItem>,
         font_item: Retained<NSMenuItem>,
         lines_item: Retained<NSMenuItem>,
+        context_menu: Retained<NSMenu>,
+        status_item: Retained<NSStatusItem>,
     ) -> Retained<Self> {
         let ivars = TrayIvars {
             state,
@@ -321,9 +340,29 @@ impl TrayActions {
             mode_items: RefCell::new(mode_items),
             font_item: RefCell::new(font_item),
             lines_item: RefCell::new(lines_item),
+            context_menu: RefCell::new(context_menu),
+            status_item: RefCell::new(status_item),
         };
         let allocated = Self::alloc(mtm).set_ivars(ivars);
         unsafe { msg_send![super(allocated), init] }
+    }
+
+    /// Shared captions toggle logic, called from both the menu item and the
+    /// status-bar left-click handler.
+    fn do_toggle_captions(&self) {
+        let ivars = self.ivars();
+        let prev = ivars.state.captions_enabled.load(Ordering::Relaxed);
+        let next = !prev;
+        ivars.state.captions_enabled.store(next, Ordering::Relaxed);
+        let in_transcript = matches!(
+            ivars.state.config.lock().unwrap().overlay_mode,
+            OverlayMode::Transcript
+        );
+        if !in_transcript {
+            let _ = ivars.state.cmd_tx.send_blocking(OverlayCommand::SetVisible(next));
+        }
+        let _ = ivars.state.cmd_tx.send_blocking(OverlayCommand::SetCaptionsEnabled(next));
+        ivars.captions_item.borrow().setState(if next { 1 } else { 0 });
     }
 }
 
@@ -664,10 +703,10 @@ pub fn install_tray(
     };
     menu.addItem(&quit_item);
 
-    item.setMenu(Some(&menu));
-
     // Build the action target. Clone Retained handles for ivars — NSMenu
     // retains its items independently, so these clones are sound.
+    // `menu` and `item` are also stored so statusItemClicked: can pop the
+    // menu and re-use the status item reference.
     let actions = TrayActions::new(
         mtm,
         state,
@@ -678,6 +717,8 @@ pub fn install_tray(
         lock_item.clone(),
         font_item.clone(),
         lines_item.clone(),
+        menu.clone(),
+        item.clone(),
     );
 
     {
@@ -699,6 +740,21 @@ pub fn install_tray(
         nemo.setTarget(Some(target_obj));
         for mi in &mode_items {
             mi.setTarget(Some(target_obj));
+        }
+    }
+
+    // Left click → toggle captions; right click → context menu.
+    // NSStatusItem with no setMenu set does not intercept clicks, so we
+    // wire statusItemClicked: on the button and extend sendActionOn to
+    // include right-mouse-up so both click types reach our handler.
+    if let Some(button) = item.button(mtm) {
+        unsafe {
+            button.setAction(Some(sel!(statusItemClicked:)));
+            button.setTarget(Some(target_obj));
+            let _: objc2_foundation::NSInteger = msg_send![
+                &*button,
+                sendActionOn: NSEventMask::LeftMouseUp | NSEventMask::RightMouseUp
+            ];
         }
     }
 

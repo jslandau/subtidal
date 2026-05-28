@@ -38,7 +38,7 @@ pub struct TranscriptActionsIvars {
 }
 
 define_class!(
-    /// Custom NSObject subclass for the Save button action.
+    /// Custom NSObject subclass for the Save button action and window delegate.
     #[unsafe(super(NSObject))]
     #[thread_kind = MainThreadOnly]
     #[name = "SubtidalTranscriptActions"]
@@ -55,6 +55,17 @@ define_class!(
                     eprintln!("warn: transcript save failed: {e}");
                 }
             }
+        }
+
+        /// NSWindowDelegate: intercept the close button so it hides the window
+        /// instead of destroying it, allowing re-entry into Transcript mode to
+        /// bring it back via makeKeyAndOrderFront.
+        #[unsafe(method(windowShouldClose:))]
+        fn window_should_close(&self, sender: Option<&NSWindow>) -> bool {
+            if let Some(w) = sender {
+                w.orderOut(None);
+            }
+            false
         }
     }
 );
@@ -174,6 +185,10 @@ pub fn build_transcript_window(
         let target_obj: &AnyObject = actions.as_ref();
         save_button.setTarget(Some(target_obj));
         save_button.setAction(Some(sel!(saveTranscript:)));
+
+        // Wire actions as window delegate so windowShouldClose: fires and
+        // hides instead of destroying the window.
+        let _: () = msg_send![&*window, setDelegate: target_obj];
 
         window.setContentView(Some(&container));
 
