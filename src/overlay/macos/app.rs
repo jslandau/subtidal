@@ -61,7 +61,7 @@ unsafe impl Sync for OverlayHandles {}
 /// if the shutdown becomes fragile with real STT/audio workers.
 pub fn run_app(
     config: Config,
-    caption_rx: async_channel::Receiver<String>,
+    caption_rx: async_channel::Receiver<crate::overlay::CaptionEvent>,
     cmd_rx: async_channel::Receiver<OverlayCommand>,
     captions_enabled: CaptionsEnabled,
 ) {
@@ -126,7 +126,7 @@ pub fn run_app(
     std::thread::Builder::new()
         .name("caption-bridge".into())
         .spawn(move || {
-            while let Ok(text) = caption_rx.recv_blocking() {
+            while let Ok(event) = caption_rx.recv_blocking() {
                 if !caption_captions_enabled.load(std::sync::atomic::Ordering::Relaxed) {
                     continue;
                 }
@@ -135,36 +135,93 @@ pub fn run_app(
                     let mtm = MainThreadMarker::new()
                         .expect("dispatch main queue runs on main thread");
 
-                    // Route captions through CaptionBuffer and TranscriptLog.
-                    let display = {
-                        let mut buf = handles_closure.caption_buffer.lock().unwrap();
-                        buf.push(text.clone());
-                        buf.display_text()
-                    };
-                    let cfg_snapshot = handles_closure.config.lock().unwrap().clone();
-                    panel::set_caption_text(
-                        &handles_closure.panel,
-                        &handles_closure.label,
-                        &display,
-                        mtm,
-                        &cfg_snapshot,
-                    );
+                    match event {
+                        crate::overlay::CaptionEvent::Append { text, speaker_id, emit_sample } => {
+                            // Route captions through CaptionBuffer and TranscriptLog.
+                            let display = {
+                                let mut buf = handles_closure.caption_buffer.lock().unwrap();
+                                buf.push_with_speaker_and_sample(text.clone(), speaker_id, emit_sample);
+                                buf.display_text()
+                            };
+                            let cfg_snapshot = handles_closure.config.lock().unwrap().clone();
+                            panel::set_caption_text(
+                                &handles_closure.panel,
+                                &handles_closure.label,
+                                &display,
+                                mtm,
+                                &cfg_snapshot,
+                            );
 
-                    // Append to transcript log (always, regardless of mode).
-                    let mode = handles_closure.config.lock().unwrap().overlay_mode.clone();
-                    {
-                        let mut log = handles_closure.transcript_log.lock().unwrap();
-                        log.push(text.clone());
-                    }
+                            // Append to transcript log (always, regardless of mode).
+                            let mode = handles_closure.config.lock().unwrap().overlay_mode.clone();
+                            let kind = {
+                                let mut log = handles_closure.transcript_log.lock().unwrap();
+                                log.push_with_speaker_and_sample(text.clone(), speaker_id, emit_sample)
+                            };
 
-                    // If in Transcript mode, update the window.
-                    if matches!(mode, OverlayMode::Transcript) {
-                        transcript_window::append_fragment(
-                            &handles_closure.transcript_state,
-                            mtm,
-                            text,
-                            chrono::Utc::now(),  // passed but not used in append_fragment
-                        );
+                            // If in Transcript mode, update the window.
+                            if matches!(mode, OverlayMode::Transcript) {
+                                let log = handles_closure.transcript_log.lock().unwrap();
+                                if let Some(fragment) = log.fragments().last().cloned() {
+                                    drop(log);
+                                    let label = match fragment.speaker_id {
+                                        Some(id) => {
+                                            let config = handles_closure.config.lock().unwrap();
+                                            config.speaker_names.get(&id)
+                                                .cloned()
+                                                .unwrap_or_else(|| format!("Speaker {}", id + 1))
+                                        }
+                                        None => String::new(),
+                                    };
+                                    let text_with_label = if label.is_empty() {
+                                        fragment.text.clone()
+                                    } else if matches!(kind, crate::overlay::transcript_log::AppendKind::NewParagraph) {
+                                        format!("{}: {}", label, fragment.text.trim_start())
+                                    } else {
+                                        fragment.text.clone()
+                                    };
+                                    transcript_window::append_fragment(
+                                        &handles_closure.transcript_state,
+                                        mtm,
+                                        text_with_label,
+                                        chrono::Utc::now(),
+                                    );
+                                }
+                            }
+                        }
+                        crate::overlay::CaptionEvent::Relabel { from_sample, new_speaker_id } => {
+                            // Retroactively re-attribute. Transcript log update is
+                            // unconditional; overlay buffer update only matters when
+                            // overlay is visible. The Transcript NSTextView is not
+                            // re-rendered here — its content was already drawn with
+                            // the old labels and we'd need a full rebuild to fix
+                            // them in place. Acceptable trade-off: Save export
+                            // reads the (corrected) log.
+                            let n_log = handles_closure.transcript_log
+                                .lock().unwrap()
+                                .relabel_since(from_sample, new_speaker_id);
+                            let (n_buf, display) = {
+                                let mut buf = handles_closure.caption_buffer.lock().unwrap();
+                                let n = buf.relabel_since(from_sample, new_speaker_id);
+                                (n, buf.display_text())
+                            };
+                            if n_log + n_buf > 0 {
+                                eprintln!(
+                                    "info: diarization: relabeled {n_log} log fragment(s), {n_buf} overlay line(s) to Speaker {}",
+                                    new_speaker_id + 1,
+                                );
+                            }
+                            if n_buf > 0 {
+                                let cfg_snapshot = handles_closure.config.lock().unwrap().clone();
+                                panel::set_caption_text(
+                                    &handles_closure.panel,
+                                    &handles_closure.label,
+                                    &display,
+                                    mtm,
+                                    &cfg_snapshot,
+                                );
+                            }
+                        }
                     }
                 });
             }
@@ -392,6 +449,14 @@ fn handle_overlay_command(
         }
         OverlayCommand::SetCaption(_text) => {
             // SetCaption is handled via the caption-bridge; this arm is a no-op.
+        }
+        OverlayCommand::SetSpeakerNames(_names) => {
+            // TODO (Phase 3): Update CaptionBuffer and TranscriptLog speaker name maps.
+            // For now, this is a no-op until the rename dialog is implemented.
+        }
+        OverlayCommand::ShowRenameDialog => {
+            // TODO (Phase 3): Show the speaker rename dialog.
+            // For now, this is a no-op until the dialog is implemented.
         }
     }
 }

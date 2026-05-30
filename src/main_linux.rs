@@ -340,6 +340,20 @@ pub fn main() {
         } else {
             println!("Nemotron models already present, skipping download.");
         }
+
+        // Always download the Sortformer diarization model (skipped if present).
+        if !models::diarization_models_present() {
+            println!("Downloading Sortformer diarization model (first run)...");
+            models::ensure_diarization_models().await
+                .unwrap_or_else(|e| {
+                    eprintln!("warn: failed to download Sortformer model: {e:#}");
+                    eprintln!("hint: diarization will be unavailable until the model is downloaded");
+                    // Non-fatal: the app can still run with STT-only.
+                });
+            println!("Sortformer diarization model ready.");
+        } else {
+            println!("Sortformer model already present, skipping download.");
+        }
     });
 
     // Shared wake primitive: PipeWire RT callback notifies, STT thread waits.
@@ -374,6 +388,10 @@ pub fn main() {
     // Captions-enabled flag: read by STT thread to skip inference, by tray/overlay for UI.
     let captions_enabled = Arc::new(AtomicBool::new(!args.start_disabled));
 
+    // Diarization-enabled flag: shared between STT thread and tray. Written by
+    // tray toggle, read by STT thread each wake cycle.
+    let diarization_enabled = Arc::new(AtomicBool::new(cfg.diarization_enabled));
+
     // Lock-free engine selection. Tray writes this; STT thread reads on each chunk.
     let engine_choice = Arc::new(ArcSwap::from_pointee(cfg.engine.clone()));
 
@@ -386,7 +404,7 @@ pub fn main() {
     // Caption and command channels to the GTK main loop.
     // async-channel integrates with glib::MainContext::spawn_local so the GTK
     // side consumes them as futures rather than via 100ms polling.
-    let (caption_tx, caption_rx) = async_channel::unbounded::<String>();
+    let (caption_tx, caption_rx) = async_channel::unbounded::<overlay::CaptionEvent>();
     let (cmd_tx, cmd_rx) = async_channel::unbounded::<overlay::OverlayCommand>();
 
     // Spawn the combined STT pipeline: ring consumer + resampler + engine + caption sender.
@@ -400,6 +418,9 @@ pub fn main() {
             unload_after,
             model_dir: model_dir.clone(),
             use_cuda,
+            diarization_enabled: Arc::clone(&diarization_enabled),
+            diarization_preset: cfg.diarization_preset.clone(),
+            diarization_model_dir: models::diarization_model_dir(),
         },
     );
 
@@ -412,6 +433,7 @@ pub fn main() {
         above_fullscreen: cfg.above_fullscreen,
         active_engine: cfg.engine.clone(),
         using_gpu: use_cuda,
+        diarization_enabled: Arc::clone(&diarization_enabled),
         overlay_tx: cmd_tx.clone(),
         audio_tx: audio_cmd_tx.clone(),
         engine_choice: Arc::clone(&engine_choice),
@@ -443,13 +465,13 @@ pub fn main() {
             // Uses the captured Handle to run the async update on the Tokio runtime.
             tokio_handle.block_on(async {
                 tray_handle_for_fallback.update(|tray: &mut tray::TrayState| {
-                    tray.active_source = crate::config::AudioSource::SystemOutput;
+                    tray.active_source = config::AudioSource::SystemOutput;
                 }).await;
             });
 
             // Update config.
-            let mut cfg = crate::config::Config::load();
-            cfg.audio_source = crate::config::AudioSource::SystemOutput;
+            let mut cfg = Config::load();
+            cfg.audio_source = config::AudioSource::SystemOutput;
             let _ = cfg.save();
         }
     });
@@ -489,7 +511,7 @@ pub fn main() {
         let _ = cmd_tx.send_blocking(overlay::OverlayCommand::SetVisible(false));
     }
 
-    overlay::run_gtk_app(cfg, caption_rx, cmd_rx, Arc::clone(&captions_enabled));
+    overlay::run_gtk_app(cfg, caption_rx, cmd_rx, cmd_tx.clone(), Arc::clone(&captions_enabled));
 
     exit_without_atexit(0)
 }

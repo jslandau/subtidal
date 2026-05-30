@@ -53,6 +53,13 @@ const NEMOTRON_FILES: &[(&str, &str)] = &[
     ("nemotron-speech-streaming-en-0.6b/tokenizer.model", "tokenizer.model"),
 ];
 
+/// HuggingFace repo and file path for the Sortformer diarization model.
+const SORTFORMER_REPO: &str = "altunenes/parakeet-rs";
+const SORTFORMER_FILE: (&str, &str) = (
+    "diar_streaming_sortformer_4spk-v2.1.onnx",
+    "diar_streaming_sortformer_4spk-v2.1.onnx",
+);
+
 /// Returns the local paths for every required Nemotron model file inside the
 /// given base models directory (i.e. the parent of the `nemotron/` subdir).
 pub fn nemotron_model_files_in(base_dir: &Path) -> Vec<PathBuf> {
@@ -63,6 +70,11 @@ pub fn nemotron_model_files_in(base_dir: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Returns the local path for the Sortformer model file inside the given base directory.
+pub fn diarization_model_file_in(base_dir: &Path) -> PathBuf {
+    base_dir.join("diarization").join(SORTFORMER_FILE.1)
+}
+
 /// Returns true if all required Nemotron model files are present on disk in the given directory.
 pub fn nemotron_models_present_in(dir: &Path) -> bool {
     nemotron_model_files_in(dir).iter().all(|p| p.exists())
@@ -71,6 +83,58 @@ pub fn nemotron_models_present_in(dir: &Path) -> bool {
 /// Returns true if all required Nemotron model files are present on disk.
 pub fn nemotron_models_present() -> bool {
     nemotron_models_present_in(&models_dir())
+}
+
+/// Returns the directory for Sortformer diarization model files.
+#[cfg(target_os = "linux")]
+pub fn diarization_model_dir() -> PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("subtidal")
+        .join("models")
+        .join("diarization")
+}
+
+#[cfg(target_os = "macos")]
+pub fn diarization_model_dir() -> PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("Subtidal")
+        .join("models")
+        .join("diarization")
+}
+
+/// Returns true if the Sortformer model file is present on disk.
+pub fn diarization_models_present() -> bool {
+    diarization_model_dir().join(SORTFORMER_FILE.1).exists()
+}
+
+/// Download the Sortformer diarization model to `diarization_model_dir()` (per-OS data dir).
+/// Skips download if the file already exists.
+pub async fn ensure_diarization_models() -> Result<()> {
+    let dest_dir = diarization_model_dir();
+    std::fs::create_dir_all(&dest_dir)
+        .with_context(|| format!("creating {}", dest_dir.display()))?;
+
+    let dest = dest_dir.join(SORTFORMER_FILE.1);
+    if dest.exists() {
+        eprintln!("info: Sortformer model file already present: {}", dest.display());
+        return Ok(());
+    }
+
+    eprintln!("info: downloading Sortformer diarization model (~492 MB) ...");
+
+    let api = hf_hub::api::tokio::Api::new()
+        .context("initializing HuggingFace API")?;
+    let repo = api.model(SORTFORMER_REPO.to_string());
+
+    let cached = repo.get(SORTFORMER_FILE.0).await
+        .with_context(|| format!("downloading {} from {SORTFORMER_REPO}", SORTFORMER_FILE.0))?;
+    copy_model_file(&cached, &dest)
+        .with_context(|| format!("copying Sortformer model to {}", dest.display()))?;
+    eprintln!("info: Sortformer model saved to {}", dest.display());
+
+    Ok(())
 }
 
 /// Download all Nemotron model files to `nemotron_model_dir()` (per-OS data dir).

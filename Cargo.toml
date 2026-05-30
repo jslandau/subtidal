@@ -63,7 +63,14 @@ async-channel = "2"
 # script invokes `cc` with macOS-only flags (-arch, -mmacosx-version-min,
 # -gfull) that fail when cross-compiling from Linux→x86_64-apple-darwin under
 # the macos-check CI, so we deliberately avoid the rustls path.
-hf-hub = { version = "0.5", default-features = false, features = ["tokio"] }
+#
+# Note: hf-hub with `tokio` uses reqwest for HTTP. reqwest's default-features
+# include `default-tls` (native-tls on most platforms), but since we set
+# `default-features = false` on hf-hub, reqwest also loses its defaults. We
+# must re-enable a TLS backend: `native-tls` uses the system TLS stack
+# (OpenSSL on Linux, Secure Transport on macOS), which avoids the ring
+# cross-compilation issue.
+hf-hub = { version = "0.5", default-features = false, features = ["tokio", "default-tls"] }
 
 # Linux-only crates and CUDA feature additions.
 # Resolver v2 (edition 2021 default) isolates the `cuda` feature on `ort` and
@@ -83,7 +90,7 @@ pipewire = "0.9"
 # STT (ort + parakeet-rs are Linux-only — they drag onig_sys/cc-bound C deps
 # that don't cross-compile from Linux to darwin).
 ort = { version = "2.0.0-rc.12", features = ["cuda"] }
-parakeet-rs = { version = "0.3.4", features = ["cuda"] }
+parakeet-rs = { version = "0.3.4", features = ["cuda", "sortformer"] }
 # Desktop notifications (notify-rust pulls in mac-notification-sys whose build
 # script fails when cross-compiling from Linux to darwin).
 notify-rust = "4"
@@ -97,7 +104,7 @@ libc = "0.2"
 # (aarch64-apple-darwin) is constrained by ort's prebuilt binary availability; Phase 7
 # adds x86_64-apple-darwin once ort supplies x86_64 wgpu prebuilts.
 [target.'cfg(target_os = "macos")'.dependencies]
-parakeet-rs = { version = "0.3.4", features = ["webgpu"] }
+parakeet-rs = { version = "0.3.4", features = ["webgpu", "sortformer"] }
 ort = { version = "2.0.0-rc.12", features = ["webgpu"] }
 # AppKit bindings (used Phase 2+); declared up-front so cross-target check exercises them.
 objc2 = "0.6"

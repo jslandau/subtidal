@@ -26,6 +26,39 @@ use std::sync::atomic::AtomicBool;
 
 use crate::config::{AppearanceConfig, OverlayMode};
 
+/// An event emitted by the STT pipeline to the overlay.
+///
+/// The pipeline emits `Append` for each Nemotron output and `Relabel` when
+/// Sortformer reports a speaker switch that began earlier than the most
+/// recent appends (retroactive attribution). Ordering on the channel is
+/// preserved, so a `Relabel` always arrives before subsequent `Append`s
+/// from the new speaker.
+#[derive(Debug, Clone)]
+pub enum CaptionEvent {
+    /// A new recognised caption fragment.
+    ///
+    /// `text`: Nemotron output (may include leading/trailing whitespace
+    /// that signals word boundaries).
+    /// `speaker_id`: dominant speaker for this audio window when
+    /// diarization is active, otherwise `None`. May be later corrected by
+    /// a `Relabel` event whose `from_sample <= emit_sample`.
+    /// `emit_sample`: count of 16 kHz mono samples fed to the diarization
+    /// engine at the time this fragment was emitted. `0` when diarization
+    /// is off — used by `Relabel` to identify which captions to rewrite.
+    Append {
+        text: String,
+        speaker_id: Option<u32>,
+        emit_sample: u64,
+    },
+    /// Retroactively re-attribute captions emitted at or after `from_sample`
+    /// to `new_speaker_id`. Issued when Sortformer reveals (at most a few
+    /// captions late) that the speaker actually switched at `from_sample`.
+    Relabel {
+        from_sample: u64,
+        new_speaker_id: u32,
+    },
+}
+
 #[derive(Debug, Clone)]
 pub enum OverlayCommand {
     /// Show or hide the overlay.
@@ -47,6 +80,12 @@ pub enum OverlayCommand {
     /// TextBuffer, CaptionBuffer, overlay label). On the enable edge no
     /// action is needed — the prior disable already cleared everything.
     SetCaptionsEnabled(bool),
+    /// Update speaker display names. The HashMap maps 0-based speaker IDs
+    /// to user-chosen display names (e.g. 0 → "Alice"). Unmapped speakers
+    /// render as "Speaker {id+1}".
+    SetSpeakerNames(std::collections::HashMap<u32, String>),
+    /// Show the speaker rename dialog (triggered from tray).
+    ShowRenameDialog,
     /// Quit the application cleanly (sent by tray Quit and SIGTERM handler).
     Quit,
 }

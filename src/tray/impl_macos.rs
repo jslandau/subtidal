@@ -47,6 +47,9 @@ use std::sync::{Arc, Mutex};
 pub struct TrayState {
     pub config: Arc<Mutex<Config>>,
     pub captions_enabled: Arc<AtomicBool>,
+    /// Whether speaker diarization is enabled. Shared with the STT pipeline thread.
+    /// Toggled from the tray menu on Linux; macOS tray integration is deferred.
+    pub diarization_enabled: Arc<AtomicBool>,
     pub cmd_tx: async_channel::Sender<OverlayCommand>,
     pub audio_cmd_tx: SyncSender<AudioCommand>,
     pub engine_choice: Arc<ArcSwap<Engine>>,

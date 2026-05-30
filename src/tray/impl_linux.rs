@@ -20,6 +20,8 @@ pub struct TrayState {
     pub above_fullscreen: bool,
     pub active_engine: Engine,
     pub using_gpu: bool,
+    /// Whether speaker diarization is enabled. Shared with the STT pipeline thread.
+    pub diarization_enabled: Arc<AtomicBool>,
     /// Channel to send OverlayCommand to the GTK4 main thread.
     pub overlay_tx: async_channel::Sender<OverlayCommand>,
     /// Channel to send AudioCommand to the PipeWire thread.
@@ -195,6 +197,32 @@ impl Tray for TrayState {
                 checked: self.captions_enabled.load(Ordering::Relaxed),
                 activate: Box::new(|tray: &mut TrayState| {
                     tray.toggle_captions();
+                }),
+                ..Default::default()
+            }
+            .into(),
+
+            // --- Diarization on/off ---
+            CheckmarkItem {
+                label: "Diarization".to_string(),
+                checked: self.diarization_enabled.load(Ordering::Relaxed),
+                activate: Box::new(|tray: &mut TrayState| {
+                    let prev = tray.diarization_enabled.load(Ordering::Relaxed);
+                    tray.diarization_enabled.store(!prev, Ordering::Relaxed);
+                    eprintln!("info: diarization {}", if !prev { "enabled" } else { "disabled" });
+                }),
+                ..Default::default()
+            }
+            .into(),
+
+            // --- Rename speakers... ---
+            // Enabled regardless of diarization state so users can pre-set
+            // names before turning diarization on. No-op when nothing is
+            // displayed.
+            StandardItem {
+                label: "Rename Speakers...".to_string(),
+                activate: Box::new(|tray: &mut TrayState| {
+                    let _ = tray.overlay_tx.send_blocking(OverlayCommand::ShowRenameDialog);
                 }),
                 ..Default::default()
             }
@@ -474,6 +502,7 @@ mod tests {
             above_fullscreen: false,
             active_engine: Engine::Nemotron,
             using_gpu: false,
+            diarization_enabled: Arc::new(AtomicBool::new(false)),
             overlay_tx,
             audio_tx,
             engine_choice,
@@ -507,6 +536,7 @@ mod tests {
             above_fullscreen: false,
             active_engine: Engine::Nemotron,
             using_gpu: false,
+            diarization_enabled: Arc::new(AtomicBool::new(false)),
             overlay_tx,
             audio_tx,
             engine_choice,
@@ -539,6 +569,7 @@ mod tests {
             above_fullscreen: false,
             active_engine: Engine::Nemotron,
             using_gpu: false,
+            diarization_enabled: Arc::new(AtomicBool::new(false)),
             overlay_tx,
             audio_tx,
             engine_choice,
@@ -582,6 +613,7 @@ mod tests {
             above_fullscreen: false,
             active_engine: Engine::Nemotron,
             using_gpu: false,
+            diarization_enabled: Arc::new(AtomicBool::new(false)),
             overlay_tx,
             audio_tx,
             engine_choice,
@@ -610,6 +642,7 @@ mod tests {
             above_fullscreen: false,
             active_engine: Engine::Nemotron,
             using_gpu: false,
+            diarization_enabled: Arc::new(AtomicBool::new(false)),
             overlay_tx,
             audio_tx,
             engine_choice,

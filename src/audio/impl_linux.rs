@@ -290,6 +290,8 @@ fn create_capture_stream<'a>(
     let target_node = match source {
         crate::config::AudioSource::SystemOutput => None,
         crate::config::AudioSource::Application { node_id, .. } => Some(node_id.to_string()),
+        // App source is macOS-only; on Linux it should not appear but we handle it gracefully.
+        crate::config::AudioSource::App { .. } => None,
     };
 
     let mut stream_props = properties! {
@@ -404,6 +406,11 @@ pub fn validate_audio_source(
                 eprintln!("warn: falling back to system output");
                 crate::config::AudioSource::SystemOutput
             }
+        }
+        // App source is macOS-only; on Linux fall back to SystemOutput.
+        crate::config::AudioSource::App { .. } => {
+            eprintln!("warn: App source not supported on Linux; falling back to system output");
+            crate::config::AudioSource::SystemOutput
         }
     }
 }

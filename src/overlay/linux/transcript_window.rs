@@ -224,10 +224,14 @@ pub fn build_transcript_window(
 /// Tracks autoscroll position: if the view was near the bottom before insertion,
 /// schedules a scroll-to-bottom for after layout. If scrolled up, new text arrives
 /// silently (the user can scroll back down when ready).
+///
+/// `speaker_names` provides display-name overrides for diarization labels.
+/// Unmapped speaker IDs fall back to "Speaker {N+1}".
 pub fn append_fragment_to_view(
     state: &TranscriptWindowState,
     fragment: &Fragment,
     kind: AppendKind,
+    speaker_names: &std::collections::HashMap<u32, String>,
 ) {
     // 1. Sample autoscroll position BEFORE inserting.
     let was_at_bottom = is_near_bottom(&state.scrolled);
@@ -243,6 +247,16 @@ pub fn append_fragment_to_view(
         state
             .buffer
             .insert_with_tags(&mut end, &timestamp_text, &[&state.timestamp_tag]);
+
+        // If diarization is active, prepend the speaker label.
+        if let Some(speaker_id) = fragment.speaker_id {
+            let display = speaker_names
+                .get(&speaker_id)
+                .cloned()
+                .unwrap_or_else(|| format!("Speaker {}", speaker_id + 1));
+            let label = format!("{display}: ");
+            state.buffer.insert(&mut end, &label);
+        }
     }
 
     // 3. Insert the fragment text (whitespace verbatim — the leading-space
@@ -250,6 +264,59 @@ pub fn append_fragment_to_view(
     state.buffer.insert(&mut end, &fragment.text);
 
     // 4. If we were tailing, schedule a scroll-to-bottom for after layout.
+    if was_at_bottom {
+        let scrolled = state.scrolled.clone();
+        glib::idle_add_local_once(move || {
+            let adj = scrolled.vadjustment();
+            adj.set_value(adj.upper() - adj.page_size());
+        });
+    }
+}
+
+/// Re-render the entire transcript view from a `TranscriptLog`. Used after a
+/// `SetSpeakerNames` update to refresh embedded labels in the view. Cheaper
+/// than walking the buffer and patching individual paragraphs, and correct
+/// regardless of which fragments are visible.
+///
+/// Re-renders by clearing the view and re-appending every fragment in
+/// `log.fragments()`, deciding paragraph breaks via `TranscriptLog`'s own
+/// gap+speaker rules. The autoscroll position is preserved across the rebuild
+/// when the view was near the bottom before.
+pub fn rebuild_view(
+    state: &TranscriptWindowState,
+    log: &crate::overlay::transcript_log::TranscriptLog,
+    speaker_names: &std::collections::HashMap<u32, String>,
+) {
+    let was_at_bottom = is_near_bottom(&state.scrolled);
+
+    // Clear and re-render.
+    let (mut s, mut e) = (state.buffer.start_iter(), state.buffer.end_iter());
+    state.buffer.delete(&mut s, &mut e);
+
+    // Derive paragraph break locally using the same rule as TranscriptLog::push_at:
+    // first fragment, gap > 1.5s, or speaker change.
+    let paragraph_gap_secs = 1.5_f64;
+    let mut prev: Option<&Fragment> = None;
+    for frag in log.fragments() {
+        let kind = match prev {
+            None => AppendKind::NewParagraph,
+            Some(p) => {
+                let speaker_change = frag.speaker_id.is_some()
+                    && p.speaker_id.is_some()
+                    && frag.speaker_id != p.speaker_id;
+                let gap = frag.timestamp.signed_duration_since(p.timestamp);
+                let secs = gap.num_milliseconds() as f64 / 1000.0;
+                if speaker_change || secs > paragraph_gap_secs {
+                    AppendKind::NewParagraph
+                } else {
+                    AppendKind::ContinueParagraph
+                }
+            }
+        };
+        append_fragment_to_view(state, frag, kind, speaker_names);
+        prev = Some(frag);
+    }
+
     if was_at_bottom {
         let scrolled = state.scrolled.clone();
         glib::idle_add_local_once(move || {

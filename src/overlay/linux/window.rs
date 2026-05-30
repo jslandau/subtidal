@@ -234,6 +234,7 @@ mod tests {
             height: 0,
             expire_secs: 8,
             char_width_fraction: 0.95,
+            font_family: "monospace".to_string(),
         };
         let css = build_css(&appearance);
 

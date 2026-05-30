@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use notify_debouncer_mini::{new_debouncer, DebounceEventResult};
@@ -13,6 +14,24 @@ pub enum Engine {
     #[default]
     #[serde(alias = "parakeet")]
     Nemotron,
+}
+
+/// Diarization quality preset for the Sortformer model.
+/// Controls post-processing thresholds for speaker segmentation.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiarizationPreset {
+    /// CallHome dataset threshold — good default for conversational speech.
+    #[default]
+    Callhome,
+    /// DIHARD3 dataset threshold — more aggressive segmentation.
+    Dihard3,
+    /// Custom thresholds with full manual control.
+    Custom {
+        onset: f64,
+        offset: f64,
+        min_seg_duration: f64,
+    },
 }
 
 /// The audio source to capture from.
@@ -202,6 +221,20 @@ pub struct Config {
     #[serde(default)]
     pub appearance: AppearanceConfig,
 
+    /// Whether speaker diarization is enabled. Default: false (opt-in).
+    #[serde(default)]
+    pub diarization_enabled: bool,
+
+    /// Diarization quality preset. Default: Callhome.
+    #[serde(default)]
+    pub diarization_preset: DiarizationPreset,
+
+    /// Session-scoped speaker display names. Not persisted to config —
+    /// reset on each launch because speaker identity is not stable across sessions.
+    /// Populated at runtime via the rename dialog.
+    #[serde(skip)]
+    pub speaker_names: HashMap<u32, String>,
+
     /// Seconds after captions are disabled before the model is unloaded from VRAM.
     /// Set to 0 to never unload. Default: 300 (5 minutes).
     #[serde(default = "default_vram_unload_secs")]
@@ -233,6 +266,9 @@ impl Default for Config {
             dock_position: DockPosition::default(),
             appearance: AppearanceConfig::default(),
             vram_unload_secs: default_vram_unload_secs(),
+            diarization_enabled: false,
+            diarization_preset: DiarizationPreset::default(),
+            speaker_names: HashMap::new(),
             config_file_path: None,
         }
     }

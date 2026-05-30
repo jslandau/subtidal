@@ -39,6 +39,23 @@ pub fn main() {
         });
     }
 
+    // Always download the Sortformer diarization model (skipped if present).
+    if !models::diarization_models_present() {
+        println!("Downloading Sortformer diarization model (first run)...");
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        rt.block_on(async {
+            models::ensure_diarization_models().await
+                .unwrap_or_else(|e| {
+                    eprintln!("warn: failed to download Sortformer model: {e:#}");
+                    eprintln!("hint: diarization will be unavailable until the model is downloaded");
+                });
+        });
+        println!("Sortformer diarization model ready.");
+    }
+
     // 3b. Request notification authorization (best-effort, ignore result).
     // This surfaces the macOS notification permission prompt. If denied,
     // notifications silently fail but the audio watchdog and captions still work.
@@ -83,8 +100,11 @@ pub fn main() {
     // 7. Construct shared state: captions_enabled flag.
     let captions_enabled: CaptionsEnabled = Arc::new(AtomicBool::new(true));
 
+    // Diarization-enabled flag: shared between STT thread and tray.
+    let diarization_enabled = Arc::new(AtomicBool::new(config.diarization_enabled));
+
     // 8. Build async channels for captions and overlay commands.
-    let (caption_tx, caption_rx) = async_channel::unbounded::<String>();
+    let (caption_tx, caption_rx) = async_channel::unbounded::<overlay::CaptionEvent>();
     let (cmd_tx, cmd_rx) = async_channel::unbounded::<OverlayCommand>();
 
     // 9. Start Core Audio Process Tap audio capture. This spawns the audio-tap-worker
@@ -121,6 +141,9 @@ pub fn main() {
         unload_after: Some(std::time::Duration::from_secs(8)), // default from Linux
         model_dir: model_dir.clone(),
         use_cuda: true, // Request WebGPU on macOS; CPU fallback is automatic.
+        diarization_enabled: Arc::clone(&diarization_enabled),
+        diarization_preset: config.diarization_preset.clone(),
+        diarization_model_dir: models::diarization_model_dir(),
     };
     let _stt_handle = stt::spawn_stt_thread(
         ring_consumer,
@@ -167,6 +190,7 @@ pub fn main() {
     let tray_state = tray::TrayState {
         config: Arc::new(std::sync::Mutex::new(config.clone())),
         captions_enabled: Arc::clone(&captions_enabled),
+        diarization_enabled: Arc::clone(&diarization_enabled),
         cmd_tx: cmd_tx.clone(),
         audio_cmd_tx: audio_cmd_tx.clone(),
         engine_choice: Arc::clone(&engine_choice),

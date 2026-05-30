@@ -2,7 +2,7 @@
 
 Real-time speech-to-text overlay for Linux/Wayland and macOS.
 
-Freshness: 2026-05-21
+Freshness: 2026-05-30
 
 ## Purpose
 
@@ -28,6 +28,7 @@ audio/impl_macos/notify.rs   — UNUserNotificationCenter helper for source-disa
 audio/resampler.rs           — rubato 48kHz stereo -> 16kHz mono resampler (platform-neutral)
 stt/mod.rs                   — SttEngine trait + AudioWake + spawn_stt_thread / build_engine / `mod nemotron` (all platform-neutral; engine selects CUDA vs WebGPU vs CPU at runtime)
 stt/nemotron.rs              — Nemotron RNNT engine (ort + parakeet-rs); CUDA on Linux, WebGPU on macOS, CPU fallback on both
+stt/diarization.rs           — Streaming Sortformer v2.1 diarization engine (parakeet-rs `sortformer` feature); CUDA on Linux, WebGPU on macOS, CPU fallback. Lazy-loaded when `diarization_enabled` flips true; dropped on toggle off to free VRAM
 overlay/mod.rs               — neutral: OverlayCommand, CaptionsEnabled; re-exports overlay/linux on Linux, overlay/macos on macOS
 overlay/caption_buffer.rs    — pure text buffer: line-fill, overlap dedup, expiry (GTK-free, well-tested) [neutral]
 overlay/transcript_log.rs    — pure data: timestamped fragments, paragraph coalescing, .json serialization (GTK-free, well-tested) [neutral]
@@ -36,6 +37,7 @@ overlay/linux/window.rs      — GTK4 layer-shell window construction (docked/fl
 overlay/linux/drag.rs        — floating-mode drag gesture with compositor-quirk coordinate compensation
 overlay/linux/input_region.rs — Wayland input region for click-through
 overlay/linux/transcript_window.rs — GTK4 toplevel window for transcript mode: scrollable TextView, autoscroll, Save dialog
+overlay/linux/rename_dialog.rs — GTK4 modal `show_rename_dialog(parent, current_names, cmd_tx)`; 4 fixed slots (Sortformer max speakers); Apply dispatches `OverlayCommand::SetSpeakerNames`
 overlay/macos/mod.rs         — neutral shell for macOS overlay subtree
 overlay/macos/app.rs         — NSApplication wiring; OverlayCommand dispatch (SetVisible/SetMode/SetLocked/UpdateAppearance/SetCaptionsEnabled with 4-surface clear); caption bridge routes through CaptionBuffer + TranscriptLog; 1s NSTimer drives caption expiry
 overlay/macos/panel.rs       — NSPanel construction + `apply_geometry(panel, mtm, mode, config)` for Docked/Floating/Transcript without rebuild; `SubtidalScreenObserver` for NSApplicationDidChangeScreenParametersNotification
@@ -51,7 +53,7 @@ tray/impl_macos.rs           — NSStatusItem + NSMenu with `SubtidalTrayActions
 **Linux:**
 1. **Main/GTK thread** — GTK4 main loop. Consumes `async_channel::Receiver` for captions and overlay commands via `glib::MainContext::spawn_local` futures; no polling.
 2. **PipeWire thread** (`pipewire-audio`) — captures audio into the ring buffer and processes AudioCommand. After each successful push, calls `AudioWake::notify()`.
-3. **STT pipeline thread** (`stt-pipeline`) — blocks on `AudioWake::wait_timeout(250ms)`, drains the ring buffer, resamples via rubato, reads `ArcSwap<Engine>` to get the current engine choice, builds/rebuilds the engine as needed, runs `SttEngine::process_chunk`, sends captions via `async_channel::Sender`.
+3. **STT pipeline thread** (`stt-pipeline`) — blocks on `AudioWake::wait_timeout(250ms)`, drains the ring buffer, resamples via rubato, reads `ArcSwap<Engine>` to get the current engine choice, builds/rebuilds the engine as needed, runs `SttEngine::process_chunk`, sends captions via `async_channel::Sender`. When `diarization_enabled` is set, the same thread also feeds resampled PCM into a lazily-constructed `DiarizationEngine` (Sortformer), tracks `samples_fed_to_diar` + `current_speaker_last_end`, and emits `CaptionEvent::Append { speaker_id, emit_sample }` plus retroactive `CaptionEvent::Relabel { from_sample, new_speaker_id }` events on speaker transitions.
 4. **Tray thread** — ksni runs on the tokio runtime.
 
 **macOS:**
@@ -96,14 +98,31 @@ Engine changes are a lock-free `ArcSwap::store` read at the next chunk boundary.
 - **macOS drag persistence** (`overlay/macos/drag.rs`, Phase 6): `SubtidalDragObserver` observes `NSWindowDidMoveNotification` and writes `panel.frame.origin` back into `config.position` through `Config::save()`. The save path is the same one hot-reload watches, so writes must round-trip without re-triggering the debouncer beyond the normal SetMode-suppression logic.
 - **macOS transcript window** (`overlay/macos/transcript_window.rs`, Phase 6): NSWindow + NSScrollView + NSTextView with a Save NSButton wired to `SubtidalTranscriptActions` which spawns an NSSavePanel and writes `TranscriptLog::to_json`. The window is returned as a `TranscriptWindow { state, actions }` bundle so the caller keeps `actions` alive — NSButton's `setTarget:` is weak.
 - **Caption bridge ownership** (`overlay/macos/app.rs`, Phase 6): the caption bridge is the sole caller of `TranscriptLog::push()`. `transcript_window::append_fragment` only re-renders the view from existing log state. Splitting these responsibilities prevents the double-push that surfaced during integration.
+- **CaptionEvent** (`overlay/mod.rs`, diarization branch — BREAKING vs the earlier struct-shaped scaffold): now an enum.
+  - `Append { text: String, speaker_id: Option<u32>, emit_sample: u64 }` — normal caption append. `emit_sample` is in the diarization engine's sample-count frame (matches Sortformer's `elapsed_samples`).
+  - `Relabel { from_sample: u64, new_speaker_id: u32 }` — retroactive re-attribution. Ordered ahead of subsequent `Append`s from the new speaker on the same channel so the overlay sees Relabel before the new speaker's first caption.
+- **Diarization engine** (`stt/diarization.rs`): wraps `parakeet_rs::sortformer::Sortformer` v2.1 using NVIDIA's shipped low-latency preset (`chunk_len=6, right_context=7, fifo_len=188, spkcache_len=188`) — 1.04 s latency with flat DER vs the offline preset (arxiv 2507.18446 Table 2; HF model card). Max 4 speakers. Model: `diar_streaming_sortformer_4spk-v2.1.onnx` from `altunenes/parakeet-rs` HF repo (~492 MB).
+- **Relabel boundary computation** (STT pipeline thread): first-speaker detection is silent — it just primes `current_speaker` and emits no Relabel. Subsequent transitions emit `Relabel { from_sample = max(seg.start - RELABEL_LOOKBACK_SAMPLES, min(current_speaker_last_end, new_seg.start)) }`. `RELABEL_LOOKBACK_SAMPLES = 32_000` (2 s @ 16 kHz) bounds damage when Sortformer's `min_duration_on=0.511s` filter drops a brief in-between speaker entirely. `current_speaker_last_end`, `samples_fed_to_diar`, and `current_speaker` all reset on toggle-off.
+- **Fragment / CaptionLine schema** (diarization branch):
+  - `transcript_log::Fragment` gained `speaker_id: Option<u32>` (skip-serialize-if-none; included in JSON export) and `emit_sample: u64` (not serialized — implementation detail consumed by `relabel_since`).
+  - `caption_buffer::CaptionLine` gained `speaker_id: Option<u32>`, `earliest_emit_sample: u64`, `latest_emit_sample: u64`.
+- **TranscriptLog speaker APIs** (`overlay/transcript_log.rs`): `push_with_speaker(text, speaker_id)`, `push_with_speaker_and_sample(text, speaker_id, emit_sample)`, `push_at_with_speaker(text, speaker_id, emit_sample, ts)`, `relabel_since(from_sample, new_speaker_id) -> usize`. The paragraph-break rule is extended: a speaker change now forces `AppendKind::NewParagraph` in addition to the existing time-gap rule.
+- **CaptionBuffer speaker APIs** (`overlay/caption_buffer.rs`): `push_with_speaker` / `push_with_speaker_and_sample`; `speaker_names: HashMap<u32, String>` field (duplicates `Config.speaker_names`, kept in sync by `SetSpeakerNames`); `relabel_since(from_sample, new_speaker_id) -> usize` with three-case logic — fully-past line (rewrite `speaker_id` AND substitute embedded label text), straddling line (rewrite `speaker_id` only; embedded label text preserved because layout would otherwise re-flow mid-line), older line (skip). `last_speaker_id` only advances when an embedded label substitution actually happens, so the next push falls through to the normal speaker-change labeling path and the new speaker remains visually identifiable. Speaker-change finalises the current line by inserting an empty new line before the labeled push, and clears `last_tail` so overlap-dedup does not eat the start of the new speaker's fragment.
+- **OverlayCommand additions**: `SetSpeakerNames(HashMap<u32, String>)` — updates `Config.speaker_names`, `CaptionBuffer.speaker_names`, substitutes embedded label prefixes on existing lines, rebuilds transcript view. `ShowRenameDialog` — opens the GTK4 rename dialog on Linux; no-op TODO on macOS.
+- **Diarization config** (`config.rs`): `Config.diarization_enabled: bool` (default false); `Config.diarization_preset: DiarizationPreset` enum (`Callhome` default, `Dihard3`, `Custom { onset, offset, min_seg_duration }`); `Config.speaker_names: HashMap<u32, String>` with `#[serde(skip)]` — session-scoped because Sortformer's 0..3 IDs are not stable across launches.
+- **PipelineConfig diarization fields** (`stt/mod.rs`): `diarization_enabled: Arc<AtomicBool>` (shared with the tray for the checkmark item), `diarization_preset: DiarizationPreset`, `diarization_model_dir: PathBuf`.
+- **Diarization model download** (`models/mod.rs`): `diarization_model_dir()`, `diarization_models_present()`, `diarization_model_file_in()`, `ensure_diarization_models()` download the Sortformer ONNX into the `diarization/` subdir of the per-OS data dir. Download failure is non-fatal — diarization simply stays disabled.
+- **Tray diarization wiring**: `TrayState.diarization_enabled: Arc<AtomicBool>` exists on both platforms. Linux tray has the "Diarization" CheckmarkItem and "Rename Speakers..." StandardItem wired. macOS tray menu items for both are deferred (field exists; no menu surface yet).
+- **Signature changes from this branch**: `run_gtk_app(config, caption_rx, cmd_rx, cmd_tx, captions_enabled)` — the new `cmd_tx` lets the rename dialog dispatch `SetSpeakerNames` back into the same command queue. `transcript_window::append_fragment_to_view(state, fragment, kind, speaker_names: &HashMap<u32, String>)` — old code hardcoded `"Speaker {N+1}"`; new code honors user-provided names. New `transcript_window::rebuild_view(state, log, speaker_names)` for full re-render on `SetSpeakerNames`.
+- **Linux AudioSource::App arms**: `audio::impl_linux.rs` now matches `AudioSource::App { .. }` (a macOS-only variant) by falling back to SystemOutput with a warning. Without these arms the Linux build was actually broken on master.
 
 ## Dependencies (key crates)
 
 **Cross-platform:**
 - rubato 1.0 — sample rate conversion
 - ort 2.0.0-rc.12 — ONNX Runtime inference (`cuda` on Linux, `webgpu` on macOS)
-- parakeet-rs 0.3 — Nemotron RNNT decoder (`cuda` on Linux, `webgpu` on macOS)
-- hf-hub 0.5 — model download
+- parakeet-rs 0.3 — Nemotron RNNT decoder + streaming Sortformer diarizer. Features: `cuda` + `sortformer` on Linux, `webgpu` + `sortformer` on macOS.
+- hf-hub 0.5 — model download. Uses `tokio` + `default-tls` features: `tokio` pulls in reqwest with `default-features = false`, which strips reqwest's TLS too. Re-enabling `default-tls` (native-tls / system OpenSSL on Linux, Secure Transport on macOS) avoids the ring cross-compilation issue that breaks `macos-check` CI.
 - notify 6 + notify-debouncer-mini 0.4 — config file watching
 - chrono 0.4 — timestamps for transcript fragments and Save filenames
 - serde_json 1 — transcript .json export sidecar
@@ -134,6 +153,8 @@ Engine changes are a lock-free `ArcSwap::store` read at the next chunk boundary.
 - Config save failures are warned but never fatal.
 - Ring buffer overflow drops samples silently (preferred over blocking RT callback).
 - **AppKit `setTarget:` is weak.** Any `define_class!` action target (tray actions, transcript Save button, drag/screen observers) must be owned by something that outlives the menu/button/notification — return it in a bundle (e.g. `TranscriptWindow { state, actions }`) or stash it in a `let _binding = ...` in `main_macos.rs`. Pointing `setTarget:` at an unrelated long-lived object (NSStatusItem, the panel) raises `NSInvalidArgumentException` on first click — a real bug we hit and reverted twice.
+- **First speaker detection is silent.** The diarization pipeline never emits `Relabel` for the *first* detected speaker — it just primes `current_speaker`. Only subsequent transitions emit Relabel events. Violating this would retroactively re-attribute the entire transcript on the first detected segment boundary.
+- **`CaptionBuffer.last_speaker_id` advances conditionally.** It only updates when an embedded label substitution actually fires inside `relabel_since`'s fully-past branch. If it advanced unconditionally, the next speaker-change push would skip the labeling path and the new speaker would be visually indistinguishable in the overlay.
 - **Canonical `objc2 0.6 define_class!` pattern lives at the top of `src/tray/impl_macos.rs`.** New macOS Obj-C subclasses (`SubtidalDragObserver`, `SubtidalScreenObserver`, `SubtidalTranscriptActions`, future ones) should mirror that structure rather than reinvent it — `objc2` 0.6 changed the macro shape vs. older examples on the web.
 
 ## Build & Run
@@ -180,6 +201,10 @@ Subtidal supports Linux and macOS. All platform-specific code is cfg-gated; the 
 
 - **Linux:** `impl_linux.rs` / `linux/` subtrees under `audio/`, `overlay/`, `tray/`; `main_linux.rs`. Audio via PipeWire, overlay via GTK4 layer-shell, tray via ksni StatusNotifierItem. CUDA on `ort` + `parakeet-rs` when available; CPU fallback automatic.
 - **macOS:** `impl_macos.rs` / `impl_macos/` / `macos/` subtrees under the same; `main_macos.rs`. Audio via Core Audio Process Taps (`AudioHardwareCreateProcessTap` + aggregate device + IOProc), overlay via NSPanel (Floating/Docked with rounded translucent CALayer) and NSWindow+NSScrollView (Transcript), tray via NSStatusItem + NSMenu. WebGPU on `ort` + `parakeet-rs` for Apple Silicon GPU; CPU fallback automatic. TCC service required: **Audio Capture** (declared via `NSAudioCaptureUsageDescription` in `Info.plist`).
+
+**Diarization platform parity.** The diarization engine (`stt/diarization.rs`) is cross-platform and works on both Linux (CUDA/CPU) and macOS (WebGPU/CPU). However, only the Linux UI surface is complete this branch: GTK4 rename dialog + tray "Diarization" checkmark + tray "Rename Speakers..." item. On macOS the rename dialog is a TODO stub in `overlay/macos/app.rs`, and the tray Diarization toggle is not yet wired into NSMenu (the `TrayState.diarization_enabled` field exists). The macOS transcript window also double-labels mid-paragraph — the speaker label is embedded in re-rendered text rather than attached as a tag, a cosmetic difference vs Linux's tag-based labeling.
+
+**Diarization known limitations.** A continuation fragment that lands inside a line straddling the relabel boundary keeps the old label visible at the line's start (metadata is corrected; layout is not re-flowed). Speakers shorter than `min_duration_on=0.511s` (callhome preset) are dropped by Sortformer entirely; the 2 s `RELABEL_LOOKBACK_SAMPLES` clamp bounds damage but does not eliminate it.
 
 To add a third platform (e.g., Windows):
 1. Refine the `compile_error!` predicate in `src/main.rs` to exclude the new OS.
