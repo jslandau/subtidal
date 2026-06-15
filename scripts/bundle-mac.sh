@@ -39,6 +39,20 @@ cp "$BIN" "$APP/Contents/MacOS/subtidal"
 cp resources/macos/Info.plist "$APP/Contents/Info.plist"
 cp resources/macos/tray-icon-template.png "$APP/Contents/Resources/"
 
+# Generate a Dock/Finder app icon from the canonical SVG asset.
+APP_ICON_SVG="assets/icons/hicolor/scalable/apps/subtidal.svg"
+ICONSET_DIR="target/${PROFILE}/Subtidal.iconset"
+APP_ICON_ICNS="$APP/Contents/Resources/Subtidal.icns"
+rm -rf "$ICONSET_DIR"
+mkdir -p "$ICONSET_DIR"
+for size in 16 32 128 256 512; do
+  sips -s format png -z "$size" "$size" "$APP_ICON_SVG" --out "$ICONSET_DIR/icon_${size}x${size}.png" >/dev/null
+  retina_size=$((size * 2))
+  sips -s format png -z "$retina_size" "$retina_size" "$APP_ICON_SVG" --out "$ICONSET_DIR/icon_${size}x${size}@2x.png" >/dev/null
+done
+iconutil -c icns "$ICONSET_DIR" -o "$APP_ICON_ICNS"
+rm -rf "$ICONSET_DIR"
+
 # Bundle the ort WebGPU runtime dylib next to the binary and wire @rpath so the
 # binary can resolve `@rpath/libwebgpu_dawn.dylib` without DYLD_LIBRARY_PATH.
 # Required for the bundle to launch via LaunchServices (`open Subtidal.app`),

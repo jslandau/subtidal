@@ -5,6 +5,19 @@ All notable changes to Subtidal are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] — 2026-06-15
+
+### Fixed
+- **macOS caption visibility reconciliation.** Caption on/off and mode switching now
+  consistently enforce a single visibility rule: when captions are off, no caption
+  display surface is shown; when captions are on, exactly the currently selected
+  surface is shown (Docked/Floating panel or Transcript window).
+- **macOS Transcript mode relaunch/re-entry behavior.** Transcript windows now
+  reappear correctly after caption toggles, close/reopen cycles, and mode switches.
+- **macOS app presentation.** Transcript mode now participates in normal Dock/Finder
+  app behavior, and the macOS bundle now includes an app icon generated from the
+  canonical SVG asset.
+
 ## [0.3.0] — 2026-05-21
 
 ### Added

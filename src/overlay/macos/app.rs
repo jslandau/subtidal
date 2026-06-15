@@ -70,10 +70,10 @@ pub fn run_app(
     let mtm = MainThreadMarker::new()
         .expect("run_app must run on the main thread");
 
-    // 2. Get NSApplication and set to Accessory (no Dock icon, matches LSUIElement=true).
+    // 2. Get NSApplication and use Regular activation policy so Transcript
+    // mode participates in the Dock like a normal document-style window.
     let app = NSApplication::sharedApplication(mtm);
-    // Accessory matches LSUIElement=true in Info.plist: no Dock icon, UI allowed.
-    app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+    app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
 
     // 3. Build the overlay panel and retain both panel and content label.
     let (panel, label) = panel::build_overlay_panel(mtm, &config);
@@ -81,7 +81,6 @@ pub fn run_app(
     // initial Floating panel is draggable without the user having to
     // toggle Lock Position to force a property write.
     panel::apply_geometry(&panel, &label, mtm, config.overlay_mode.clone(), &config);
-    panel.orderFront(None);
 
     // 4. Build the transcript window.
     let transcript_log = Arc::new(Mutex::new(TranscriptLog::new(std::time::Duration::from_millis(1500))));
@@ -115,6 +114,10 @@ pub fn run_app(
         transcript_log,
         config: config_arc,
     });
+
+    let initial_mode = handles.config.lock().unwrap().overlay_mode.clone();
+    let initial_enabled = captions_enabled.load(std::sync::atomic::Ordering::Relaxed);
+    reconcile_caption_surface_visibility(&handles, mtm, &initial_mode, initial_enabled);
 
     // 8. Spawn the caption-bridge thread. It blocks on caption_rx.recv_blocking()
     // and posts each caption onto the main run loop via dispatch2 for UI update.
@@ -254,6 +257,30 @@ fn derive_max_chars(appearance: &crate::config::AppearanceConfig) -> usize {
     (effective_width / char_width_pixels).max(20.0) as usize
 }
 
+fn reconcile_caption_surface_visibility(
+    handles: &OverlayHandles,
+    mtm: MainThreadMarker,
+    mode: &OverlayMode,
+    captions_enabled: bool,
+) {
+    if !captions_enabled {
+        handles.panel.orderOut(None);
+        transcript_window::order_out(&handles.transcript_state, mtm);
+        return;
+    }
+
+    match mode {
+        OverlayMode::Docked | OverlayMode::Floating => {
+            handles.panel.orderFront(None);
+            transcript_window::order_out(&handles.transcript_state, mtm);
+        }
+        OverlayMode::Transcript => {
+            handles.panel.orderOut(None);
+            transcript_window::order_front(&handles.transcript_state, mtm);
+        }
+    }
+}
+
 /// Handle an OverlayCommand with full Phase 6 implementation.
 fn handle_overlay_command(
     cmd: OverlayCommand,
@@ -273,11 +300,10 @@ fn handle_overlay_command(
             let _ = cfg.save();
         }
         OverlayCommand::SetVisible(visible) => {
-            if visible {
-                handles.panel.orderFront(None);
-            } else {
-                handles.panel.orderOut(None);
-            }
+            // Compatibility shim: route visibility through the same surface
+            // reconciliation used by mode and captions-enabled changes.
+            let mode = handles.config.lock().unwrap().overlay_mode.clone();
+            reconcile_caption_surface_visibility(handles, mtm, &mode, visible);
         }
         OverlayCommand::SetMode(mode) => {
             // Snapshot then drop the lock before apply_geometry. setFrame_display
@@ -292,17 +318,8 @@ fn handle_overlay_command(
             };
 
             panel::apply_geometry(&handles.panel, &handles.label, mtm, mode.clone(), &cfg_snapshot);
-
-            match mode {
-                OverlayMode::Docked | OverlayMode::Floating => {
-                    handles.panel.orderFront(None);
-                    transcript_window::order_out(&handles.transcript_state, mtm);
-                }
-                OverlayMode::Transcript => {
-                    transcript_window::order_front(&handles.transcript_state, mtm);
-                    handles.panel.orderOut(None);
-                }
-            }
+            let enabled = captions_enabled.load(std::sync::atomic::Ordering::Relaxed);
+            reconcile_caption_surface_visibility(handles, mtm, &mode, enabled);
         }
         OverlayCommand::SetLocked(locked) => {
             {
@@ -356,6 +373,7 @@ fn handle_overlay_command(
         }
         OverlayCommand::SetCaptionsEnabled(enabled) => {
             captions_enabled.store(enabled, std::sync::atomic::Ordering::Relaxed);
+            let mode = handles.config.lock().unwrap().overlay_mode.clone();
             if !enabled {
                 // 4-surface clear on captions disable.
                 handles.transcript_log.lock().unwrap().clear();                  // surface 1
@@ -370,6 +388,7 @@ fn handle_overlay_command(
                     &cfg_snapshot,
                 );
             }
+            reconcile_caption_surface_visibility(handles, mtm, &mode, enabled);
         }
         OverlayCommand::SetCaption(_text) => {
             // SetCaption is handled via the caption-bridge; this arm is a no-op.

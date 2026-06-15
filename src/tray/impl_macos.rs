@@ -360,13 +360,6 @@ impl TrayActions {
         let prev = ivars.state.captions_enabled.load(Ordering::Relaxed);
         let next = !prev;
         ivars.state.captions_enabled.store(next, Ordering::Relaxed);
-        let in_transcript = matches!(
-            ivars.state.config.lock().unwrap().overlay_mode,
-            OverlayMode::Transcript
-        );
-        if !in_transcript {
-            let _ = ivars.state.cmd_tx.send_blocking(OverlayCommand::SetVisible(next));
-        }
         let _ = ivars.state.cmd_tx.send_blocking(OverlayCommand::SetCaptionsEnabled(next));
         ivars.captions_item.borrow().setState(if next { 1 } else { 0 });
         let mtm = MainThreadMarker::from(self);
