@@ -10,22 +10,32 @@
 //
 // Compiles on macOS targets only; on other platforms the file becomes empty.
 
-#![cfg(target_os = "macos")]
+#[cfg(not(target_os = "macos"))]
+fn main() {
+    eprintln!("macos_webgpu_smoke is macOS-only");
+}
 
+#[cfg(target_os = "macos")]
 use std::path::PathBuf;
 use std::time::Instant;
 
+#[cfg(target_os = "macos")]
 use anyhow::{Context, Result};
+#[cfg(target_os = "macos")]
 use hound::SampleFormat;
+#[cfg(target_os = "macos")]
 use parakeet_rs::{ExecutionConfig, ExecutionProvider, Nemotron};
+#[cfg(target_os = "macos")]
 use subtidal::models::{ensure_nemotron_models, nemotron_model_dir};
 
 const FIXTURE: &str = "tests/fixtures/macos-webgpu-smoke.wav";
 
 // Nemotron expects 560ms chunks at 16kHz mono = 8960 samples (mirrors the
 // constant in src/stt/nemotron.rs).
+#[cfg(target_os = "macos")]
 const CHUNK_SAMPLES: usize = 8960;
 
+#[cfg(target_os = "macos")]
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     // 1. Ensure model weights are present (download via hf-hub if missing).
@@ -90,6 +100,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 fn read_wav_16k_mono_f32(path: &str) -> Result<Vec<f32>> {
     let mut reader = hound::WavReader::open(path).with_context(|| format!("opening {path}"))?;
     let spec = reader.spec();

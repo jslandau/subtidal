@@ -36,7 +36,9 @@ use anyhow::{Context, Result};
 use hound::SampleFormat;
 use parakeet_rs::sortformer::{DiarizationConfig, Sortformer};
 use parakeet_rs::{ExecutionConfig, ExecutionProvider, Nemotron};
-use subtidal::models::{ensure_nemotron_models, ensure_sortformer_model, nemotron_model_dir};
+use subtidal::models::{
+    diarization_model_dir, ensure_diarization_models, ensure_nemotron_models, nemotron_model_dir,
+};
 
 const TICK_SAMPLES: usize = 2560; // 160 ms @ 16 kHz — same cadence as the live pipeline
 const NEMOTRON_CHUNK: usize = 8960; // 560 ms @ 16 kHz
@@ -71,7 +73,8 @@ async fn main() -> Result<()> {
 
     eprintln!("info: ensuring models present...");
     ensure_nemotron_models().await?;
-    let sortformer_path = ensure_sortformer_model().await?;
+    ensure_diarization_models().await?;
+    let sortformer_path = diarization_model_dir().join("diar_streaming_sortformer_4spk-v2.1.onnx");
 
     let audio = load_wav_16k_mono(&wav_path)?;
     let duration_s = audio.len() as f32 / 16_000.0;
@@ -226,11 +229,13 @@ fn load_wav_16k_mono(path: &str) -> Result<Vec<f32>> {
         spec.sample_rate
     );
     let mut samples: Vec<f32> = match spec.sample_format {
-        SampleFormat::Float => reader.samples::<f32>().collect::<Result<_, _>>()?,
+        SampleFormat::Float => reader
+            .samples::<f32>()
+            .collect::<std::result::Result<Vec<_>, _>>()?,
         SampleFormat::Int => reader
             .samples::<i16>()
             .map(|s| s.map(|s| s as f32 / 32768.0))
-            .collect::<Result<_, _>>()?,
+            .collect::<std::result::Result<Vec<_>, _>>()?,
     };
     if spec.channels > 1 {
         samples = samples

@@ -12,7 +12,13 @@ use std::time::Duration;
 #[serde(rename_all = "snake_case")]
 pub enum Engine {
     #[default]
-    #[serde(alias = "parakeet")]
+    #[serde(
+        alias = "parakeet",
+        alias = "nemotron35",
+        alias = "nemotron_35",
+        alias = "nemotron-3.5",
+        alias = "nemotron3.5"
+    )]
     Nemotron,
 }
 
@@ -318,10 +324,12 @@ impl Config {
 
     /// Parse a CLI engine string to an Engine enum variant.
     /// Returns Some(Engine) on success, None on unknown engine.
-    /// AC2.2: Recognizes "nemotron" and "parakeet" as aliases for Engine::Nemotron.
+    /// AC2.2: Recognizes "nemotron" and historical alias "parakeet" for Engine::Nemotron.
+    /// Legacy 3.5 spellings are accepted and mapped to the canonical Nemotron engine.
     pub fn parse_engine(engine_str: &str) -> Option<Engine> {
         match engine_str.to_lowercase().as_str() {
-            "nemotron" | "parakeet" => Some(Engine::Nemotron),
+            "nemotron" | "parakeet" | "nemotron35" | "nemotron_35" | "nemotron-3.5"
+            | "nemotron3.5" => Some(Engine::Nemotron),
             _ => None,
         }
     }
@@ -686,11 +694,28 @@ mod tests {
         assert_eq!(Config::parse_engine("parakeet"), Some(Engine::Nemotron));
     }
 
+    /// AC2.2: Legacy 3.5 engine spellings map to the canonical Nemotron engine.
+    #[test]
+    fn cli_parse_engine_nemotron35_aliases_to_nemotron() {
+        assert_eq!(Config::parse_engine("nemotron35"), Some(Engine::Nemotron));
+        assert_eq!(Config::parse_engine("nemotron-3.5"), Some(Engine::Nemotron));
+    }
+
     /// AC2.2: CLI engine string-to-Engine mapping with case insensitivity.
     #[test]
     fn cli_parse_engine_case_insensitive() {
         assert_eq!(Config::parse_engine("NEMOTRON"), Some(Engine::Nemotron));
         assert_eq!(Config::parse_engine("Parakeet"), Some(Engine::Nemotron));
+        assert_eq!(Config::parse_engine("NEMOTRON35"), Some(Engine::Nemotron));
+    }
+
+    #[test]
+    fn config_toml_engine_nemotron35_deserializes_to_nemotron() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nemotron35.toml");
+        fs::write(&path, "engine = \"nemotron35\"\n").unwrap();
+        let cfg = Config::load_from(&path).unwrap();
+        assert_eq!(cfg.engine, Engine::Nemotron);
     }
 
     /// AC2.2: CLI engine string-to-Engine mapping rejects unknown engines.

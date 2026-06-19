@@ -27,9 +27,6 @@ pub struct TrayState {
     /// Channel to send AudioCommand to the PipeWire thread.
     pub audio_tx: SyncSender<AudioCommand>,
     /// Lock-free engine selector; STT thread reads this on each chunk boundary.
-    /// Currently only Nemotron is available; retained so a future engine submenu
-    /// can call `engine_choice.store(...)` without further plumbing.
-    #[allow(dead_code)]
     pub engine_choice: Arc<ArcSwap<Engine>>,
     /// Shared node list from audio thread.
     pub node_list: NodeList,
@@ -388,6 +385,7 @@ const SIZE_PRESETS: &[(&str, i32)] = &[
     ("Extra Large (1000px)", 1000),
 ];
 
+
 fn build_overlay_submenu(tray: &TrayState) -> Vec<MenuItem<TrayState>> {
     let is_floating = tray.overlay_mode == OverlayMode::Floating;
 
@@ -614,9 +612,7 @@ mod tests {
         );
     }
 
-    /// AC4.1: Verify that menu() output excludes "STT Engine" submenu.
-    /// The tray menu should NOT contain an "STT Engine" submenu item since
-    /// only Nemotron is available and switching is hidden.
+    /// AC4.1: Verify that menu() output does not include an "STT Engine" submenu.
     #[test]
     fn menu_excludes_stt_engine_submenu() {
         let (overlay_tx, _overlay_rx) = async_channel::unbounded();
@@ -640,23 +636,19 @@ mod tests {
 
         let menu_items = tray.menu();
 
-        // Iterate through menu items and check that none have label "STT Engine"
-        for item in &menu_items {
-            match item {
-                MenuItem::SubMenu(submenu) => {
-                    assert_ne!(
-                        submenu.label, "STT Engine",
-                        "Menu should not contain 'STT Engine' submenu"
-                    );
-                }
-                _ => {}
-            }
-        }
+        let has_engine_submenu = menu_items.iter().any(|item| match item {
+            MenuItem::SubMenu(submenu) => submenu.label == "STT Engine",
+            _ => false,
+        });
+        assert!(
+            !has_engine_submenu,
+            "Menu should not contain 'STT Engine' submenu when only one engine is exposed"
+        );
 
-        // Additional verification: the menu should have at least Captions, Separator, Audio Source, Overlay, Separator, Settings, Quit
+        // Additional verification: the menu should have expected major items.
         assert!(
             menu_items.len() >= 7,
-            "Menu should have expected items (Captions, separators, submenus, Settings, Quit)"
+            "Menu should have expected items without the STT Engine submenu"
         );
     }
 

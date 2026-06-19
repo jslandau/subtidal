@@ -24,6 +24,8 @@ use std::time::Instant;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::audio::resampler::AudioResampler;
 use crate::config::Engine;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use crate::models::ModelPaths;
 
 use crate::overlay::CaptionEvent;
 
@@ -97,7 +99,7 @@ pub struct PipelineConfig {
     pub engine_choice: Arc<ArcSwap<Engine>>,
     pub captions_enabled: Arc<AtomicBool>,
     pub unload_after: Option<Duration>,
-    pub model_dir: std::path::PathBuf,
+    pub model_paths: ModelPaths,
     pub use_cuda: bool,
     /// Whether speaker diarization is enabled. The Sortformer engine is
     /// built lazily when this is first set to true.
@@ -401,7 +403,7 @@ pub fn spawn_stt_thread(
                         engine.is_none() || engine_built_for.as_ref() != Some(&desired);
                     if needs_rebuild {
                         eprintln!("info: (re)loading STT engine: {desired:?}");
-                        match build_engine(&desired, &cfg.model_dir, cfg.use_cuda) {
+                        match build_engine(&desired, &cfg.model_paths, cfg.use_cuda) {
                             Ok(e) => {
                                 engine = Some(e);
                                 engine_built_for = Some(desired);
@@ -609,15 +611,10 @@ pub fn spawn_stt_thread(
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn build_engine(
-    choice: &Engine,
-    model_dir: &std::path::Path,
-    use_cuda: bool,
-) -> Result<Box<dyn SttEngine>> {
+fn build_engine(choice: &Engine, model_paths: &ModelPaths, use_cuda: bool) -> Result<Box<dyn SttEngine>> {
+    let model_dir = model_paths.for_engine(choice);
     match choice {
-        Engine::Nemotron => Ok(Box::new(nemotron::NemotronEngine::new(
-            model_dir, use_cuda,
-        )?)),
+        Engine::Nemotron => Ok(Box::new(nemotron::NemotronEngine::new(model_dir, use_cuda)?)),
     }
 }
 

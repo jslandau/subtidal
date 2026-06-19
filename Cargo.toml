@@ -1,6 +1,6 @@
 [package]
 name = "subtidal"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 description = "Real-time speech-to-text overlay for Linux/Wayland and macOS"
 license = "MIT"
@@ -20,7 +20,7 @@ ringbuf = "0.4"
 bytemuck = "1"
 audioadapter-buffers = "2"
 
-# STT (ort + parakeet-rs are Linux-only; see target-conditional block below)
+# STT (backend crates are target-conditional below)
 ndarray = "0.16"
 
 # Config hot-reload
@@ -90,7 +90,7 @@ pipewire = "0.9"
 # STT (ort + parakeet-rs are Linux-only — they drag onig_sys/cc-bound C deps
 # that don't cross-compile from Linux to darwin).
 ort = { version = "2.0.0-rc.12", features = ["cuda"] }
-parakeet-rs = { version = "0.3.4", features = ["cuda", "sortformer"] }
+parakeet-rs = { version = "0.3.6", features = ["cuda", "sortformer"] }
 # Desktop notifications (notify-rust pulls in mac-notification-sys whose build
 # script fails when cross-compiling from Linux to darwin).
 notify-rust = "4"
@@ -104,7 +104,7 @@ libc = "0.2"
 # (aarch64-apple-darwin) is constrained by ort's prebuilt binary availability; Phase 7
 # adds x86_64-apple-darwin once ort supplies x86_64 wgpu prebuilts.
 [target.'cfg(target_os = "macos")'.dependencies]
-parakeet-rs = { version = "0.3.4", features = ["webgpu", "sortformer"] }
+parakeet-rs = { version = "0.3.6", features = ["webgpu", "sortformer"] }
 ort = { version = "2.0.0-rc.12", features = ["webgpu"] }
 # AppKit bindings (used Phase 2+); declared up-front so cross-target check exercises them.
 objc2 = "0.6"
@@ -145,3 +145,4 @@ codegen-units = 1
 [dev-dependencies]
 tempfile = "3"
 png = "0.17"
+hound = "3"

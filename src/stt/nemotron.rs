@@ -7,6 +7,7 @@
 
 use super::SttEngine;
 use anyhow::{Context, Result};
+use parakeet_rs::NemotronMode;
 use std::path::Path;
 
 /// Nemotron expects 560ms chunks = 8960 samples at 16kHz.
@@ -27,7 +28,7 @@ impl NemotronEngine {
     /// is automatic on WebGPU init failure.
     pub fn new(model_dir: &Path, use_cuda: bool) -> Result<Self> {
         #[cfg(target_os = "linux")]
-        let inner = {
+        let mut inner = {
             let exec_config =
                 parakeet_rs::ExecutionConfig::new().with_execution_provider(if use_cuda {
                     parakeet_rs::ExecutionProvider::Cuda
@@ -47,7 +48,12 @@ impl NemotronEngine {
         };
 
         #[cfg(target_os = "macos")]
-        let inner = build_macos(model_dir, use_cuda)?;
+        let mut inner = build_macos(model_dir, use_cuda)?;
+
+        if inner.mode() == NemotronMode::Multilingual {
+            inner.set_target_lang("auto")
+                .context("setting Nemotron 3.5 target language to auto")?;
+        }
 
         Ok(NemotronEngine {
             inner,

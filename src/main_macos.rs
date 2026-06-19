@@ -21,29 +21,29 @@ pub fn main() {
     // 2. Load config (use the neutral Config::load() which defaults gracefully).
     let config = Config::load();
 
-    // 3. Ensure model files are present before starting.
-    let model_dir = models::nemotron_model_dir();
-    if !models::nemotron_models_present() {
-        println!("Downloading Nemotron model files (first run)...");
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .expect("tokio runtime");
-        rt.block_on(async {
-            models::ensure_nemotron_models().await.unwrap_or_else(|e| {
-                eprintln!("error: {e}");
-                std::process::exit(1);
-            });
-        });
-    }
+    // 3. Ensure selected engine model files are present before starting.
+    let model_paths = models::ModelPaths::from_conventional_dirs();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    rt.block_on(async {
+        match config.engine {
+            config::Engine::Nemotron => {
+                if !models::nemotron_models_present() {
+                    println!("Downloading Nemotron model files (first run)...");
+                    models::ensure_nemotron_models().await.unwrap_or_else(|e| {
+                        eprintln!("error: {e}");
+                        std::process::exit(1);
+                    });
+                }
+            }
+        }
+    });
 
     // Always download the Sortformer diarization model (skipped if present).
     if !models::diarization_models_present() {
         println!("Downloading Sortformer diarization model (first run)...");
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .expect("tokio runtime");
         rt.block_on(async {
             models::ensure_diarization_models()
                 .await
@@ -98,8 +98,8 @@ pub fn main() {
     // 5. Create shared AudioWake primitive for STT thread coordination.
     let audio_wake = Arc::new(stt::AudioWake::new());
 
-    // 6. Lock-free engine selection (single engine for now, but the infrastructure exists).
-    let engine_choice = Arc::new(arc_swap::ArcSwap::new(Arc::new(config::Engine::Nemotron)));
+    // 6. Lock-free engine selection.
+    let engine_choice = Arc::new(arc_swap::ArcSwap::new(Arc::new(config.engine.clone())));
 
     // 7. Construct shared state: captions_enabled flag.
     let captions_enabled: CaptionsEnabled = Arc::new(AtomicBool::new(true));
@@ -143,7 +143,7 @@ pub fn main() {
         engine_choice: Arc::clone(&engine_choice),
         captions_enabled: Arc::clone(&captions_enabled),
         unload_after: Some(std::time::Duration::from_secs(8)), // default from Linux
-        model_dir: model_dir.clone(),
+        model_paths: model_paths.clone(),
         use_cuda: true, // Request WebGPU on macOS; CPU fallback is automatic.
         diarization_enabled: Arc::clone(&diarization_enabled),
         diarization_preset: config.diarization_preset.clone(),

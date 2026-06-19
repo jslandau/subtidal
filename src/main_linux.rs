@@ -352,17 +352,20 @@ pub fn main() {
         });
 
     runtime.block_on(async {
-        if !models::nemotron_models_present() {
-            println!("Downloading Nemotron model files (first run)...");
-            models::ensure_nemotron_models().await
-                .unwrap_or_else(|e| {
-                    eprintln!("error: failed to download Nemotron model: {e:#}");
-                    eprintln!("hint: check network connectivity and disk space in ~/.local/share/subtidal/models/");
-                    std::process::exit(1);
-                });
-            println!("Nemotron models ready.");
-        } else {
-            println!("Nemotron models already present, skipping download.");
+        match cfg.engine {
+            config::Engine::Nemotron => {
+                if !models::nemotron_models_present() {
+                    println!("Downloading Nemotron model files (first run)...");
+                    models::ensure_nemotron_models().await.unwrap_or_else(|e| {
+                        eprintln!("error: failed to download Nemotron model: {e:#}");
+                        eprintln!("hint: check network connectivity and disk space in ~/.local/share/subtidal/models/");
+                        std::process::exit(1);
+                    });
+                    println!("Nemotron models ready.");
+                } else {
+                    println!("Nemotron models already present, skipping download.");
+                }
+            }
         }
 
         // Always download the Sortformer diarization model (skipped if present).
@@ -405,8 +408,9 @@ pub fn main() {
     }
 
     // Probe CUDA in a subprocess so a CUDA-provider crash can't take the parent down.
-    let model_dir = models::nemotron_model_dir();
-    let use_cuda = cuda_available(&model_dir);
+    let model_paths = models::ModelPaths::from_conventional_dirs();
+    let cuda_probe_dir = model_paths.for_engine(&cfg.engine).to_path_buf();
+    let use_cuda = cuda_available(&cuda_probe_dir);
     eprintln!("{}", cuda_status_message(use_cuda));
 
     // Captions-enabled flag: read by STT thread to skip inference, by tray/overlay for UI.
@@ -440,7 +444,7 @@ pub fn main() {
             engine_choice: Arc::clone(&engine_choice),
             captions_enabled: Arc::clone(&captions_enabled),
             unload_after,
-            model_dir: model_dir.clone(),
+            model_paths: model_paths.clone(),
             use_cuda,
             diarization_enabled: Arc::clone(&diarization_enabled),
             diarization_preset: cfg.diarization_preset.clone(),

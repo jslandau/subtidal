@@ -9,7 +9,7 @@
 
 use gtk4::glib;
 use gtk4::prelude::*;
-use gtk4::{Align, ApplicationWindow, Box as GtkBox, Button, Entry, Label, Orientation, Window};
+use gtk4::{ApplicationWindow, Box as GtkBox, Button, Entry, Label, Orientation, Window};
 use std::collections::HashMap;
 
 use crate::overlay::OverlayCommand;
@@ -32,7 +32,7 @@ pub fn show_rename_dialog(
     let win = Window::builder()
         .title("Rename Speakers")
         .transient_for(parent)
-        .modal(true)
+        .modal(false)
         .default_width(360)
         .resizable(false)
         .build();
@@ -143,7 +143,6 @@ pub fn show_rename_dialog(
     }
 
     win.present();
-    win.set_modal(true);
     // Focus the first entry for immediate typing.
     if let Some(first) = entries.first() {
         first.grab_focus();

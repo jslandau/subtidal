@@ -305,11 +305,59 @@ define_class!(
             let _ = ivars.state.cmd_tx.send_blocking(OverlayCommand::Quit);
         }
 
-        /// No-op for the disabled "Nemotron" engine entry. NSMenuItem
-        /// requires a non-nil action for the checkmark to render under
-        /// `setAutoenablesItems(false)`.
-        #[unsafe(method(noop:))]
-        fn noop(&self, _sender: Option<&NSMenuItem>) {}
+        #[unsafe(method(selectEngine:))]
+        fn select_engine(&self, sender: Option<&NSMenuItem>) {
+            let Some(sender) = sender else { return };
+            let title = sender.title().to_string();
+            let new_engine = match title.as_str() {
+                "Nemotron" => Engine::Nemotron,
+                _ => return,
+            };
+            let ivars = self.ivars();
+            {
+                let cfg = ivars.state.config.lock().unwrap();
+                if cfg.engine == new_engine {
+                    return;
+                }
+            }
+
+            let ensure_result = {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build();
+                match rt {
+                    Ok(rt) => rt.block_on(async {
+                        match new_engine {
+                            Engine::Nemotron => crate::models::ensure_nemotron_models().await,
+                        }
+                    }),
+                    Err(e) => Err(anyhow::anyhow!("building temporary tokio runtime: {e}")),
+                }
+            };
+            if let Err(e) = ensure_result {
+                eprintln!("warn: failed to prepare {new_engine:?} models before engine switch: {e:#}");
+                return;
+            }
+
+            {
+                let mut cfg = ivars.state.config.lock().unwrap();
+                cfg.engine = new_engine.clone();
+                let _ = cfg.save();
+            }
+            ivars.state.engine_choice.store(Arc::new(new_engine));
+
+            if let Some(engine_parent) = ivars.context_menu.borrow().itemAtIndex(4) {
+                if let Some(submenu) = engine_parent.submenu() {
+                    let n = submenu.numberOfItems();
+                    for i in 0..n {
+                        if let Some(mi) = submenu.itemAtIndex(i) {
+                            let on = mi.title().to_string() == title;
+                            mi.setState(if on { 1 } else { 0 });
+                        }
+                    }
+                }
+            }
+        }
 
         /// AC5.4: every 5 s, re-poll audio process list and rebuild the
         /// Audio Source submenu if it has changed.
@@ -668,7 +716,7 @@ pub fn install_tray(
     mode_parent.setSubmenu(Some(&mode_menu));
     menu.addItem(&mode_parent);
 
-    // Engine submenu (Nemotron only, disabled)
+    // Engine submenu
     let engine_parent = unsafe {
         NSMenuItem::initWithTitle_action_keyEquivalent(
             NSMenuItem::alloc(mtm),
@@ -679,17 +727,17 @@ pub fn install_tray(
     };
     let engine_menu = NSMenu::new(mtm);
     engine_menu.setAutoenablesItems(false);
-    let nemo = unsafe {
+    let current_engine = state.config.lock().unwrap().engine.clone();
+    let mi = unsafe {
         NSMenuItem::initWithTitle_action_keyEquivalent(
             NSMenuItem::alloc(mtm),
             &NSString::from_str("Nemotron"),
-            Some(sel!(noop:)),
+            Some(sel!(selectEngine:)),
             &NSString::from_str(""),
         )
     };
-    nemo.setState(1);
-    nemo.setEnabled(false);
-    engine_menu.addItem(&nemo);
+    mi.setState(if current_engine == Engine::Nemotron { 1 } else { 0 });
+    engine_menu.addItem(&mi);
     engine_parent.setSubmenu(Some(&engine_menu));
     menu.addItem(&engine_parent);
 

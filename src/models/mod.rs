@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use crate::config::Engine;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -42,25 +43,26 @@ pub fn nemotron_model_dir() -> PathBuf {
         .join("nemotron")
 }
 
-/// HuggingFace repo and file paths for the Nemotron streaming model.
+/// HuggingFace repo and file paths for the canonical Nemotron engine.
+/// This now points to the Nemotron 3.5 multilingual streaming model.
 /// Single source of truth: every other function that enumerates or checks for
 /// Nemotron model files derives from this list.
 const NEMOTRON_REPO: &str = "altunenes/parakeet-rs";
 const NEMOTRON_FILES: &[(&str, &str)] = &[
     (
-        "nemotron-speech-streaming-en-0.6b/encoder.onnx",
+        "nemotron-3.5-asr-streaming-0.6b-onnx/encoder.onnx",
         "encoder.onnx",
     ),
     (
-        "nemotron-speech-streaming-en-0.6b/encoder.onnx.data",
+        "nemotron-3.5-asr-streaming-0.6b-onnx/encoder.onnx.data",
         "encoder.onnx.data",
     ),
     (
-        "nemotron-speech-streaming-en-0.6b/decoder_joint.onnx",
+        "nemotron-3.5-asr-streaming-0.6b-onnx/decoder_joint.onnx",
         "decoder_joint.onnx",
     ),
     (
-        "nemotron-speech-streaming-en-0.6b/tokenizer.model",
+        "nemotron-3.5-asr-streaming-0.6b-onnx/tokenizer.model",
         "tokenizer.model",
     ),
 ];
@@ -71,6 +73,25 @@ const SORTFORMER_FILE: (&str, &str) = (
     "diar_streaming_sortformer_4spk-v2.1.onnx",
     "diar_streaming_sortformer_4spk-v2.1.onnx",
 );
+
+#[derive(Clone, Debug)]
+pub struct ModelPaths {
+    pub nemotron_dir: PathBuf,
+}
+
+impl ModelPaths {
+    pub fn from_conventional_dirs() -> Self {
+        Self {
+            nemotron_dir: nemotron_model_dir(),
+        }
+    }
+
+    pub fn for_engine(&self, engine: &Engine) -> &Path {
+        match engine {
+            Engine::Nemotron => &self.nemotron_dir,
+        }
+    }
+}
 
 /// Returns the local paths for every required Nemotron model file inside the
 /// given base models directory (i.e. the parent of the `nemotron/` subdir).
@@ -155,7 +176,6 @@ pub async fn ensure_diarization_models() -> Result<()> {
 
 /// Download all Nemotron model files to `nemotron_model_dir()` (per-OS data dir).
 /// Skips individual files that already exist.
-/// Exits the process with an error message if any download fails.
 pub async fn ensure_nemotron_models() -> Result<()> {
     let dest_dir = nemotron_model_dir();
     std::fs::create_dir_all(&dest_dir)
@@ -184,6 +204,8 @@ pub async fn ensure_nemotron_models() -> Result<()> {
     }
     Ok(())
 }
+
+
 
 fn copy_model_file(src: &Path, dest: &Path) -> Result<()> {
     // Resolve symlinks: hf-hub returns paths that are symlinks into its blob store.
