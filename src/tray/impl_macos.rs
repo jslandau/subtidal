@@ -728,7 +728,7 @@ pub fn install_tray(
     let engine_menu = NSMenu::new(mtm);
     engine_menu.setAutoenablesItems(false);
     let current_engine = state.config.lock().unwrap().engine.clone();
-    let mi = unsafe {
+    let nemotron_item = unsafe {
         NSMenuItem::initWithTitle_action_keyEquivalent(
             NSMenuItem::alloc(mtm),
             &NSString::from_str("Nemotron"),
@@ -736,8 +736,8 @@ pub fn install_tray(
             &NSString::from_str(""),
         )
     };
-    mi.setState(if current_engine == Engine::Nemotron { 1 } else { 0 });
-    engine_menu.addItem(&mi);
+    nemotron_item.setState(if current_engine == Engine::Nemotron { 1 } else { 0 });
+    engine_menu.addItem(&nemotron_item);
     engine_parent.setSubmenu(Some(&engine_menu));
     menu.addItem(&engine_parent);
 
@@ -850,7 +850,7 @@ pub fn install_tray(
         above_item.setTarget(Some(target_obj));
         lock_item.setTarget(Some(target_obj));
         quit_item.setTarget(Some(target_obj));
-        nemo.setTarget(Some(target_obj));
+        nemotron_item.setTarget(Some(target_obj));
         for mi in &mode_items {
             mi.setTarget(Some(target_obj));
         }

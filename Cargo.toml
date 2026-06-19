@@ -57,20 +57,18 @@ arc-swap = "1"
 async-channel = "2"
 
 # Model management (cross-platform).
-# `default-features = false` drops hf-hub's `ureq` path (which forces rustls →
-# ring); the `tokio` feature alone routes through reqwest, which uses the
-# system TLS stack (Secure Transport on macOS, OpenSSL on Linux). ring's build
-# script invokes `cc` with macOS-only flags (-arch, -mmacosx-version-min,
-# -gfull) that fail when cross-compiling from Linux→x86_64-apple-darwin under
-# the macos-check CI, so we deliberately avoid the rustls path.
+# We only use `hf_hub::api::tokio::Api` (the async reqwest-backed client).
+# In hf-hub 0.5, enabling the crate feature `default-tls`/`native-tls` also
+# enables the optional sync `ureq` client, which pulls in rustls → ring. That
+# breaks Linux-hosted macOS cross-target checks because ring's build script
+# invokes `cc` with Darwin-only flags (-arch, -mmacosx-version-min, -gfull).
 #
-# Note: hf-hub with `tokio` uses reqwest for HTTP. reqwest's default-features
-# include `default-tls` (native-tls on most platforms), but since we set
-# `default-features = false` on hf-hub, reqwest also loses its defaults. We
-# must re-enable a TLS backend: `native-tls` uses the system TLS stack
-# (OpenSSL on Linux, Secure Transport on macOS), which avoids the ring
-# cross-compilation issue.
-hf-hub = { version = "0.5", default-features = false, features = ["tokio", "default-tls"] }
+# Keep hf-hub on the async-only `tokio` feature, then add a direct reqwest
+# dependency with `default-tls`. Cargo feature unification gives the shared
+# reqwest package a system TLS backend (OpenSSL on Linux, Secure Transport on
+# macOS) without enabling hf-hub's unused ureq path.
+hf-hub = { version = "0.5", default-features = false, features = ["tokio"] }
+reqwest = { version = "0.12.2", default-features = false, features = ["default-tls"] }
 
 # Linux-only crates and CUDA feature additions.
 # Resolver v2 (edition 2021 default) isolates the `cuda` feature on `ort` and
