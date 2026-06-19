@@ -4,16 +4,15 @@
 //! Phase 2 implements Floating mode; Phase 6 adds Docked mode geometry,
 //! mode switching, and screen-change observation.
 
-use objc2::rc::Retained;
-use objc2::{msg_send, AnyThread, MainThreadMarker, MainThreadOnly, ClassType};
-use objc2_foundation::{NSString, NSAttributedString, NSDictionary};
-use objc2_app_kit::{
-    NSPanel, NSTextField, NSWindowStyleMask, NSWindowCollectionBehavior,
-    NSFloatingWindowLevel, NSStatusWindowLevel, NSColor, NSFont, NSLineBreakMode,
-    NSBackingStoreType, NSView, NSScreen,
-};
-use objc2_core_foundation::{CGRect, CGPoint, CGSize};
 use crate::config::{Config, OverlayMode};
+use objc2::rc::Retained;
+use objc2::{msg_send, AnyThread, ClassType, MainThreadMarker, MainThreadOnly};
+use objc2_app_kit::{
+    NSBackingStoreType, NSColor, NSFloatingWindowLevel, NSFont, NSLineBreakMode, NSPanel, NSScreen,
+    NSStatusWindowLevel, NSTextField, NSView, NSWindowCollectionBehavior, NSWindowStyleMask,
+};
+use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+use objc2_foundation::{NSAttributedString, NSDictionary, NSString};
 use std::sync::Arc;
 
 /// Inspection helper: public view of panel configuration for testing.
@@ -61,7 +60,7 @@ pub fn build_overlay_panel(
         frame,
         style_mask,
         backing,
-        false
+        false,
     );
 
     // Set window level (floating or status depending on above_fullscreen)
@@ -103,10 +102,8 @@ pub fn build_overlay_panel(
         CGPoint::new(INSET, INSET),
         CGSize::new(width - 2.0 * INSET, height - 2.0 * INSET),
     );
-    let label: Retained<NSTextField> = NSTextField::initWithFrame(
-        NSTextField::alloc(mtm),
-        label_frame,
-    );
+    let label: Retained<NSTextField> =
+        NSTextField::initWithFrame(NSTextField::alloc(mtm), label_frame);
     label.setAutoresizingMask(
         objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable
             | objc2_app_kit::NSAutoresizingMaskOptions::ViewHeightSizable,
@@ -148,8 +145,7 @@ fn measure_text_height(label: &NSTextField, text: &str, width: f64) -> f64 {
     let attrs: Retained<NSDictionary<NSString, objc2::runtime::AnyObject>> = match font {
         Some(f) => {
             let key = NSString::from_str("NSFont");
-            let f_any: Retained<objc2::runtime::AnyObject> =
-                unsafe { Retained::cast_unchecked(f) };
+            let f_any: Retained<objc2::runtime::AnyObject> = unsafe { Retained::cast_unchecked(f) };
             NSDictionary::from_slices(&[&*key], &[&*f_any])
         }
         None => NSDictionary::new(),
@@ -161,10 +157,11 @@ fn measure_text_height(label: &NSTextField, text: &str, width: f64) -> f64 {
             Some(&attrs),
         )
     };
-    let opts: NSStringDrawingOptions = NSStringDrawingOptions::UsesLineFragmentOrigin
-        | NSStringDrawingOptions::UsesFontLeading;
+    let opts: NSStringDrawingOptions =
+        NSStringDrawingOptions::UsesLineFragmentOrigin | NSStringDrawingOptions::UsesFontLeading;
     let constraint = CGSize::new(width, 100_000.0);
-    let rect: CGRect = unsafe { msg_send![&*attr_str, boundingRectWithSize: constraint, options: opts.0] };
+    let rect: CGRect =
+        unsafe { msg_send![&*attr_str, boundingRectWithSize: constraint, options: opts.0] };
     rect.size.height.max(0.0)
 }
 
@@ -191,16 +188,13 @@ pub fn resolve_font(family: &str, size: f64, _mtm: MainThreadMarker) -> Retained
         return NSFont::systemFontOfSize(size);
     }
     let name_ns = NSString::from_str(family_trimmed);
-    let found: Option<Retained<NSFont>> = unsafe {
-        msg_send![NSFont::class(), fontWithName: &*name_ns, size: size]
-    };
-    found.unwrap_or_else(|| unsafe {
-        msg_send![NSFont::class(), userFixedPitchFontOfSize: size]
-    })
+    let found: Option<Retained<NSFont>> =
+        unsafe { msg_send![NSFont::class(), fontWithName: &*name_ns, size: size] };
+    found.unwrap_or_else(|| unsafe { msg_send![NSFont::class(), userFixedPitchFontOfSize: size] })
 }
 
 /// Inspect panel configuration for testing and verification.
-#[allow(dead_code)]  // Used in #[cfg(all(test, target_os = "macos"))] tests
+#[allow(dead_code)] // Used in #[cfg(all(test, target_os = "macos"))] tests
 pub fn inspect(panel: &NSPanel) -> PanelConfig {
     let level: i64 = panel.level() as i64;
     let collection_behavior: u64 = panel.collectionBehavior().bits() as u64;
@@ -216,7 +210,6 @@ pub fn inspect(panel: &NSPanel) -> PanelConfig {
         ignores_mouse_events,
     }
 }
-
 
 /// Apply geometry configuration for a given overlay mode.
 ///
@@ -245,7 +238,7 @@ pub fn apply_geometry(
     match mode {
         OverlayMode::Docked => {
             let screen = NSScreen::mainScreen(mtm).expect("main screen");
-            let visible = screen.visibleFrame();  // AC2.7
+            let visible = screen.visibleFrame(); // AC2.7
             let band_width = (config.appearance.width as f64).min(visible.size.width);
             let x = visible.origin.x + (visible.size.width - band_width) * 0.5;
             let rect = CGRect::new(
@@ -253,7 +246,7 @@ pub fn apply_geometry(
                 CGSize::new(band_width, max_height),
             );
             panel.setFrame_display(rect, true);
-            panel.setIgnoresMouseEvents(true);  // AC2.5
+            panel.setIgnoresMouseEvents(true); // AC2.5
             panel.setMovableByWindowBackground(false);
             panel.setHasShadow(true);
             label.setAlignment(objc2_app_kit::NSTextAlignment::Center);
@@ -302,7 +295,9 @@ fn parse_css_color(s: &str) -> Option<(f64, f64, f64, f64)> {
             let b = u8::from_str_radix(&hex[4..6], 16).ok()? as f64 / 255.0;
             let a = if hex.len() == 8 {
                 u8::from_str_radix(&hex[6..8], 16).ok()? as f64 / 255.0
-            } else { 1.0 };
+            } else {
+                1.0
+            };
             return Some((r, g, b, a));
         }
         return None;
@@ -318,11 +313,17 @@ fn parse_css_color(s: &str) -> Option<(f64, f64, f64, f64)> {
     let body = prefix.strip_suffix(')')?;
     let parts: Vec<&str> = body.split(',').map(|p| p.trim()).collect();
     let expected = if has_alpha { 4 } else { 3 };
-    if parts.len() != expected { return None; }
+    if parts.len() != expected {
+        return None;
+    }
     let r = parts[0].parse::<f64>().ok()? / 255.0;
     let g = parts[1].parse::<f64>().ok()? / 255.0;
     let b = parts[2].parse::<f64>().ok()? / 255.0;
-    let a = if has_alpha { parts[3].parse::<f64>().ok()? } else { 1.0 };
+    let a = if has_alpha {
+        parts[3].parse::<f64>().ok()?
+    } else {
+        1.0
+    };
     Some((r, g, b, a))
 }
 
@@ -439,7 +440,11 @@ impl ScreenObserver {
         label: Retained<NSTextField>,
         config: Arc<std::sync::Mutex<Config>>,
     ) -> Retained<Self> {
-        let ivars = ScreenObserverIvars { panel, label, config };
+        let ivars = ScreenObserverIvars {
+            panel,
+            label,
+            config,
+        };
         let allocated = Self::alloc(mtm).set_ivars(ivars);
         unsafe { msg_send![super(allocated), init] }
     }
@@ -522,18 +527,31 @@ mod tests {
 
         // Verify required flags per AC2.1
         assert!(pc.is_floating_panel, "panel must be floating");
-        assert_ne!(pc.style_mask & NSWindowStyleMask::Borderless.bits() as u64, 0, "must have Borderless flag");
-        assert_ne!(pc.style_mask & NSWindowStyleMask::NonactivatingPanel.bits() as u64, 0, "must have NonactivatingPanel flag");
         assert_ne!(
-            pc.collection_behavior & NSWindowCollectionBehavior::CanJoinAllSpaces.bits() as u64, 0,
+            pc.style_mask & NSWindowStyleMask::Borderless.bits() as u64,
+            0,
+            "must have Borderless flag"
+        );
+        assert_ne!(
+            pc.style_mask & NSWindowStyleMask::NonactivatingPanel.bits() as u64,
+            0,
+            "must have NonactivatingPanel flag"
+        );
+        assert_ne!(
+            pc.collection_behavior & NSWindowCollectionBehavior::CanJoinAllSpaces.bits() as u64,
+            0,
             "must have CanJoinAllSpaces"
         );
         assert_ne!(
-            pc.collection_behavior & NSWindowCollectionBehavior::FullScreenAuxiliary.bits() as u64, 0,
+            pc.collection_behavior & NSWindowCollectionBehavior::FullScreenAuxiliary.bits() as u64,
+            0,
             "must have FullScreenAuxiliary"
         );
         assert!(pc.ignores_mouse_events, "must ignore mouse events");
-        assert_eq!(pc.level, NSFloatingWindowLevel as i64, "default level should be Floating");
+        assert_eq!(
+            pc.level, NSFloatingWindowLevel as i64,
+            "default level should be Floating"
+        );
     }
 
     #[test]
@@ -562,12 +580,18 @@ mod tests {
         // Toggle to above-fullscreen
         set_above_fullscreen(&panel, mtm, true);
         let pc = inspect(&panel);
-        assert_eq!(pc.level, NSStatusWindowLevel as i64, "after set_above_fullscreen(true), level should be StatusWindow");
+        assert_eq!(
+            pc.level, NSStatusWindowLevel as i64,
+            "after set_above_fullscreen(true), level should be StatusWindow"
+        );
 
         // Toggle back to floating
         set_above_fullscreen(&panel, mtm, false);
         let pc = inspect(&panel);
-        assert_eq!(pc.level, NSFloatingWindowLevel as i64, "after set_above_fullscreen(false), level should be Floating");
+        assert_eq!(
+            pc.level, NSFloatingWindowLevel as i64,
+            "after set_above_fullscreen(false), level should be Floating"
+        );
     }
 
     #[test]
@@ -591,12 +615,24 @@ mod tests {
 
         // Apply geometry for different modes — panel ptr should remain unchanged.
         apply_geometry(&panel, &_label, mtm, OverlayMode::Docked, &config);
-        assert_eq!(Retained::as_ptr(&panel), initial_ptr, "apply_geometry should not rebuild panel");
+        assert_eq!(
+            Retained::as_ptr(&panel),
+            initial_ptr,
+            "apply_geometry should not rebuild panel"
+        );
 
         apply_geometry(&panel, &_label, mtm, OverlayMode::Floating, &config);
-        assert_eq!(Retained::as_ptr(&panel), initial_ptr, "apply_geometry should not rebuild panel");
+        assert_eq!(
+            Retained::as_ptr(&panel),
+            initial_ptr,
+            "apply_geometry should not rebuild panel"
+        );
 
         apply_geometry(&panel, &_label, mtm, OverlayMode::Transcript, &config);
-        assert_eq!(Retained::as_ptr(&panel), initial_ptr, "apply_geometry should not rebuild panel");
+        assert_eq!(
+            Retained::as_ptr(&panel),
+            initial_ptr,
+            "apply_geometry should not rebuild panel"
+        );
     }
 }

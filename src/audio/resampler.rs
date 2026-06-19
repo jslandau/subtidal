@@ -147,7 +147,6 @@ impl AudioResampler {
 
         Ok(())
     }
-
 }
 
 #[cfg(test)]
@@ -156,7 +155,8 @@ mod tests {
 
     fn collect_chunks(r: &mut AudioResampler, samples: &[f32]) -> Vec<Vec<f32>> {
         let mut out = Vec::new();
-        r.push_interleaved(samples, |chunk| out.push(chunk.to_vec())).unwrap();
+        r.push_interleaved(samples, |chunk| out.push(chunk.to_vec()))
+            .unwrap();
         out
     }
 
@@ -186,7 +186,8 @@ mod tests {
         let mut pushed = 0usize;
         while pushed < total_needed {
             let to_push = increment.len().min(total_needed - pushed);
-            r.push_interleaved(&increment[..to_push], |_| total_chunks += 1).unwrap();
+            r.push_interleaved(&increment[..to_push], |_| total_chunks += 1)
+                .unwrap();
             pushed += to_push;
         }
         assert_eq!(total_chunks, 1);

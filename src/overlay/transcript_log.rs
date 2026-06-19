@@ -11,11 +11,21 @@ use chrono::{DateTime, Local};
 use serde::Serialize;
 use std::time::Duration as StdDuration;
 
-/// A single speech fragment with its timestamp.
+/// A single speech fragment with its timestamp and optional speaker ID.
 #[derive(Debug, Clone, Serialize)]
 pub struct Fragment {
     pub timestamp: DateTime<Local>,
     pub text: String,
+    /// Speaker ID (0-based) when diarization is active, None otherwise.
+    /// Included in JSON export as "speaker_id" (null when diarization was off).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speaker_id: Option<u32>,
+    /// Sample offset (in the diarization engine's frame of reference) at which
+    /// this fragment was emitted. Used to retroactively re-attribute fragments
+    /// when Sortformer reveals a late speaker switch. `0` when diarization was
+    /// off at emit time. Not serialised — implementation detail.
+    #[serde(skip)]
+    pub emit_sample: u64,
 }
 
 /// Result of a `push` indicating whether the fragment started a new paragraph.
@@ -50,37 +60,100 @@ impl TranscriptLog {
         }
     }
 
-    /// Push a fragment with the current time.
+    /// Push a fragment with the current time and no speaker.
     ///
-    /// Thin wrapper around `push_at` that captures `chrono::Local::now()`.
+    /// Thin wrapper around `push_with_speaker` that passes `None` for speaker_id.
     pub fn push(&mut self, text: String) -> AppendKind {
-        self.push_at(text, Local::now())
+        self.push_with_speaker(text, None)
     }
 
-    /// Push a fragment with an explicit timestamp.
+    /// Push a fragment with speaker information at the current time.
     ///
-    /// Determines whether this fragment starts a new paragraph or continues the previous one,
-    /// based on the time gap since the last fragment. Returns `NewParagraph` if the vec is empty
-    /// or if the time gap exceeds `paragraph_gap`; otherwise returns `ContinueParagraph`.
+    /// Thin wrapper around `push_at_with_speaker`.
+    pub fn push_with_speaker(&mut self, text: String, speaker_id: Option<u32>) -> AppendKind {
+        self.push_at_with_speaker(text, speaker_id, 0, Local::now())
+    }
+
+    /// Push a fragment with speaker information and emit-time sample offset.
+    pub fn push_with_speaker_and_sample(
+        &mut self,
+        text: String,
+        speaker_id: Option<u32>,
+        emit_sample: u64,
+    ) -> AppendKind {
+        self.push_at_with_speaker(text, speaker_id, emit_sample, Local::now())
+    }
+
+    /// Push a fragment with an explicit timestamp, optional speaker ID, and emit sample.
+    ///
+    /// Determines whether this fragment starts a new paragraph or continues the previous one.
+    /// A new paragraph is forced when:
+    /// - This is the first fragment (empty vec)
+    /// - The time gap since the last fragment exceeds `paragraph_gap`
+    /// - The speaker changed from the previous fragment (diarization active)
     ///
     /// **Negative gaps** (clock backwards): Treated as `ContinueParagraph`.
-    pub fn push_at(&mut self, text: String, ts: DateTime<Local>) -> AppendKind {
+    pub fn push_at_with_speaker(
+        &mut self,
+        text: String,
+        speaker_id: Option<u32>,
+        emit_sample: u64,
+        ts: DateTime<Local>,
+    ) -> AppendKind {
         let kind = if self.fragments.is_empty() {
             AppendKind::NewParagraph
         } else {
             let last = &self.fragments[self.fragments.len() - 1];
-            let gap = ts.signed_duration_since(last.timestamp)
-                .to_std()
-                .unwrap_or(StdDuration::ZERO);
-            if gap > self.paragraph_gap {
+            // Speaker change always forces a new paragraph when diarization is active.
+            if speaker_id.is_some() && last.speaker_id.is_some() && speaker_id != last.speaker_id {
                 AppendKind::NewParagraph
             } else {
-                AppendKind::ContinueParagraph
+                let gap = ts
+                    .signed_duration_since(last.timestamp)
+                    .to_std()
+                    .unwrap_or(StdDuration::ZERO);
+                if gap > self.paragraph_gap {
+                    AppendKind::NewParagraph
+                } else {
+                    AppendKind::ContinueParagraph
+                }
             }
         };
 
-        self.fragments.push(Fragment { timestamp: ts, text });
+        self.fragments.push(Fragment {
+            timestamp: ts,
+            text,
+            speaker_id,
+            emit_sample,
+        });
         kind
+    }
+
+    /// Push a fragment with an explicit timestamp and no speaker information.
+    ///
+    /// Thin wrapper around `push_at_with_speaker` passing `None`.
+    pub fn push_at(&mut self, text: String, ts: DateTime<Local>) -> AppendKind {
+        self.push_at_with_speaker(text, None, 0, ts)
+    }
+
+    /// Retroactively re-attribute all fragments whose `emit_sample >= from_sample`
+    /// to `new_speaker_id`. Returns the number of fragments rewritten.
+    ///
+    /// Called when Sortformer reveals (a few captions late) that a speaker switch
+    /// actually began at `from_sample`. After this call, paragraph boundaries
+    /// derived from `paragraphs()` automatically reflect the corrected speakers.
+    pub fn relabel_since(&mut self, from_sample: u64, new_speaker_id: u32) -> usize {
+        let mut n = 0;
+        for frag in self.fragments.iter_mut().rev() {
+            if frag.emit_sample < from_sample {
+                break;
+            }
+            if frag.speaker_id != Some(new_speaker_id) {
+                frag.speaker_id = Some(new_speaker_id);
+                n += 1;
+            }
+        }
+        n
     }
 
     /// Return a slice of all fragments in order.
@@ -105,7 +178,8 @@ impl TranscriptLog {
             let prev = &self.fragments[i - 1];
             let curr = &self.fragments[i];
 
-            let gap = curr.timestamp
+            let gap = curr
+                .timestamp
                 .signed_duration_since(prev.timestamp)
                 .to_std()
                 .unwrap_or(StdDuration::ZERO);
@@ -218,7 +292,10 @@ mod tests {
 
         let paras = log.paragraphs();
         assert_eq!(paras.len(), 1);
-        assert_eq!(paras[0].text, "Hello world,", "Whitespace should be preserved");
+        assert_eq!(
+            paras[0].text, "Hello world,",
+            "Whitespace should be preserved"
+        );
     }
 
     /// AC1.4: Verify the shape of JSON output.
@@ -331,11 +408,63 @@ mod tests {
         let mut log = TranscriptLog::new(std::time::Duration::from_millis(1500));
         let t0 = ts(1_700_000_000, 0);
         log.push_at("hello".to_string(), t0);
-        log.push_at(" world".to_string(), t0 + chrono::Duration::milliseconds(200));
+        log.push_at(
+            " world".to_string(),
+            t0 + chrono::Duration::milliseconds(200),
+        );
         // simulate user toggling mode (no effect on the log itself)
-        log.push_at("again".to_string(), t0 + chrono::Duration::milliseconds(2000));
+        log.push_at(
+            "again".to_string(),
+            t0 + chrono::Duration::milliseconds(2000),
+        );
         assert_eq!(log.fragments().len(), 3);
-        assert_eq!(log.paragraphs().len(), 2,
-            "second paragraph starts after >1.5s gap");
+        assert_eq!(
+            log.paragraphs().len(),
+            2,
+            "second paragraph starts after >1.5s gap"
+        );
+    }
+
+    /// relabel_since rewrites the speaker_id of trailing fragments whose
+    /// emit_sample is at or after from_sample. Older fragments are
+    /// untouched. Returns the number rewritten.
+    #[test]
+    fn relabel_since_rewrites_trailing_fragments() {
+        let mut log = TranscriptLog::new(std::time::Duration::from_secs(2));
+        let t0 = ts(1_700_000_000, 0);
+        log.push_at_with_speaker("first".to_string(), Some(0), 16_000, t0);
+        log.push_at_with_speaker(
+            " second".to_string(),
+            Some(0),
+            32_000,
+            t0 + chrono::Duration::milliseconds(100),
+        );
+        // Third fragment is misattributed to Speaker 1 but should be Speaker 2.
+        log.push_at_with_speaker(
+            " third".to_string(),
+            Some(0),
+            48_000,
+            t0 + chrono::Duration::milliseconds(200),
+        );
+
+        // Sortformer reveals speaker switched at sample 40000.
+        let n = log.relabel_since(40_000, 1);
+        assert_eq!(n, 1, "only the third fragment should be relabeled");
+
+        let frags = log.fragments();
+        assert_eq!(frags[0].speaker_id, Some(0));
+        assert_eq!(frags[1].speaker_id, Some(0));
+        assert_eq!(frags[2].speaker_id, Some(1));
+    }
+
+    /// relabel_since is idempotent — calling it twice with the same args
+    /// reports 0 rewrites on the second call.
+    #[test]
+    fn relabel_since_is_idempotent() {
+        let mut log = TranscriptLog::new(std::time::Duration::from_secs(2));
+        let t0 = ts(1_700_000_000, 0);
+        log.push_at_with_speaker("only".to_string(), Some(0), 16_000, t0);
+        assert_eq!(log.relabel_since(16_000, 1), 1);
+        assert_eq!(log.relabel_since(16_000, 1), 0, "second call is a no-op");
     }
 }

@@ -4,7 +4,14 @@
 #[test]
 fn cli_invalid_engine_moonshine_exits_with_error() {
     let output = std::process::Command::new("cargo")
-        .args(&["run", "--release", "--", "--engine", "moonshine", "--reset-config"])
+        .args(&[
+            "run",
+            "--release",
+            "--",
+            "--engine",
+            "moonshine",
+            "--reset-config",
+        ])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .expect("Failed to run subtidal binary");
@@ -27,7 +34,14 @@ fn cli_invalid_engine_moonshine_exits_with_error() {
 #[test]
 fn cli_invalid_engine_unknown_exits_with_error() {
     let output = std::process::Command::new("cargo")
-        .args(&["run", "--release", "--", "--engine", "unknown_engine", "--reset-config"])
+        .args(&[
+            "run",
+            "--release",
+            "--",
+            "--engine",
+            "unknown_engine",
+            "--reset-config",
+        ])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .expect("Failed to run subtidal binary");

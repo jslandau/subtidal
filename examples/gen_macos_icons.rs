@@ -20,8 +20,8 @@ fn write_png(path: &str, rgba: &[u8], size: u32) {
 }
 
 fn main() {
-    let on  = subtidal::tray::icon::render_cc_icon_rgba(80, 200, 80, 1.0,  false);
+    let on = subtidal::tray::icon::render_cc_icon_rgba(80, 200, 80, 1.0, false);
     let off = subtidal::tray::icon::render_cc_icon_rgba(80, 200, 80, 0.35, true);
-    write_png("resources/macos/tray-icon-on.png",  &on,  64);
+    write_png("resources/macos/tray-icon-on.png", &on, 64);
     write_png("resources/macos/tray-icon-off.png", &off, 64);
 }

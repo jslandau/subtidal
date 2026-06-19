@@ -4,8 +4,8 @@ use anyhow::Context;
 use anyhow::Result;
 use pipewire as pw;
 use pw::properties::properties;
-use ringbuf::HeapRb;
 use ringbuf::traits::{Producer, Split};
+use ringbuf::HeapRb;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -113,12 +113,12 @@ fn run_pipewire_loop(
 ) -> Result<()> {
     let mainloop = pw::main_loop::MainLoopRc::new(None)
         .context("creating PipeWire MainLoop — is PipeWire running?")?;
-    let context = pw::context::ContextRc::new(&mainloop, None)
-        .context("creating PipeWire Context")?;
-    let core = context.connect_rc(None)
+    let context =
+        pw::context::ContextRc::new(&mainloop, None).context("creating PipeWire Context")?;
+    let core = context
+        .connect_rc(None)
         .context("connecting to PipeWire — is PipeWire running?")?;
-    let registry = core.get_registry()
-        .context("getting PipeWire Registry")?;
+    let registry = core.get_registry().context("getting PipeWire Registry")?;
 
     // Collect disappeared node IDs from the registry global_remove callback.
     // Both producer (global_remove closure, called during mainloop.iterate())
@@ -137,13 +137,13 @@ fn run_pipewire_loop(
             if let Some(props) = &global.props {
                 let media_class: &str = props.get("media.class").unwrap_or("");
                 let node_name = props.get("node.name").unwrap_or("").to_string();
-                let description = props.get("node.description")
+                let description = props
+                    .get("node.description")
                     .or(props.get("node.nick"))
                     .unwrap_or(&node_name)
                     .to_string();
 
-                let is_monitor = media_class == "Audio/Source"
-                    && node_name.ends_with(".monitor");
+                let is_monitor = media_class == "Audio/Source" && node_name.ends_with(".monitor");
                 let is_app_stream = media_class == "Stream/Output/Audio";
 
                 if is_monitor || is_app_stream {
@@ -187,10 +187,15 @@ fn run_pipewire_loop(
             Ok(AudioCommand::Shutdown) => break,
             Ok(AudioCommand::SwitchSource(new_source)) => {
                 current_source = new_source.clone(); // track new source for fallback check
-                // Drop the current capture (stream and listener) to disconnect it from PipeWire.
+                                                     // Drop the current capture (stream and listener) to disconnect it from PipeWire.
                 _capture = None;
                 // Reconnect to the new source.
-                match create_capture_stream(&core, &new_source, Arc::clone(&ring_producer), Arc::clone(&wake)) {
+                match create_capture_stream(
+                    &core,
+                    &new_source,
+                    Arc::clone(&ring_producer),
+                    Arc::clone(&wake),
+                ) {
                     Ok(c) => {
                         _capture = Some(c);
                         eprintln!("info: audio source switched to {:?}", new_source);
@@ -234,8 +239,10 @@ fn run_pipewire_loop(
                 // Remove from node list so tray doesn't show stale entries.
                 node_list.lock().unwrap().retain(|n| n.node_id != id);
 
-                if let crate::config::AudioSource::Application { node_id: active_id, ref node_name } =
-                    &current_source
+                if let crate::config::AudioSource::Application {
+                    node_id: active_id,
+                    ref node_name,
+                } = &current_source
                 {
                     if *active_id == id {
                         eprintln!(
@@ -255,7 +262,12 @@ fn run_pipewire_loop(
             // Perform reconnect outside the closure
             if should_reconnect {
                 _capture = None;
-                match create_capture_stream(&core, &crate::config::AudioSource::SystemOutput, Arc::clone(&ring_producer), Arc::clone(&wake)) {
+                match create_capture_stream(
+                    &core,
+                    &crate::config::AudioSource::SystemOutput,
+                    Arc::clone(&ring_producer),
+                    Arc::clone(&wake),
+                ) {
                     Ok(s) => {
                         _capture = Some(s);
                     }
@@ -263,10 +275,7 @@ fn run_pipewire_loop(
                         eprintln!("error: failed to reconnect to system output: {e:#}");
                     }
                 }
-                let _ = fallback_tx.send(FallbackEvent {
-                    lost_name,
-                    lost_id,
-                });
+                let _ = fallback_tx.send(FallbackEvent { lost_name, lost_id });
             }
         }
     }
@@ -283,13 +292,15 @@ fn create_capture_stream<'a>(
     ring_producer: Arc<Mutex<ringbuf::HeapProd<f32>>>,
     wake: Arc<crate::stt::AudioWake>,
 ) -> Result<CaptureStream<'a>> {
-    use pw::spa::pod::Pod;
     use pw::spa::param::audio::{AudioFormat, AudioInfoRaw};
+    use pw::spa::pod::Pod;
 
     // Build stream properties.
     let target_node = match source {
         crate::config::AudioSource::SystemOutput => None,
         crate::config::AudioSource::Application { node_id, .. } => Some(node_id.to_string()),
+        // App source is macOS-only; on Linux it should not appear but we handle it gracefully.
+        crate::config::AudioSource::App { .. } => None,
     };
 
     let mut stream_props = properties! {
@@ -364,15 +375,16 @@ fn create_capture_stream<'a>(
         .context("registering PipeWire stream listener")?;
 
     // Connect the stream.
-    stream.connect(
-        pw::spa::utils::Direction::Input,
-        None,
-        pw::stream::StreamFlags::AUTOCONNECT
-            | pw::stream::StreamFlags::MAP_BUFFERS
-            | pw::stream::StreamFlags::RT_PROCESS,
-        &mut params,
-    )
-    .context("connecting PipeWire capture stream")?;
+    stream
+        .connect(
+            pw::spa::utils::Direction::Input,
+            None,
+            pw::stream::StreamFlags::AUTOCONNECT
+                | pw::stream::StreamFlags::MAP_BUFFERS
+                | pw::stream::StreamFlags::RT_PROCESS,
+            &mut params,
+        )
+        .context("connecting PipeWire capture stream")?;
 
     // Return both stream and listener wrapped together to ensure proper cleanup.
     Ok(CaptureStream {
@@ -400,10 +412,18 @@ pub fn validate_audio_source(
             if current_nodes.iter().any(|n| n.node_id == *node_id) {
                 saved_source
             } else {
-                eprintln!("warn: saved audio source (node_id={}) no longer available", node_id);
+                eprintln!(
+                    "warn: saved audio source (node_id={}) no longer available",
+                    node_id
+                );
                 eprintln!("warn: falling back to system output");
                 crate::config::AudioSource::SystemOutput
             }
+        }
+        // App source is macOS-only; on Linux fall back to SystemOutput.
+        crate::config::AudioSource::App { .. } => {
+            eprintln!("warn: App source not supported on Linux; falling back to system output");
+            crate::config::AudioSource::SystemOutput
         }
     }
 }

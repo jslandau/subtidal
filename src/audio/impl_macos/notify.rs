@@ -3,11 +3,13 @@
 //! application exits (AC3.4 fallback banner).
 
 use anyhow::Result;
+use block2::RcBlock;
 use objc2::MainThreadMarker;
 use objc2_foundation::NSString;
-use objc2_user_notifications::{UNUserNotificationCenter, UNMutableNotificationContent, UNNotificationRequest};
+use objc2_user_notifications::{
+    UNMutableNotificationContent, UNNotificationRequest, UNUserNotificationCenter,
+};
 use std::sync::atomic::{AtomicU64, Ordering};
-use block2::RcBlock;
 
 static NOTIFICATION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -40,7 +42,7 @@ pub fn post_user_notification(title: &str, body: &str) -> Result<()> {
     let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
         &*identifier,
         &content,
-        None,  // nil trigger = immediate delivery
+        None, // nil trigger = immediate delivery
     );
 
     // Post the notification via the default center (no completion handler needed).

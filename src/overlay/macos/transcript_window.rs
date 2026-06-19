@@ -3,17 +3,18 @@
 //! Mirrors the Linux GTK4 transcript window implementation, providing a regular
 //! window (not layer-shell overlay) with timestamped caption display and Save dialog.
 
+use crate::overlay::transcript_log::TranscriptLog;
 use objc2::rc::Retained;
 use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSWindow, NSWindowStyleMask, NSScrollView, NSTextView, NSButton, NSView,
-    NSSavePanel, NSBackingStoreType, NSAutoresizingMaskOptions,
+    NSAutoresizingMaskOptions, NSBackingStoreType, NSButton, NSSavePanel, NSScrollView, NSTextView,
+    NSView, NSWindow, NSWindowStyleMask,
 };
-use objc2_foundation::{NSString, NSObject, NSRange};
-use objc2_core_foundation::{CGPoint, CGSize, CGRect};
+use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+use objc2_foundation::{NSObject, NSRange, NSString};
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use crate::overlay::transcript_log::TranscriptLog;
 
 /// Handles needed by the orchestration layer to drive the transcript window.
 #[derive(Clone)]
@@ -91,15 +92,12 @@ pub fn build_transcript_window(
 ) -> TranscriptWindow {
     unsafe {
         // Window frame: 800x600 starting at (200, 200).
-        let rect = CGRect::new(
-            CGPoint::new(200.0, 200.0),
-            CGSize::new(800.0, 600.0),
-        );
+        let rect = CGRect::new(CGPoint::new(200.0, 200.0), CGSize::new(800.0, 600.0));
 
         let style = NSWindowStyleMask::Titled
-                  | NSWindowStyleMask::Closable
-                  | NSWindowStyleMask::Miniaturizable
-                  | NSWindowStyleMask::Resizable;
+            | NSWindowStyleMask::Closable
+            | NSWindowStyleMask::Miniaturizable
+            | NSWindowStyleMask::Resizable;
 
         let window = NSWindow::initWithContentRect_styleMask_backing_defer(
             NSWindow::alloc(mtm),
@@ -117,10 +115,7 @@ pub fn build_transcript_window(
             CGPoint::new(0.0, 50.0),
             CGSize::new(rect.size.width, rect.size.height - 50.0),
         );
-        let scroll = NSScrollView::initWithFrame(
-            NSScrollView::alloc(mtm),
-            scroll_rect,
-        );
+        let scroll = NSScrollView::initWithFrame(NSScrollView::alloc(mtm), scroll_rect);
         scroll.setHasVerticalScroller(true);
         scroll.setAutohidesScrollers(true);
         scroll.setBorderType(objc2_app_kit::NSBorderType::NoBorder);
@@ -158,24 +153,17 @@ pub fn build_transcript_window(
             CGPoint::new(rect.size.width - 120.0, 10.0),
             CGSize::new(100.0, 30.0),
         );
-        let save_button = NSButton::initWithFrame(
-            NSButton::alloc(mtm),
-            button_rect,
-        );
+        let save_button = NSButton::initWithFrame(NSButton::alloc(mtm), button_rect);
         save_button.setTitle(&NSString::from_str("Save…"));
         save_button.setAutoresizingMask(
-            NSAutoresizingMaskOptions::ViewMinXMargin
-                | NSAutoresizingMaskOptions::ViewMaxYMargin,
+            NSAutoresizingMaskOptions::ViewMinXMargin | NSAutoresizingMaskOptions::ViewMaxYMargin,
         );
 
         // Create action target.
         let actions = TranscriptActions::new(mtm);
 
         // Create container view to hold scroll view and button.
-        let container = NSView::initWithFrame(
-            NSView::alloc(mtm),
-            rect,
-        );
+        let container = NSView::initWithFrame(NSView::alloc(mtm), rect);
         container.addSubview(&scroll);
         container.addSubview(&save_button);
 
@@ -205,24 +193,26 @@ pub fn build_transcript_window(
 }
 
 /// Re-render the transcript log into the NSTextView. The caller is
-/// responsible for having already pushed the new fragment into the log;
+/// responsible for having already pushed/relabelled fragments in the log;
 /// this function only updates display. If the view was scrolled to the
 /// bottom when we started, scroll back to the bottom after the update.
-pub fn append_fragment(
+pub fn rebuild_view(
     state: &TranscriptWindowState,
     _mtm: MainThreadMarker,
-    _text: String,
-    _ts: chrono::DateTime<chrono::Utc>,
+    speaker_names: &HashMap<u32, String>,
 ) {
     let was_at_bottom = is_near_bottom(&state.text_view);
 
-    let formatted = format_paragraphs(&state.log.lock().unwrap().paragraphs());
+    let formatted = format_fragments(&state.log.lock().unwrap(), speaker_names);
     let ns = NSString::from_str(&formatted);
     state.text_view.setString(&ns);
 
     if was_at_bottom {
         let len = ns.length();
-        state.text_view.scrollRangeToVisible(NSRange { location: len, length: 0 });
+        state.text_view.scrollRangeToVisible(NSRange {
+            location: len,
+            length: 0,
+        });
     }
 }
 
@@ -244,7 +234,58 @@ pub fn order_out(state: &TranscriptWindowState, _mtm: MainThreadMarker) {
     state.window.orderOut(None);
 }
 
-/// Format paragraphs as timestamped lines.
+/// Format fragments as timestamped paragraphs with speaker labels.
+///
+/// Paragraph breaks mirror `TranscriptLog::push_at_with_speaker`: first
+/// fragment, a gap greater than 1.5 seconds, or a speaker change when both
+/// adjacent fragments have speaker IDs. Fragment text is preserved verbatim.
+pub fn format_fragments(log: &TranscriptLog, speaker_names: &HashMap<u32, String>) -> String {
+    let mut out = String::new();
+    let fragments = log.fragments();
+    for (idx, fragment) in fragments.iter().enumerate() {
+        let new_paragraph = if idx == 0 {
+            true
+        } else {
+            let prev = &fragments[idx - 1];
+            let speaker_changed = fragment.speaker_id.is_some()
+                && prev.speaker_id.is_some()
+                && fragment.speaker_id != prev.speaker_id;
+            let gap = fragment
+                .timestamp
+                .signed_duration_since(prev.timestamp)
+                .to_std()
+                .unwrap_or(std::time::Duration::ZERO);
+            speaker_changed || gap > std::time::Duration::from_millis(1500)
+        };
+
+        if new_paragraph {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(&fragment.timestamp.format("[%H:%M:%S] ").to_string());
+            if let Some(id) = fragment.speaker_id {
+                out.push_str(&speaker_label(speaker_names, id));
+                out.push_str(": ");
+            }
+        }
+        out.push_str(&fragment.text);
+    }
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    out
+}
+
+fn speaker_label(speaker_names: &HashMap<u32, String>, id: u32) -> String {
+    speaker_names
+        .get(&id)
+        .cloned()
+        .unwrap_or_else(|| format!("Speaker {}", id + 1))
+}
+
+/// Format paragraphs as timestamped lines. Kept for neutral legacy tests and
+/// any non-speaker callers; live macOS transcript rendering uses fragments.
+#[cfg(test)]
 pub fn format_paragraphs(paragraphs: &[crate::overlay::transcript_log::Paragraph]) -> String {
     let mut out = String::new();
     for p in paragraphs {
@@ -292,7 +333,11 @@ unsafe fn save_transcript_impl(
     if let Some(url) = panel.URL() {
         if let Some(path_str) = url.path() {
             let path = path_str.to_string();
-            let json_value = state.log.lock().unwrap().to_json("nemotron", chrono::Local::now());
+            let json_value = state
+                .log
+                .lock()
+                .unwrap()
+                .to_json("nemotron", chrono::Local::now());
             let json_str = serde_json::to_string_pretty(&json_value)
                 .unwrap_or_else(|e| format!(r#"{{"error": "{}"}}"#, e));
             std::fs::write(&path, json_str)
@@ -310,8 +355,13 @@ mod tests {
 
     #[test]
     fn empty_transcript_save_produces_valid_json() {
-        let log = Arc::new(Mutex::new(TranscriptLog::new(std::time::Duration::from_millis(1500))));
-        let json = log.lock().unwrap().to_json("nemotron", chrono::Local::now());
+        let log = Arc::new(Mutex::new(TranscriptLog::new(
+            std::time::Duration::from_millis(1500),
+        )));
+        let json = log
+            .lock()
+            .unwrap()
+            .to_json("nemotron", chrono::Local::now());
         serde_json::to_string(&json).expect("valid JSON serialization");
     }
 
@@ -321,16 +371,59 @@ mod tests {
         use chrono::Local;
 
         let now = Local::now();
-        let paras = vec![
-            Paragraph {
-                timestamp: now,
-                text: "Hello world".to_string(),
-            },
-        ];
+        let paras = vec![Paragraph {
+            timestamp: now,
+            text: "Hello world".to_string(),
+        }];
 
         let formatted = format_paragraphs(&paras);
         assert!(formatted.starts_with("["));
         assert!(formatted.contains("Hello world"));
         assert!(formatted.ends_with("\n"));
+    }
+
+    #[test]
+    fn format_fragments_uses_default_speaker_labels() {
+        let mut log = TranscriptLog::new(std::time::Duration::from_millis(1500));
+        log.push_with_speaker_and_sample(" hello".to_string(), Some(0), 100);
+
+        let formatted = format_fragments(&log, &HashMap::new());
+        assert!(formatted.contains("Speaker 1:  hello"));
+    }
+
+    #[test]
+    fn format_fragments_uses_custom_speaker_names() {
+        let mut log = TranscriptLog::new(std::time::Duration::from_millis(1500));
+        log.push_with_speaker_and_sample(" hello".to_string(), Some(1), 100);
+        let names = HashMap::from([(1, "Bob".to_string())]);
+
+        let formatted = format_fragments(&log, &names);
+        assert!(formatted.contains("Bob:  hello"));
+        assert!(!formatted.contains("Speaker 2:"));
+    }
+
+    #[test]
+    fn speaker_change_forces_labeled_new_paragraph() {
+        use chrono::TimeZone;
+        let ts = chrono::Local.timestamp_opt(10, 0).unwrap();
+        let mut log = TranscriptLog::new(std::time::Duration::from_millis(1500));
+        log.push_at_with_speaker(" hello".to_string(), Some(0), 100, ts);
+        log.push_at_with_speaker(" there".to_string(), Some(1), 200, ts);
+
+        let formatted = format_fragments(&log, &HashMap::new());
+        assert!(formatted.contains("Speaker 1:  hello\n"));
+        assert!(formatted.contains("Speaker 2:  there\n"));
+    }
+
+    #[test]
+    fn relabeled_fragments_render_with_new_speaker() {
+        let mut log = TranscriptLog::new(std::time::Duration::from_millis(1500));
+        log.push_with_speaker_and_sample(" hello".to_string(), Some(0), 100);
+        log.push_with_speaker_and_sample(" world".to_string(), Some(0), 200);
+        assert_eq!(log.relabel_since(150, 1), 1);
+
+        let formatted = format_fragments(&log, &HashMap::new());
+        assert!(formatted.contains("Speaker 1:  hello\n"));
+        assert!(formatted.contains("Speaker 2:  world\n"));
     }
 }

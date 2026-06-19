@@ -7,27 +7,28 @@
 
 pub mod drag;
 pub mod input_region;
+pub mod rename_dialog;
 pub mod transcript_window;
 pub mod window;
 
+use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{Application, ApplicationWindow};
-use gtk4::glib;
-use gtk4_layer_shell::{Edge, KeyboardMode, LayerShell, Layer};
+use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use crate::config::{Config, OverlayMode};
-use crate::overlay::{
-    caption_buffer::CaptionBuffer,
-    CaptionsEnabled, OverlayCommand,
-};
+use crate::overlay::{caption_buffer::CaptionBuffer, CaptionsEnabled, OverlayCommand};
 
 use drag::add_drag_handler;
 use input_region::{clear_input_region, set_empty_input_region};
-use window::{apply_appearance, build_overlay_window, configure_docked, estimate_max_chars, find_caption_label};
+use window::{
+    apply_appearance, build_overlay_window, configure_docked, estimate_max_chars,
+    find_caption_label,
+};
 
 /// Build and run the GTK4 application.
 ///
@@ -35,8 +36,9 @@ use window::{apply_appearance, build_overlay_window, configure_docked, estimate_
 /// main loop exits.
 pub fn run_gtk_app(
     config: Config,
-    caption_rx: async_channel::Receiver<String>,
+    caption_rx: async_channel::Receiver<crate::overlay::CaptionEvent>,
     cmd_rx: async_channel::Receiver<OverlayCommand>,
+    cmd_tx: async_channel::Sender<OverlayCommand>,
     captions_enabled: CaptionsEnabled,
 ) {
     let app = Application::builder()
@@ -129,32 +131,64 @@ pub fn run_gtk_app(
             let log = Rc::clone(&transcript_log);
             let mode = Rc::clone(&current_mode);
             let tstate = transcript_state.clone();
+            let config = Arc::clone(&config_clone);
             glib::MainContext::default().spawn_local(async move {
-                while let Ok(text) = caption_rx.recv().await {
+                while let Ok(event) = caption_rx.recv().await {
                     if !enabled.load(Ordering::Relaxed) {
                         continue;
                     }
 
-                    // Always: append to the durable transcript log AND to the transcript
-                    // window's TextBuffer (safe even while the window is hidden — GTK
-                    // queues layout updates and they materialize on .present()).
-                    let kind = log.borrow_mut().push(text.clone());
-                    let fragment = log
-                        .borrow()
-                        .fragments()
-                        .last()
-                        .cloned()
-                        .expect("just pushed a fragment");
-                    transcript_window::append_fragment_to_view(&tstate, &fragment, kind);
+                    match event {
+                        crate::overlay::CaptionEvent::Append { text, speaker_id, emit_sample } => {
+                            // Always: append to the durable transcript log AND to the transcript
+                            // window's TextBuffer (safe even while the window is hidden — GTK
+                            // queues layout updates and they materialize on .present()).
+                            let kind = log.borrow_mut().push_with_speaker_and_sample(
+                                text.clone(), speaker_id, emit_sample,
+                            );
+                            let fragment = log
+                                .borrow()
+                                .fragments()
+                                .last()
+                                .cloned()
+                                .expect("just pushed a fragment");
+                            let names = config.lock().unwrap().speaker_names.clone();
+                            transcript_window::append_fragment_to_view(&tstate, &fragment, kind, &names);
 
-                    // Overlay surfaces (caption_buffer + label) only update when the
-                    // overlay is the active mode.
-                    let m = mode.borrow().clone();
-                    if matches!(m, OverlayMode::Docked | OverlayMode::Floating) {
-                        buf.borrow_mut().push(text);
-                        if !dragging.get() {
-                            label.set_text(&buf.borrow().display_text());
-                            window.set_visible(true);
+                            // Overlay surfaces (caption_buffer + label) only update when the
+                            // overlay is the active mode.
+                            let m = mode.borrow().clone();
+                            if matches!(m, OverlayMode::Docked | OverlayMode::Floating) {
+                                buf.borrow_mut().push_with_speaker_and_sample(
+                                    text, speaker_id, emit_sample,
+                                );
+                                if !dragging.get() {
+                                    label.set_text(&buf.borrow().display_text());
+                                    window.set_visible(true);
+                                }
+                            }
+                        }
+                        crate::overlay::CaptionEvent::Relabel { from_sample, new_speaker_id } => {
+                            // Retroactively correct attribution. Update the durable
+                            // transcript log first (always), then the live overlay
+                            // buffer if it's the active surface. The transcript view
+                            // currently re-renders only on next append; that's
+                            // acceptable since the Save export reads the log directly.
+                            let n_log = log.borrow_mut().relabel_since(from_sample, new_speaker_id);
+                            let n_buf = buf.borrow_mut().relabel_since(from_sample, new_speaker_id);
+                            if n_log + n_buf > 0 {
+                                eprintln!(
+                                    "info: diarization: relabeled {n_log} log fragment(s), {n_buf} overlay line(s) to Speaker {}",
+                                    new_speaker_id + 1,
+                                );
+                            }
+                            let m = mode.borrow().clone();
+                            if matches!(m, OverlayMode::Docked | OverlayMode::Floating)
+                                && n_buf > 0
+                                && !dragging.get()
+                            {
+                                label.set_text(&buf.borrow().display_text());
+                            }
                         }
                     }
                 }
@@ -189,6 +223,7 @@ pub fn run_gtk_app(
             let mode = Rc::clone(&current_mode);
             let tstate = transcript_state.clone();
             let log = Rc::clone(&transcript_log);
+            let cmd_tx = cmd_tx.clone();
             glib::MainContext::default().spawn_local(async move {
                 while let Ok(cmd) = cmd_rx.recv().await {
                     let bypass_drag = matches!(
@@ -197,11 +232,13 @@ pub fn run_gtk_app(
                             | OverlayCommand::SetVisible(_)
                             | OverlayCommand::SetCaptionsEnabled(_)
                             | OverlayCommand::SetMode(_)
+                            | OverlayCommand::ShowRenameDialog
+                            | OverlayCommand::SetSpeakerNames(_)
                     );
                     if bypass_drag || !dragging.get() {
                         handle_overlay_command(
                             &window, cmd, &config, &dragging, &buf,
-                            &captions_enabled, &mode, &tstate, &log,
+                            &captions_enabled, &mode, &tstate, &log, &cmd_tx,
                         );
                     }
                 }
@@ -233,6 +270,7 @@ fn handle_overlay_command(
     current_mode: &Rc<RefCell<OverlayMode>>,
     transcript_state: &transcript_window::TranscriptWindowState,
     transcript_log: &Rc<RefCell<crate::overlay::transcript_log::TranscriptLog>>,
+    cmd_tx: &async_channel::Sender<OverlayCommand>,
 ) {
     match cmd {
         OverlayCommand::SetVisible(v) => {
@@ -329,7 +367,8 @@ fn handle_overlay_command(
             apply_appearance(&appearance);
             let label = find_caption_label(window);
             let max_chars = estimate_max_chars(
-                appearance.width, appearance.font_size,
+                appearance.width,
+                appearance.font_size,
                 appearance.effective_char_width_fraction(),
             );
             label.set_max_width_chars(max_chars);
@@ -337,7 +376,8 @@ fn handle_overlay_command(
             window.set_width_request(appearance.width);
             let mut buf = caption_buffer.borrow_mut();
             buf.update_config(
-                appearance.max_lines as usize, max_chars as usize,
+                appearance.max_lines as usize,
+                max_chars as usize,
                 appearance.effective_expire_secs(),
             );
         }
@@ -349,6 +389,41 @@ fn handle_overlay_command(
             // behavior unchanged.
             let label = find_caption_label(window);
             label.set_text(&text);
+        }
+        OverlayCommand::SetSpeakerNames(names) => {
+            // 1. Persist on Config (session-scoped: not written to disk,
+            //    since Sortformer speaker IDs aren't stable across launches).
+            {
+                let mut cfg = config.lock().unwrap();
+                cfg.speaker_names = names.clone();
+            }
+
+            // 2. Update CaptionBuffer's name map AND rewrite embedded label
+            //    prefixes on any line whose current speaker has a new name.
+            //    We don't try to bisect or re-flow text — only substitute the
+            //    "Speaker N: " prefix that was written at line creation time.
+            {
+                let mut buf = caption_buffer.borrow_mut();
+                let old_names = buf.speaker_names.clone();
+                buf.speaker_names = names.clone();
+                rewrite_embedded_labels(&mut buf, &old_names, &names);
+            }
+
+            // 3. Repaint the live overlay label (if the overlay is visible).
+            let m = current_mode.borrow().clone();
+            if matches!(m, OverlayMode::Docked | OverlayMode::Floating) {
+                let label = find_caption_label(window);
+                label.set_text(&caption_buffer.borrow().display_text());
+            }
+
+            // 4. Fully rebuild the transcript view from the log. Cheaper
+            //    than walking the buffer to patch individual paragraphs, and
+            //    correct regardless of which fragments are visible.
+            transcript_window::rebuild_view(transcript_state, &transcript_log.borrow(), &names);
+        }
+        OverlayCommand::ShowRenameDialog => {
+            let current = config.lock().unwrap().speaker_names.clone();
+            rename_dialog::show_rename_dialog(window, current, cmd_tx.clone());
         }
         OverlayCommand::SetCaptionsEnabled(enabled) => {
             // Update the AtomicBool first — the caption consumer future reads this
@@ -376,6 +451,35 @@ fn handle_overlay_command(
             if let Some(app) = window.application() {
                 app.quit();
             }
+        }
+    }
+}
+
+/// After a `SetSpeakerNames` update, walk each line in the buffer and
+/// substitute its leading "Speaker {label}: " prefix with the new label
+/// when the name changed for that line's speaker. Lines without an
+/// embedded prefix (continuations) are left untouched.
+fn rewrite_embedded_labels(
+    buf: &mut CaptionBuffer,
+    old_names: &std::collections::HashMap<u32, String>,
+    new_names: &std::collections::HashMap<u32, String>,
+) {
+    fn label(map: &std::collections::HashMap<u32, String>, id: u32) -> String {
+        map.get(&id)
+            .cloned()
+            .unwrap_or_else(|| format!("Speaker {}", id + 1))
+    }
+    for line in buf.lines.iter_mut() {
+        let Some(sid) = line.speaker_id else { continue };
+        let old = label(old_names, sid);
+        let new = label(new_names, sid);
+        if old == new {
+            continue;
+        }
+        let old_prefix = format!("{old}: ");
+        let new_prefix = format!("{new}: ");
+        if line.text.starts_with(&old_prefix) {
+            line.text = format!("{new_prefix}{}", &line.text[old_prefix.len()..]);
         }
     }
 }

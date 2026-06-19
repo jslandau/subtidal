@@ -6,12 +6,33 @@
 //! decoders can re-emit their tail, so overlap dedup on 4+ char matches strips
 //! the duplicate prefix.
 
+use std::collections::HashMap;
 use std::time::Instant;
 
-/// Represents one line of caption text with a timestamp for expiry.
+/// Represents one line of caption text with a timestamp for expiry and
+/// an optional speaker ID (0-based). When diarization is active, the
+/// display text is prefixed with the speaker label; when None, no prefix
+/// is added (backward-compatible with non-diarized captions).
 pub struct CaptionLine {
     pub text: String,
     pub last_active: Instant,
+    /// Speaker ID for this line, or None when diarization is off.
+    /// Speaker IDs are 0-based (0 = "Speaker 1", 1 = "Speaker 2", etc.).
+    pub speaker_id: Option<u32>,
+    /// Earliest `emit_sample` of any fragment that contributed to this line —
+    /// in the diarization engine's sample-count frame of reference. Set when
+    /// the line is first created and never updated by continuations. Used by
+    /// `relabel_since` to identify which trailing lines to pop and re-push
+    /// under a corrected speaker after Sortformer reveals a late switch.
+    /// `0` for lines pushed while diarization was off.
+    pub earliest_emit_sample: u64,
+    /// Latest `emit_sample` of any fragment that contributed to this line.
+    /// Updated by every continuation. Used to detect boundary-spanning lines
+    /// in `relabel_since`: when `earliest < from_sample <= latest`, the line
+    /// straddles the relabel boundary — we can't bisect the text, but we
+    /// update its `speaker_id` to the new speaker so subsequent tracking is
+    /// correct.
+    pub latest_emit_sample: u64,
 }
 
 /// Buffer that accumulates caption text in lines with fill-and-shift model.
@@ -23,6 +44,15 @@ pub struct CaptionBuffer {
     pub expire_secs: u64,
     /// Track the last few words to detect and skip repeated output from the RNNT decoder.
     pub last_tail: String,
+    /// Speaker display names, populated from the rename dialog.
+    /// Unmapped speakers render as "Speaker {id+1}".
+    pub speaker_names: HashMap<u32, String>,
+    /// The speaker_id of the most recent push, used to detect speaker changes.
+    last_speaker_id: Option<u32>,
+    /// The `emit_sample` of the most recent push, used to stamp newly created
+    /// CaptionLines via `add_new_line`. Set by `push_with_speaker` before
+    /// calling `push_inner`.
+    pending_emit_sample: u64,
 }
 
 impl CaptionBuffer {
@@ -33,13 +63,77 @@ impl CaptionBuffer {
             max_chars_per_line,
             expire_secs,
             last_tail: String::new(),
+            speaker_names: HashMap::new(),
+            last_speaker_id: None,
+            pending_emit_sample: 0,
         }
     }
 
-    /// Add a new caption fragment, deduplicating overlapping text from streaming RNNT.
-    /// Preserves leading/trailing whitespace from the engine — these signal word
-    /// boundaries (e.g. " ve" = new word, "ve" = continuation of previous word).
+    /// Add a new caption fragment with speaker information.
+    ///
+    /// When `speaker_id` differs from the previous push, the current line is
+    /// finalised (closed off — no more text appends to it) and a new line is
+    /// started carrying the speaker label prefix. When `speaker_id` is the
+    /// same as the previous push (or both are `None`), the text continues on
+    /// the same line subject to normal word-wrapping.
+    pub fn push_with_speaker(&mut self, text: String, speaker_id: Option<u32>) {
+        self.push_with_speaker_and_sample(text, speaker_id, 0);
+    }
+
+    /// Add a new caption fragment with speaker information and the
+    /// `emit_sample` at which it was produced. Stamps the (possibly newly
+    /// created) line with `earliest_emit_sample` so that `relabel_since`
+    /// can later identify trailing lines to re-attribute.
+    pub fn push_with_speaker_and_sample(
+        &mut self,
+        text: String,
+        speaker_id: Option<u32>,
+        emit_sample: u64,
+    ) {
+        if text.trim().is_empty() {
+            return;
+        }
+        self.pending_emit_sample = emit_sample;
+
+        let speaker_changed = speaker_id != self.last_speaker_id;
+        // Are we labeling this fragment? Yes if the speaker changed, OR this
+        // is the first labeled push at startup.
+        let needs_label = speaker_id.is_some() && (speaker_changed || self.lines.is_empty());
+
+        // Update the tracked speaker BEFORE pushing so add_new_line writes
+        // the correct speaker_id onto the new CaptionLine.
+        self.last_speaker_id = speaker_id;
+
+        if speaker_changed && !self.lines.is_empty() {
+            // Finalise the current line by forcing a fresh empty line.
+            // The labeled fragment will land on this new line, not be jammed
+            // onto the end of the previous speaker's line.
+            self.add_new_line(String::new());
+            // Also reset overlap-dedup state — the prior speaker's tail must
+            // not eat the start of this speaker's fragment.
+            self.last_tail.clear();
+        }
+
+        if needs_label {
+            let label = self.speaker_label(speaker_id);
+            let labeled_text = format!("{}: {}", label, text.trim_start());
+            self.push_inner(labeled_text, true);
+        } else {
+            self.push_inner(text, false);
+        }
+    }
+
+    /// Add a new caption fragment without speaker information (backward-compatible).
+    ///
+    /// Delegates to `push_with_speaker(text, None)`.
     pub fn push(&mut self, text: String) {
+        self.push_with_speaker(text, None);
+    }
+
+    /// Internal push that handles overlap deduplication and line filling.
+    /// `is_fresh_line` means the text starts a completely new context (e.g.,
+    /// after a speaker change) and should NOT be treated as a continuation.
+    fn push_inner(&mut self, text: String, is_fresh_line: bool) {
         if text.trim().is_empty() {
             return;
         }
@@ -54,14 +148,17 @@ impl CaptionBuffer {
 
         // Preserve the leading space from the original engine output if present.
         // This signals a word boundary vs. a mid-word continuation.
-        let fragment = if text.starts_with(char::is_whitespace) && !deduped.starts_with(char::is_whitespace) {
-            format!(" {deduped}")
-        } else {
-            deduped.clone()
-        };
+        let fragment =
+            if text.starts_with(char::is_whitespace) && !deduped.starts_with(char::is_whitespace) {
+                format!(" {deduped}")
+            } else {
+                deduped.clone()
+            };
 
         // Determine if this is a continuation fragment (no leading space and lines are not empty).
-        let is_continuation = !fragment.starts_with(char::is_whitespace) && !self.lines.is_empty();
+        // A fresh line (after speaker change) is never a continuation.
+        let is_continuation =
+            !is_fresh_line && !fragment.starts_with(char::is_whitespace) && !self.lines.is_empty();
 
         if is_continuation {
             // Continuation: join with the last word on the current line.
@@ -78,7 +175,9 @@ impl CaptionBuffer {
                     // Split at last space: keep everything up to and including the space,
                     // move the partial word after the space.
                     let partial_word = self.lines[idx].text[last_space_pos + 1..].to_string();
-                    self.lines[idx].text = self.lines[idx].text[..=last_space_pos].trim_end().to_string();
+                    self.lines[idx].text = self.lines[idx].text[..=last_space_pos]
+                        .trim_end()
+                        .to_string();
 
                     // Add new line with partial + continuation joined.
                     self.add_new_line(format!("{}{}", partial_word, fragment));
@@ -107,7 +206,8 @@ impl CaptionBuffer {
                     if self.lines[idx].text.is_empty() {
                         // Current line is empty: place word directly (no space prefix).
                         self.lines[idx].text = word.to_string();
-                    } else if self.lines[idx].text.len() + 1 + word.len() <= self.max_chars_per_line {
+                    } else if self.lines[idx].text.len() + 1 + word.len() <= self.max_chars_per_line
+                    {
                         // Room on current line: append with space.
                         self.lines[idx].text.push(' ');
                         self.lines[idx].text.push_str(word);
@@ -119,10 +219,16 @@ impl CaptionBuffer {
             }
         }
 
-        // Update last_active on the last line (most recent text).
+        // Update last_active and latest_emit_sample on the last line
+        // (most recent text). latest_emit_sample is bumped every time a new
+        // fragment lands on this line so relabel_since can detect when the
+        // line straddles a relabel boundary.
         if !self.lines.is_empty() {
             let idx = self.lines.len() - 1;
             self.lines[idx].last_active = Instant::now();
+            if self.pending_emit_sample > self.lines[idx].latest_emit_sample {
+                self.lines[idx].latest_emit_sample = self.pending_emit_sample;
+            }
         }
 
         // Rebuild tail for overlap detection.
@@ -139,12 +245,19 @@ impl CaptionBuffer {
         self.lines.push(CaptionLine {
             text,
             last_active: Instant::now(),
+            speaker_id: self.last_speaker_id,
+            earliest_emit_sample: self.pending_emit_sample,
+            latest_emit_sample: self.pending_emit_sample,
         });
     }
 
     /// Join all line text with empty string. Each line's text is properly spaced already.
     fn all_text(&self) -> String {
-        self.lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("")
+        self.lines
+            .iter()
+            .map(|l| l.text.as_str())
+            .collect::<Vec<_>>()
+            .join("")
     }
 
     /// Remove overlapping prefix between existing tail and new text.
@@ -194,7 +307,11 @@ impl CaptionBuffer {
 
     /// Join all lines with newline separators for display.
     pub fn display_text(&self) -> String {
-        self.lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n")
+        self.lines
+            .iter()
+            .map(|l| l.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// Update the buffer's configuration (max_chars_per_line and expire_secs).
@@ -210,10 +327,103 @@ impl CaptionBuffer {
     /// - `display_text()` returns the empty string.
     /// - The next `push()` begins a fresh first line.
     /// - The RNNT word-boundary deduplication state is reset.
+    /// - Speaker tracking state is reset.
     pub fn clear(&mut self) {
         self.lines.clear();
         self.last_tail.clear();
+        self.last_speaker_id = None;
     }
+
+    /// Retroactively re-attribute trailing lines whose `earliest_emit_sample`
+    /// is at or after `from_sample` to `new_speaker_id`. Returns the number
+    /// of lines updated.
+    ///
+    /// Called when Sortformer reveals (typically 1–2 captions late) that a
+    /// speaker switch began earlier than the most recent emissions. Walks
+    /// `lines` from the tail; for each affected line, rewrites its
+    /// `speaker_id`, and substitutes any embedded `"<old label>: "` prefix
+    /// with `"<new label>: "`. The text layout is preserved — only the
+    /// label prefix is rewritten — to avoid jarring re-flow.
+    ///
+    /// Edge case: a single line's text may span the relabel boundary (a
+    /// continuation fragment that landed mid-line under the new speaker
+    /// before Sortformer caught up). That whole line gets relabeled to the
+    /// new speaker, which is the closest correct attribution available
+    /// without re-flowing — the alternative (leaving it under the wrong
+    /// speaker) is strictly worse.
+    pub fn relabel_since(&mut self, from_sample: u64, new_speaker_id: u32) -> usize {
+        let mut n = 0;
+        let mut substituted_label = false;
+        // Walk from the tail. Three cases per line:
+        //   1. earliest_emit_sample >= from_sample → line is fully past the
+        //      boundary: rewrite speaker_id AND substitute embedded label
+        //      (when the line actually carries the old speaker's prefix).
+        //   2. earliest_emit_sample < from_sample <= latest_emit_sample → line
+        //      straddles the boundary: rewrite speaker_id only (the embedded
+        //      label is correct for the START of the line). Then STOP — older
+        //      lines can't be affected.
+        //   3. latest_emit_sample < from_sample → line is entirely older:
+        //      stop without touching it.
+        for line in self.lines.iter_mut().rev() {
+            if line.latest_emit_sample < from_sample {
+                break;
+            }
+            let fully_past = line.earliest_emit_sample >= from_sample;
+            if line.speaker_id == Some(new_speaker_id) {
+                if !fully_past {
+                    break;
+                }
+                continue;
+            }
+            let old_speaker = line.speaker_id;
+            line.speaker_id = Some(new_speaker_id);
+            if fully_past {
+                if let Some(old_label) = label_for(&self.speaker_names, old_speaker) {
+                    let old_prefix = format!("{old_label}: ");
+                    if line.text.starts_with(&old_prefix) {
+                        let new_label = label_for(&self.speaker_names, Some(new_speaker_id))
+                            .unwrap_or_else(|| format!("Speaker {}", new_speaker_id + 1));
+                        let new_prefix = format!("{new_label}: ");
+                        line.text = format!("{new_prefix}{}", &line.text[old_prefix.len()..]);
+                        substituted_label = true;
+                    }
+                }
+            }
+            n += 1;
+            if !fully_past {
+                break;
+            }
+        }
+        // Update last_speaker_id ONLY if we actually made the new speaker's
+        // label visible somewhere (via prefix substitution). If we just
+        // updated speaker_id fields on continuation lines or a straddling
+        // line, no "Speaker N: " text is visible for the new speaker — we
+        // must leave last_speaker_id pointing at the old speaker so the
+        // very next push triggers CaptionBuffer's normal speaker-change
+        // path and starts a fresh labeled line.
+        if substituted_label {
+            self.last_speaker_id = Some(new_speaker_id);
+        }
+        n
+    }
+
+    /// Resolve a speaker ID to a display label.
+    /// If the speaker is in the name map, use the custom name.
+    /// Otherwise, fall back to "Speaker {id+1}".
+    fn speaker_label(&self, speaker_id: Option<u32>) -> String {
+        label_for(&self.speaker_names, speaker_id).unwrap_or_default()
+    }
+}
+
+/// Speaker label resolution as a free function so it can be called during
+/// `&mut self` iteration over `lines` in `relabel_since` without aliasing.
+fn label_for(names: &HashMap<u32, String>, speaker_id: Option<u32>) -> Option<String> {
+    speaker_id.map(|id| {
+        names
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(|| format!("Speaker {}", id + 1))
+    })
 }
 
 #[cfg(test)]
@@ -327,7 +537,10 @@ mod tests {
         assert_eq!(lines.len(), 3, "Should have 3 lines after split");
         assert_eq!(lines[0], "Hello", "Line 1 should have 'Hello'");
         assert_eq!(lines[1], "world", "Line 2 should have 'world' (split off)");
-        assert_eq!(lines[2], "moretext", "Line 3 should have 'more' + 'text' joined");
+        assert_eq!(
+            lines[2], "moretext",
+            "Line 3 should have 'more' + 'text' joined"
+        );
     }
 
     /// AC1.5 extended: "no space" branch at full max_lines capacity.
@@ -339,10 +552,10 @@ mod tests {
         let mut buf = CaptionBuffer::new(3, 7, 8); // max_lines=3, max_chars=7
 
         // Create three single-word lines to fill buffer to max_lines.
-        buf.push(" one".to_string());   // Line 1: "one" (3 chars)
-        buf.push(" two".to_string());   // Line 1: "one two" = 7, fits exactly
+        buf.push(" one".to_string()); // Line 1: "one" (3 chars)
+        buf.push(" two".to_string()); // Line 1: "one two" = 7, fits exactly
         buf.push(" three".to_string()); // "one two three" = 13 > 7, goes to line 2: "three" (5 chars)
-        buf.push(" four".to_string());  // "three four" = 10 > 7, goes to line 3: "four" (4 chars)
+        buf.push(" four".to_string()); // "three four" = 10 > 7, goes to line 3: "four" (4 chars)
 
         assert_eq!(buf.lines.len(), 3, "Buffer should be full at max_lines=3");
         assert_eq!(buf.lines[0].text, "one two");
@@ -360,7 +573,10 @@ mod tests {
         assert_eq!(buf.lines.len(), 3, "Should still have max_lines=3");
         assert_eq!(buf.lines[0].text, "one two", "Line 1 unchanged");
         assert_eq!(buf.lines[1].text, "three", "Line 2 unchanged");
-        assert_eq!(buf.lines[2].text, "fourmore", "Line 3 has joined word replacing old 'four'");
+        assert_eq!(
+            buf.lines[2].text, "fourmore",
+            "Line 3 has joined word replacing old 'four'"
+        );
 
         let display = buf.display_text();
         assert!(display.contains("one two"), "Should contain 'one two'");
@@ -388,16 +604,16 @@ mod tests {
 
         // Now make line nearly full and overflow. Reset for clearer setup.
         buf = CaptionBuffer::new(3, 18, 8);
-        buf.push(" Hello".to_string());         // Line 1: "Hello" (5 chars)
-        buf.push(" world".to_string());         // Line 1: "Hello world" (11 chars)
+        buf.push(" Hello".to_string()); // Line 1: "Hello" (5 chars)
+        buf.push(" world".to_string()); // Line 1: "Hello world" (11 chars)
 
         // Current line: "Hello world" (11 chars). Push continuation "ly" (2 chars) that fits.
-        buf.push("ly".to_string());             // Line 1: "Hello worldly" (13 chars)
+        buf.push("ly".to_string()); // Line 1: "Hello worldly" (13 chars)
 
         // Now push word that forces split. Current line: "Hello worldly" (13 chars).
         // Word " test" (5 chars): 13 + 1 + 5 = 19 > 18, doesn't fit.
         // Goes to line 2.
-        buf.push(" test".to_string());          // Line 2: "test" (4 chars)
+        buf.push(" test".to_string()); // Line 2: "test" (4 chars)
 
         // Current line 2: "test" (4 chars). Push continuation that overflows.
         // "test" + "something" = 13 chars > 18? No, 13 < 18, fits. Let's use longer continuation.
@@ -412,9 +628,9 @@ mod tests {
 
         // Let's retest more carefully to exercise "with space" branch:
         buf = CaptionBuffer::new(3, 18, 8);
-        buf.push(" Hello".to_string());         // Line 1: "Hello" (5 chars)
-        buf.push(" world".to_string());         // Line 1: "Hello world" (11 chars)
-        buf.push(" more".to_string());          // Line 1: "Hello world more" (16 chars, fits)
+        buf.push(" Hello".to_string()); // Line 1: "Hello" (5 chars)
+        buf.push(" world".to_string()); // Line 1: "Hello world" (11 chars)
+        buf.push(" more".to_string()); // Line 1: "Hello world more" (16 chars, fits)
 
         // Current line 1: "Hello world more" (16 chars, 2 chars left before max).
         // Push continuation "text" (4 chars).
@@ -427,8 +643,14 @@ mod tests {
         let display = buf.display_text();
         let lines: Vec<&str> = display.split('\n').collect();
         assert_eq!(lines.len(), 2, "Should have 2 lines after split");
-        assert_eq!(lines[0], "Hello world", "First line should be trimmed to 'Hello world'");
-        assert_eq!(lines[1], "moretext", "Second line should have partial word + continuation joined");
+        assert_eq!(
+            lines[0], "Hello world",
+            "First line should be trimmed to 'Hello world'"
+        );
+        assert_eq!(
+            lines[1], "moretext",
+            "Second line should have partial word + continuation joined"
+        );
     }
 
     /// AC1.6: RNNT decoder overlap is deduplicated (4+ char matches).
@@ -441,8 +663,14 @@ mod tests {
         buf.push(" brown fox".to_string());
 
         let display = buf.display_text();
-        assert_eq!(display, "The quick brown fox", "Overlap should be deduplicated");
-        assert!(!display.contains("brownbrown"), "Should not duplicate 'brown'");
+        assert_eq!(
+            display, "The quick brown fox",
+            "Overlap should be deduplicated"
+        );
+        assert!(
+            !display.contains("brownbrown"),
+            "Should not duplicate 'brown'"
+        );
     }
 
     /// AC2.1: When no new text arrives for expire_secs, the oldest (top) line is removed
@@ -463,7 +691,10 @@ mod tests {
         }
 
         let expired = buf.expire();
-        assert!(expired, "expire() should return true when a line is removed");
+        assert!(
+            expired,
+            "expire() should return true when a line is removed"
+        );
 
         let display = buf.display_text();
         assert_eq!(display, "line2", "Oldest line should be removed");
@@ -475,8 +706,8 @@ mod tests {
     fn ac2_2_expiry_gradual_drain() {
         let mut buf = CaptionBuffer::new(3, 5, 1); // max_chars = 5 to force separate lines
 
-        buf.push(" one".to_string());   // Line 1: "one" (3 chars)
-        buf.push(" two".to_string());   // Won't fit on line 1 (3+1+3=7 > 5), goes to line 2: "two" (3 chars)
+        buf.push(" one".to_string()); // Line 1: "one" (3 chars)
+        buf.push(" two".to_string()); // Won't fit on line 1 (3+1+3=7 > 5), goes to line 2: "two" (3 chars)
         buf.push(" three".to_string()); // Won't fit on line 2 (3+1+5=9 > 5), goes to line 3: "three" (5 chars)
 
         assert_eq!(buf.lines.len(), 3, "Should have 3 separate lines");
@@ -501,7 +732,10 @@ mod tests {
         assert_eq!(buf.lines.len(), 0, "Should have 0 lines after third expire");
 
         // Fourth expire call should return false (no lines to expire).
-        assert!(!buf.expire(), "expire() should return false when buffer is empty");
+        assert!(
+            !buf.expire(),
+            "expire() should return false when buffer is empty"
+        );
     }
 
     /// AC2.3: Active lines (receiving new text) do not expire — last_active resets on each push.
@@ -514,10 +748,16 @@ mod tests {
         buf.lines.push(CaptionLine {
             text: "old_content".to_string(),
             last_active: now - std::time::Duration::from_secs(2),
+            speaker_id: None,
+            earliest_emit_sample: 0,
+            latest_emit_sample: 0,
         });
         buf.lines.push(CaptionLine {
             text: "recent_content".to_string(),
             last_active: Instant::now(),
+            speaker_id: None,
+            earliest_emit_sample: 0,
+            latest_emit_sample: 0,
         });
 
         assert_eq!(buf.lines.len(), 2, "Should have 2 lines");
@@ -542,7 +782,10 @@ mod tests {
         buf.push(" world".to_string());
 
         // Verify initial values
-        assert_eq!(buf.max_chars_per_line, 20, "Initial max_chars_per_line should be 20");
+        assert_eq!(
+            buf.max_chars_per_line, 20,
+            "Initial max_chars_per_line should be 20"
+        );
         assert_eq!(buf.expire_secs, 8, "Initial expire_secs should be 8");
 
         // Update config to smaller max_chars_per_line, different max_lines, and expire_secs
@@ -550,12 +793,18 @@ mod tests {
 
         // Verify updated values
         assert_eq!(buf.max_lines, 2, "max_lines should be updated to 2");
-        assert_eq!(buf.max_chars_per_line, 10, "max_chars_per_line should be updated to 10");
+        assert_eq!(
+            buf.max_chars_per_line, 10,
+            "max_chars_per_line should be updated to 10"
+        );
         assert_eq!(buf.expire_secs, 5, "expire_secs should be updated to 5");
 
         // Verify that existing content is preserved
         let display = buf.display_text();
-        assert_eq!(display, "Hello world", "Existing content should be preserved");
+        assert_eq!(
+            display, "Hello world",
+            "Existing content should be preserved"
+        );
 
         // Add more text with the new max_chars_per_line to verify it's applied
         buf.push(" this".to_string());
@@ -564,7 +813,10 @@ mod tests {
         // "Hello world" is 11 chars, so with max_chars=10, "world" would go to line 2
         let display = buf.display_text();
         let lines: Vec<&str> = display.split('\n').collect();
-        assert!(lines.len() >= 2, "New text should respect updated max_chars_per_line");
+        assert!(
+            lines.len() >= 2,
+            "New text should respect updated max_chars_per_line"
+        );
     }
 
     /// AC6.2: clear() resets lines and last_tail, allowing display_text to return empty string.
@@ -573,9 +825,16 @@ mod tests {
         let mut buf = CaptionBuffer::new(3, 40, 8);
         buf.push("hello world".to_string());
         buf.push(" goodnight".to_string());
-        assert!(!buf.display_text().is_empty(), "buffer should have content before clear");
+        assert!(
+            !buf.display_text().is_empty(),
+            "buffer should have content before clear"
+        );
         buf.clear();
-        assert_eq!(buf.display_text(), "", "display_text should be empty after clear");
+        assert_eq!(
+            buf.display_text(),
+            "",
+            "display_text should be empty after clear"
+        );
     }
 
     /// AC6.2: push after clear starts a fresh line with no prior content.
@@ -593,6 +852,169 @@ mod tests {
         assert!(
             !out.contains("alpha") && !out.contains("bravo"),
             "post-clear display_text must not contain pre-clear text; got: {out:?}"
+        );
+    }
+
+    /// relabel_since rewrites trailing line speaker_id when the lines are
+    /// newer than from_sample. Lines emitted before are untouched. Uses
+    /// explicit speaker-change pushes so each lands on a fresh line —
+    /// faithful to how diarization will actually drive the buffer.
+    #[test]
+    fn relabel_since_rewrites_trailing_lines() {
+        let mut buf = CaptionBuffer::new(8, 80, 60);
+        // Three speaker-change pushes => three labeled lines.
+        buf.push_with_speaker_and_sample("alpha".to_string(), Some(0), 16_000);
+        buf.push_with_speaker_and_sample("bravo".to_string(), Some(1), 32_000);
+        buf.push_with_speaker_and_sample("charlie".to_string(), Some(0), 48_000);
+        // Each speaker change forces a fresh line (plus an empty separator
+        // line). The newest non-empty line is "charlie" mis-tagged as Speaker 1.
+        let charlie_idx = buf
+            .lines
+            .iter()
+            .rposition(|l| l.text.contains("charlie"))
+            .unwrap();
+        assert_eq!(buf.lines[charlie_idx].speaker_id, Some(0));
+        assert_eq!(buf.lines[charlie_idx].earliest_emit_sample, 48_000);
+
+        // Sortformer reveals the speaker actually flipped to Speaker 3 at
+        // sample 40000. Only the charlie line (emit=48000) is past that.
+        let n = buf.relabel_since(40_000, 2);
+        assert!(n >= 1, "expected at least 1 line relabeled, got {n}");
+        // The charlie line is now Speaker 3.
+        let charlie = buf
+            .lines
+            .iter()
+            .find(|l| l.text.ends_with("charlie"))
+            .unwrap();
+        assert_eq!(charlie.speaker_id, Some(2));
+        assert!(
+            charlie.text.starts_with("Speaker 3: "),
+            "expected substituted label, got {:?}",
+            charlie.text,
+        );
+        // The bravo line (emit=32000) is untouched.
+        let bravo = buf
+            .lines
+            .iter()
+            .find(|l| l.text.ends_with("bravo"))
+            .unwrap();
+        assert_eq!(bravo.speaker_id, Some(1));
+        assert!(bravo.text.starts_with("Speaker 2: "));
+    }
+
+    /// A line that straddles the relabel boundary (earliest < from_sample
+    /// <= latest) gets its speaker_id updated but the embedded label is left
+    /// intact (the start of the line was correctly the old speaker). Older
+    /// lines are NOT touched.
+    #[test]
+    fn relabel_since_straddling_line_updates_speaker_id_only() {
+        let mut buf = CaptionBuffer::new(4, 80, 60);
+        // First push: Speaker 1, sample 16000. Creates a line.
+        buf.push_with_speaker_and_sample("hello".to_string(), Some(0), 16_000);
+        // Continuation (same speaker): sample 32000. Appends to same line.
+        // Now line's earliest=16000, latest=32000, embedded label = "Speaker 1: ".
+        buf.push_with_speaker_and_sample(" world".to_string(), Some(0), 32_000);
+        assert_eq!(buf.lines.len(), 1);
+        assert_eq!(buf.lines[0].earliest_emit_sample, 16_000);
+        assert_eq!(buf.lines[0].latest_emit_sample, 32_000);
+        assert!(buf.lines[0].text.starts_with("Speaker 1: "));
+
+        // Relabel from sample 24000 to Speaker 2. The line straddles
+        // (16000 < 24000 <= 32000), so speaker_id flips but label stays.
+        let n = buf.relabel_since(24_000, 1);
+        assert_eq!(n, 1, "straddling line should be relabeled");
+        assert_eq!(buf.lines[0].speaker_id, Some(1));
+        // Label NOT substituted — the line's start was correctly Speaker 1.
+        assert!(
+            buf.lines[0].text.starts_with("Speaker 1: "),
+            "embedded label should remain Speaker 1, got {:?}",
+            buf.lines[0].text
+        );
+        // last_speaker_id is left at Some(0) because no label substitution
+        // happened. The next Some(1) push triggers normal speaker-change
+        // handling and starts a fresh labeled line — that's exactly the
+        // behavior we want so the new speaker becomes visually identifiable.
+        buf.push_with_speaker_and_sample(" yes".to_string(), Some(1), 40_000);
+        // Speaker change: forced fresh line + label. Plus the empty separator
+        // line that push_with_speaker_and_sample inserts on speaker change.
+        // Concretely: the trailing line should now carry "Speaker 2: yes".
+        let last = buf.lines.last().unwrap();
+        assert_eq!(last.speaker_id, Some(1));
+        assert!(
+            last.text.starts_with("Speaker 2: "),
+            "expected fresh labeled line for new speaker, got {:?}",
+            last.text
+        );
+    }
+
+    /// relabel_since substitutes the embedded label prefix on a line that
+    /// began with one. Demonstrates the in-place text rewrite.
+    #[test]
+    fn relabel_since_substitutes_label_prefix() {
+        let mut buf = CaptionBuffer::new(2, 80, 60);
+        // First push under Speaker 1 — embeds "Speaker 1: " into the line.
+        buf.push_with_speaker_and_sample("hello".to_string(), Some(0), 16_000);
+        assert!(buf.lines[0].text.starts_with("Speaker 1: "));
+        // Relabel to Speaker 2.
+        let n = buf.relabel_since(16_000, 1);
+        assert_eq!(n, 1);
+        // Label prefix rewritten in place.
+        assert!(
+            buf.lines[0].text.starts_with("Speaker 2: "),
+            "label prefix not substituted, got {:?}",
+            buf.lines[0].text
+        );
+        assert!(buf.lines[0].text.ends_with("hello"));
+    }
+
+    /// When relabel touches only continuation lines (no embedded label to
+    /// substitute), the next push of the new speaker MUST start a fresh
+    /// labeled line — otherwise no "Speaker N: " ever becomes visible for
+    /// that speaker. Regression test for the symptom: "Speaker 1 label
+    /// appears once, no future speaker labels."
+    #[test]
+    fn relabel_with_no_label_substitution_lets_next_push_label_normally() {
+        let mut buf = CaptionBuffer::new(4, 80, 60);
+        // Speaker 1 starts — pushes are continuations on a single labeled line.
+        buf.push_with_speaker_and_sample("hello world".to_string(), Some(0), 16_000);
+        buf.push_with_speaker_and_sample(" still talking".to_string(), Some(0), 32_000);
+        // Both fragments landed on the same line; embedded label is "Speaker 1: ".
+        assert_eq!(buf.lines.len(), 1);
+        assert!(buf.lines[0].text.starts_with("Speaker 1: "));
+
+        // Sortformer detects a switch with from_sample that lands inside the
+        // line (straddling, no fully-past line). relabel_since updates
+        // speaker_id but cannot substitute the embedded label.
+        let n = buf.relabel_since(24_000, 1);
+        assert_eq!(n, 1);
+        assert_eq!(buf.lines[0].speaker_id, Some(1));
+        // CRITICAL: the next push of the new speaker MUST get a label.
+        buf.push_with_speaker_and_sample(" new speaker words".to_string(), Some(1), 40_000);
+        let last = buf.lines.last().unwrap();
+        assert!(
+            last.text.starts_with("Speaker 2: "),
+            "next push should start a fresh labeled line, got {:?}",
+            last.text,
+        );
+        assert_eq!(last.speaker_id, Some(1));
+    }
+
+    /// relabel_since updates last_speaker_id so the next push does not see a
+    /// phantom speaker change and start yet another labeled line.
+    #[test]
+    fn relabel_since_updates_last_speaker_id() {
+        let mut buf = CaptionBuffer::new(3, 80, 60);
+        buf.push_with_speaker_and_sample("hello".to_string(), Some(0), 16_000);
+        buf.relabel_since(16_000, 1);
+        // Next push under the now-corrected speaker should NOT introduce a
+        // new labeled line — last_speaker_id was updated to Some(1).
+        buf.push_with_speaker_and_sample(" continuing".to_string(), Some(1), 24_000);
+        // Only one line, still starting with the (corrected) Speaker 2 label.
+        assert_eq!(buf.lines.len(), 1);
+        assert!(
+            buf.lines[0].text.starts_with("Speaker 2: "),
+            "expected corrected label, got {:?}",
+            buf.lines[0].text
         );
     }
 }

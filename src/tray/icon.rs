@@ -95,8 +95,7 @@ pub fn render_cc_icon_rgba(r: u8, g: u8, b: u8, opacity: f32, strikethrough: boo
                     continue;
                 }
                 let ring_cov = (half_w - ring_dist + 0.5).clamp(0.0, 1.0);
-                let angle_from_end =
-                    angle.abs() - (std::f32::consts::PI - arc_half_angle);
+                let angle_from_end = angle.abs() - (std::f32::consts::PI - arc_half_angle);
                 let arc_cov = (angle_from_end * mid_r + 0.5).clamp(0.0, 1.0);
                 let coverage = ring_cov.min(arc_cov);
                 if coverage > 0.0 {
