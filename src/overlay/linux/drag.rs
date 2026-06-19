@@ -6,8 +6,11 @@ use gtk4::{ApplicationWindow, GestureDrag};
 use gtk4_layer_shell::{Edge, LayerShell};
 use std::cell::Cell;
 use std::rc::Rc;
-use std::sync::{Arc, atomic::{AtomicI32, Ordering}};
 use std::sync::OnceLock;
+use std::sync::{
+    atomic::{AtomicI32, Ordering},
+    Arc,
+};
 
 /// Whether the compositor shifts widget-local coordinates when layer-shell margins change mid-drag.
 /// KDE, Sway, and Hyprland do this (GTK's drag offset shrinks as the surface moves), requiring
@@ -15,7 +18,9 @@ use std::sync::OnceLock;
 fn compositor_shifts_coords_on_margin_change() -> bool {
     static RESULT: OnceLock<bool> = OnceLock::new();
     *RESULT.get_or_init(|| {
-        let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default().to_lowercase();
+        let desktop = std::env::var("XDG_CURRENT_DESKTOP")
+            .unwrap_or_default()
+            .to_lowercase();
         // Niri is the known compositor that does NOT shift coords.
         // Default to compensation (safe fallback — worst case drag is sluggish, not flung off-screen).
         !desktop.contains("niri")

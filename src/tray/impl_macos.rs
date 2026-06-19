@@ -32,10 +32,12 @@ use crate::overlay::OverlayCommand;
 use arc_swap::ArcSwap;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly};
+use objc2::{
+    define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly,
+};
 use objc2_app_kit::{
-    NSApplication, NSEventMask, NSEventType,
-    NSImage, NSMenu, NSMenuItem, NSSquareStatusItemLength, NSStatusBar, NSStatusItem,
+    NSApplication, NSEventMask, NSEventType, NSImage, NSMenu, NSMenuItem, NSSquareStatusItemLength,
+    NSStatusBar, NSStatusItem,
 };
 use objc2_foundation::{NSData, NSObject, NSPoint, NSSize, NSString, NSTimer};
 use std::cell::RefCell;
@@ -48,7 +50,6 @@ pub struct TrayState {
     pub config: Arc<Mutex<Config>>,
     pub captions_enabled: Arc<AtomicBool>,
     /// Whether speaker diarization is enabled. Shared with the STT pipeline thread.
-    /// Toggled from the tray menu on Linux; macOS tray integration is deferred.
     pub diarization_enabled: Arc<AtomicBool>,
     pub cmd_tx: async_channel::Sender<OverlayCommand>,
     pub audio_cmd_tx: SyncSender<AudioCommand>,
@@ -68,6 +69,7 @@ pub struct TrayIvars {
     audio_item: RefCell<Retained<NSMenuItem>>,
     lock_item: RefCell<Retained<NSMenuItem>>,
     captions_item: RefCell<Retained<NSMenuItem>>,
+    diarization_item: RefCell<Retained<NSMenuItem>>,
     above_item: RefCell<Retained<NSMenuItem>>,
     mode_items: RefCell<Vec<Retained<NSMenuItem>>>,
     font_item: RefCell<Retained<NSMenuItem>>,
@@ -119,6 +121,21 @@ define_class!(
             } else {
                 self.do_toggle_captions();
             }
+        }
+
+        #[unsafe(method(toggleDiarization:))]
+        fn toggle_diarization(&self, _sender: Option<&NSMenuItem>) {
+            let ivars = self.ivars();
+            let prev = ivars.state.diarization_enabled.load(Ordering::Relaxed);
+            let next = !prev;
+            ivars.state.diarization_enabled.store(next, Ordering::Relaxed);
+            ivars.diarization_item.borrow().setState(if next { 1 } else { 0 });
+            eprintln!("info: diarization {}", if next { "enabled" } else { "disabled" });
+        }
+
+        #[unsafe(method(renameSpeakers:))]
+        fn rename_speakers(&self, _sender: Option<&NSMenuItem>) {
+            let _ = self.ivars().state.cmd_tx.send_blocking(OverlayCommand::ShowRenameDialog);
         }
 
         #[unsafe(method(selectMode:))]
@@ -327,6 +344,7 @@ impl TrayActions {
         mtm: MainThreadMarker,
         state: TrayState,
         captions_item: Retained<NSMenuItem>,
+        diarization_item: Retained<NSMenuItem>,
         mode_items: Vec<Retained<NSMenuItem>>,
         audio_item: Retained<NSMenuItem>,
         above_item: Retained<NSMenuItem>,
@@ -343,6 +361,7 @@ impl TrayActions {
             audio_item: RefCell::new(audio_item),
             lock_item: RefCell::new(lock_item),
             captions_item: RefCell::new(captions_item),
+            diarization_item: RefCell::new(diarization_item),
             above_item: RefCell::new(above_item),
             mode_items: RefCell::new(mode_items),
             font_item: RefCell::new(font_item),
@@ -366,7 +385,11 @@ impl TrayActions {
         let _ = ivars.state.cmd_tx.send_blocking(OverlayCommand::SetCaptionsEnabled(next));
         ivars.captions_item.borrow().setState(if next { 1 } else { 0 });
         let mtm = MainThreadMarker::from(self);
-        let icon = if next { &ivars.icon_on } else { &ivars.icon_off };
+        let icon = if next {
+            &ivars.icon_on
+        } else {
+            &ivars.icon_off
+        };
         if let Some(btn) = ivars.status_item.borrow().button(mtm) {
             btn.setImage(Some(icon));
         }
@@ -421,7 +444,9 @@ fn all_monospace_fonts(mtm: MainThreadMarker) -> Vec<String> {
     use objc2_app_kit::{NSFontManager, NSFontTraitMask};
     let mgr = NSFontManager::sharedFontManager(mtm);
     let names = mgr.availableFontNamesWithTraits(NSFontTraitMask::FixedPitchFontMask);
-    let Some(names) = names else { return Vec::new() };
+    let Some(names) = names else {
+        return Vec::new();
+    };
     let mut out = Vec::with_capacity(names.count() as usize);
     for i in 0..names.count() {
         let s = names.objectAtIndex(i);
@@ -558,7 +583,7 @@ pub fn install_tray(
         img.setSize(NSSize::new(18.0, 18.0));
         img
     };
-    let icon_on  = load_icon(include_bytes!("../../resources/macos/tray-icon-on.png"));
+    let icon_on = load_icon(include_bytes!("../../resources/macos/tray-icon-on.png"));
     let icon_off = load_icon(include_bytes!("../../resources/macos/tray-icon-off.png"));
 
     // Set the initial icon based on current captions state.
@@ -578,8 +603,37 @@ pub fn install_tray(
             &NSString::from_str(""),
         )
     };
-    captions_item.setState(if state.captions_enabled.load(Ordering::Relaxed) { 1 } else { 0 });
+    captions_item.setState(if state.captions_enabled.load(Ordering::Relaxed) {
+        1
+    } else {
+        0
+    });
     menu.addItem(&captions_item);
+
+    let diarization_item = unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            &NSString::from_str("Diarization"),
+            Some(sel!(toggleDiarization:)),
+            &NSString::from_str(""),
+        )
+    };
+    diarization_item.setState(if state.diarization_enabled.load(Ordering::Relaxed) {
+        1
+    } else {
+        0
+    });
+    menu.addItem(&diarization_item);
+
+    let rename_speakers_item = unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            &NSString::from_str("Rename Speakers…"),
+            Some(sel!(renameSpeakers:)),
+            &NSString::from_str(""),
+        )
+    };
+    menu.addItem(&rename_speakers_item);
 
     // Mode submenu
     let mode_parent = unsafe {
@@ -717,6 +771,7 @@ pub fn install_tray(
         mtm,
         state,
         captions_item.clone(),
+        diarization_item.clone(),
         mode_items.clone(),
         audio_item.clone(),
         above_item.clone(),
@@ -742,6 +797,8 @@ pub fn install_tray(
     let target_obj: &AnyObject = actions.as_ref();
     unsafe {
         captions_item.setTarget(Some(target_obj));
+        diarization_item.setTarget(Some(target_obj));
+        rename_speakers_item.setTarget(Some(target_obj));
         above_item.setTarget(Some(target_obj));
         lock_item.setTarget(Some(target_obj));
         quit_item.setTarget(Some(target_obj));
@@ -792,6 +849,7 @@ mod tests {
         let _state = TrayState {
             config: Arc::new(Mutex::new(Config::default())),
             captions_enabled: Arc::new(AtomicBool::new(true)),
+            diarization_enabled: Arc::new(AtomicBool::new(false)),
             cmd_tx,
             audio_cmd_tx: audio_tx,
             engine_choice: Arc::new(ArcSwap::from_pointee(Engine::Nemotron)),

@@ -392,26 +392,38 @@ mod tests {
     #[test]
     fn ac5_6_json_sibling_replaces_txt_extension() {
         let p = PathBuf::from("/tmp/transcript.txt");
-        assert_eq!(derive_json_sibling(&p), PathBuf::from("/tmp/transcript.json"));
+        assert_eq!(
+            derive_json_sibling(&p),
+            PathBuf::from("/tmp/transcript.json")
+        );
     }
 
     #[test]
     fn ac5_6_json_sibling_no_extension() {
         let p = PathBuf::from("/tmp/transcript");
-        assert_eq!(derive_json_sibling(&p), PathBuf::from("/tmp/transcript.json"));
+        assert_eq!(
+            derive_json_sibling(&p),
+            PathBuf::from("/tmp/transcript.json")
+        );
     }
 
     #[test]
     fn ac5_6_json_sibling_other_extension() {
         let p = PathBuf::from("/tmp/transcript.log");
-        assert_eq!(derive_json_sibling(&p), PathBuf::from("/tmp/transcript.json"));
+        assert_eq!(
+            derive_json_sibling(&p),
+            PathBuf::from("/tmp/transcript.json")
+        );
     }
 
     #[test]
     fn ac5_6_json_sibling_with_dots_in_stem() {
         // PathBuf::set_extension only replaces the LAST extension; "a.b.txt" -> "a.b.json".
         let p = PathBuf::from("/tmp/2026.05.11.txt");
-        assert_eq!(derive_json_sibling(&p), PathBuf::from("/tmp/2026.05.11.json"));
+        assert_eq!(
+            derive_json_sibling(&p),
+            PathBuf::from("/tmp/2026.05.11.json")
+        );
     }
 
     #[test]

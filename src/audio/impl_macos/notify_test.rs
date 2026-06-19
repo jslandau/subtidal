@@ -7,10 +7,7 @@ mod tests {
     fn post_user_notification_creates_notification() {
         // This test verifies the interface compiles and the function exists.
         // Full execution requires macOS with notification permission.
-        let result = post_user_notification(
-            "Test Title",
-            "Test Body",
-        );
+        let result = post_user_notification("Test Title", "Test Body");
         // Just check that it returns a Result type as expected.
         let _ = result;
     }

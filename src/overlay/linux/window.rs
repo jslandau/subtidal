@@ -1,7 +1,7 @@
 //! Overlay window construction, docked/floating layout, and CSS styling.
 
-use crate::config::{AppearanceConfig, Config, DockPosition, OverlayMode, ScreenEdge};
 use super::input_region;
+use crate::config::{AppearanceConfig, Config, DockPosition, OverlayMode, ScreenEdge};
 use gtk4::prelude::*;
 use gtk4::{Application, ApplicationWindow, Label};
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
@@ -19,7 +19,11 @@ pub fn build_overlay_window(app: &Application, cfg: &Config) -> ApplicationWindo
 
     // Initialize layer shell.
     window.init_layer_shell();
-    window.set_layer(if cfg.above_fullscreen { Layer::Overlay } else { Layer::Top });
+    window.set_layer(if cfg.above_fullscreen {
+        Layer::Overlay
+    } else {
+        Layer::Top
+    });
     window.set_exclusive_zone(0); // don't push other windows aside
 
     match cfg.overlay_mode {
@@ -37,7 +41,11 @@ pub fn build_overlay_window(app: &Application, cfg: &Config) -> ApplicationWindo
     // Build caption label with wrapping.
     // max_width_chars caps the label's natural width, forcing GTK to wrap text
     // instead of expanding the label/window to fit one long line.
-    let max_chars = estimate_max_chars(cfg.appearance.width, cfg.appearance.font_size, cfg.appearance.effective_char_width_fraction());
+    let max_chars = estimate_max_chars(
+        cfg.appearance.width,
+        cfg.appearance.font_size,
+        cfg.appearance.effective_char_width_fraction(),
+    );
     let label = Label::builder()
         .label("")
         .wrap(true)
@@ -68,9 +76,9 @@ pub fn configure_docked(window: &ApplicationWindow, edge: &ScreenEdge, dock_pos:
     // Always anchor to the selected edge.
     let anchor_edge = match edge {
         ScreenEdge::Bottom => Edge::Bottom,
-        ScreenEdge::Top    => Edge::Top,
-        ScreenEdge::Left   => Edge::Left,
-        ScreenEdge::Right  => Edge::Right,
+        ScreenEdge::Top => Edge::Top,
+        ScreenEdge::Left => Edge::Left,
+        ScreenEdge::Right => Edge::Right,
     };
 
     // For Stretch, anchor both perpendicular edges (fills the edge).
@@ -215,8 +223,7 @@ pub fn find_caption_label(window: &ApplicationWindow) -> Label {
         }
         None
     }
-    find_by_name(window.upcast_ref(), "caption-label")
-        .expect("caption label not found")
+    find_by_name(window.upcast_ref(), "caption-label").expect("caption label not found")
 }
 
 #[cfg(test)]
@@ -238,7 +245,10 @@ mod tests {
         };
         let css = build_css(&appearance);
 
-        assert!(css.contains("rgba(255,0,0,0.5)"), "CSS should contain background_color");
+        assert!(
+            css.contains("rgba(255,0,0,0.5)"),
+            "CSS should contain background_color"
+        );
         assert!(css.contains("#00ff00"), "CSS should contain text_color");
         assert!(css.contains("24"), "CSS should contain font_size");
     }
@@ -248,8 +258,14 @@ mod tests {
         let appearance = AppearanceConfig::default();
         let css = build_css(&appearance);
 
-        assert!(css.contains("rgba(0,0,0,0.7)"), "CSS should contain default background_color");
-        assert!(css.contains("#ffffff"), "CSS should contain default text_color");
+        assert!(
+            css.contains("rgba(0,0,0,0.7)"),
+            "CSS should contain default background_color"
+        );
+        assert!(
+            css.contains("#ffffff"),
+            "CSS should contain default text_color"
+        );
         assert!(css.contains("16"), "CSS should contain default font_size");
     }
 
@@ -263,7 +279,10 @@ mod tests {
         let expected_full = ((776.0_f32 / 14.4).floor()) as i32; // 53
         let expected_95 = ((776.0_f32 / 14.4 * 0.95).floor()) as i32; // 51
 
-        assert_eq!(expected_full, 53, "Sanity check: full formula should give 53");
+        assert_eq!(
+            expected_full, 53,
+            "Sanity check: full formula should give 53"
+        );
         assert_eq!(expected_95, 51, "Sanity check: 0.95 formula should give 51");
         assert_eq!(result, 51, "Result with 0.95 fraction");
         assert!(

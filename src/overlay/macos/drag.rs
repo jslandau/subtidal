@@ -5,13 +5,13 @@
 //! `start_hot_reload_macos` watcher only emits SwitchSource when audio_source
 //! changes, so position-only writes don't echo back through hot-reload (AC6.2).
 
+use crate::config::Config;
 use objc2::rc::Retained;
-use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2::runtime::AnyObject;
+use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::NSPanel;
 use objc2_foundation::{NSNotificationCenter, NSObject, NSString};
 use std::sync::{Arc, Mutex};
-use crate::config::Config;
 
 pub struct DragObserverIvars {
     config: Arc<Mutex<Config>>,

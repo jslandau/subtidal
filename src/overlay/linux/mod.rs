@@ -11,24 +11,24 @@ pub mod rename_dialog;
 pub mod transcript_window;
 pub mod window;
 
+use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{Application, ApplicationWindow};
-use gtk4::glib;
-use gtk4_layer_shell::{Edge, KeyboardMode, LayerShell, Layer};
+use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use crate::config::{Config, OverlayMode};
-use crate::overlay::{
-    caption_buffer::CaptionBuffer,
-    CaptionsEnabled, OverlayCommand,
-};
+use crate::overlay::{caption_buffer::CaptionBuffer, CaptionsEnabled, OverlayCommand};
 
 use drag::add_drag_handler;
 use input_region::{clear_input_region, set_empty_input_region};
-use window::{apply_appearance, build_overlay_window, configure_docked, estimate_max_chars, find_caption_label};
+use window::{
+    apply_appearance, build_overlay_window, configure_docked, estimate_max_chars,
+    find_caption_label,
+};
 
 /// Build and run the GTK4 application.
 ///
@@ -367,7 +367,8 @@ fn handle_overlay_command(
             apply_appearance(&appearance);
             let label = find_caption_label(window);
             let max_chars = estimate_max_chars(
-                appearance.width, appearance.font_size,
+                appearance.width,
+                appearance.font_size,
                 appearance.effective_char_width_fraction(),
             );
             label.set_max_width_chars(max_chars);
@@ -375,7 +376,8 @@ fn handle_overlay_command(
             window.set_width_request(appearance.width);
             let mut buf = caption_buffer.borrow_mut();
             buf.update_config(
-                appearance.max_lines as usize, max_chars as usize,
+                appearance.max_lines as usize,
+                max_chars as usize,
                 appearance.effective_expire_secs(),
             );
         }
@@ -417,11 +419,7 @@ fn handle_overlay_command(
             // 4. Fully rebuild the transcript view from the log. Cheaper
             //    than walking the buffer to patch individual paragraphs, and
             //    correct regardless of which fragments are visible.
-            transcript_window::rebuild_view(
-                transcript_state,
-                &transcript_log.borrow(),
-                &names,
-            );
+            transcript_window::rebuild_view(transcript_state, &transcript_log.borrow(), &names);
         }
         OverlayCommand::ShowRenameDialog => {
             let current = config.lock().unwrap().speaker_names.clone();
@@ -467,7 +465,9 @@ fn rewrite_embedded_labels(
     new_names: &std::collections::HashMap<u32, String>,
 ) {
     fn label(map: &std::collections::HashMap<u32, String>, id: u32) -> String {
-        map.get(&id).cloned().unwrap_or_else(|| format!("Speaker {}", id + 1))
+        map.get(&id)
+            .cloned()
+            .unwrap_or_else(|| format!("Speaker {}", id + 1))
     }
     for line in buf.lines.iter_mut() {
         let Some(sid) = line.speaker_id else { continue };

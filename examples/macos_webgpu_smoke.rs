@@ -41,7 +41,10 @@ async fn main() -> Result<()> {
     let t_init = Instant::now();
     let mut engine = Nemotron::from_pretrained(&model_dir, Some(exec))
         .context("constructing Nemotron with WebGPU execution provider")?;
-    eprintln!("[init] WebGPU engine ready in {:.2}s", t_init.elapsed().as_secs_f32());
+    eprintln!(
+        "[init] WebGPU engine ready in {:.2}s",
+        t_init.elapsed().as_secs_f32()
+    );
 
     // 3. Decode the fixture WAV into mono f32 PCM at 16kHz.
     let pcm = read_wav_16k_mono_f32(FIXTURE)?;
@@ -76,7 +79,10 @@ async fn main() -> Result<()> {
     println!("transcription: {}", transcript.trim());
     println!("audio_secs:    {:.3}", audio_secs);
     println!("infer_secs:    {:.3}", infer_secs);
-    println!("rtf:           {:.3}  (must be <= 1.0 to satisfy macos-port.AC4.4)", rtf);
+    println!(
+        "rtf:           {:.3}  (must be <= 1.0 to satisfy macos-port.AC4.4)",
+        rtf
+    );
 
     if rtf > 1.0 {
         eprintln!("WARN: real-time factor exceeds 1.0 — design Plan B may need to activate");

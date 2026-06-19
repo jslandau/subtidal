@@ -3,9 +3,10 @@
 // dispatch path. Phase 6 adds Docked geometry, Transcript window, drag, and
 // captions-disable surface-clearing.
 
-pub mod panel;
-pub mod drag;
-pub mod transcript_window;
 mod app;
+pub mod drag;
+pub mod panel;
+pub mod rename_dialog;
+pub mod transcript_window;
 
 pub use app::run_app;

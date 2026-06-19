@@ -60,7 +60,11 @@ fn dirs_for_build() -> Option<PathBuf> {
     // ~/.cache/ort.pyke.io/dfbin/
     let home = std::env::var("HOME").ok()?;
     let cache = PathBuf::from(home).join(".cache/ort.pyke.io/dfbin");
-    if cache.is_dir() { Some(cache) } else { None }
+    if cache.is_dir() {
+        Some(cache)
+    } else {
+        None
+    }
 }
 
 fn scan_ort_cache(cache_dir: &PathBuf) -> Option<PathBuf> {

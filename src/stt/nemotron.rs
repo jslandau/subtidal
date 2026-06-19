@@ -5,9 +5,9 @@
 //! internally buffers the 160ms (2560 sample) chunks from the audio bridge
 //! until a full 560ms chunk is accumulated.
 
+use super::SttEngine;
 use anyhow::{Context, Result};
 use std::path::Path;
-use super::SttEngine;
 
 /// Nemotron expects 560ms chunks = 8960 samples at 16kHz.
 const NEMOTRON_CHUNK_SAMPLES: usize = 8960;
@@ -28,16 +28,22 @@ impl NemotronEngine {
     pub fn new(model_dir: &Path, use_cuda: bool) -> Result<Self> {
         #[cfg(target_os = "linux")]
         let inner = {
-            let exec_config = parakeet_rs::ExecutionConfig::new()
-                .with_execution_provider(if use_cuda {
+            let exec_config =
+                parakeet_rs::ExecutionConfig::new().with_execution_provider(if use_cuda {
                     parakeet_rs::ExecutionProvider::Cuda
                 } else {
                     parakeet_rs::ExecutionProvider::Cpu
                 });
             let provider = if use_cuda { "Cuda" } else { "Cpu" };
             eprintln!("info: Nemotron using execution provider: {provider}");
-            parakeet_rs::Nemotron::from_pretrained(model_dir, Some(exec_config))
-                .with_context(|| format!("loading Nemotron from {} (provider={provider})", model_dir.display()))?
+            parakeet_rs::Nemotron::from_pretrained(model_dir, Some(exec_config)).with_context(
+                || {
+                    format!(
+                        "loading Nemotron from {} (provider={provider})",
+                        model_dir.display()
+                    )
+                },
+            )?
         };
 
         #[cfg(target_os = "macos")]
@@ -55,13 +61,16 @@ fn build_macos(model_dir: &Path, use_cuda: bool) -> Result<parakeet_rs::Nemotron
     build_macos_with(model_dir, use_cuda, |dir| {
         let exec = parakeet_rs::ExecutionConfig::new()
             .with_execution_provider(parakeet_rs::ExecutionProvider::WebGPU);
-        parakeet_rs::Nemotron::from_pretrained(dir, Some(exec))
-            .map_err(anyhow::Error::from)
+        parakeet_rs::Nemotron::from_pretrained(dir, Some(exec)).map_err(anyhow::Error::from)
     })
 }
 
 #[cfg(target_os = "macos")]
-fn build_macos_with<F>(model_dir: &Path, use_cuda: bool, try_webgpu: F) -> Result<parakeet_rs::Nemotron>
+fn build_macos_with<F>(
+    model_dir: &Path,
+    use_cuda: bool,
+    try_webgpu: F,
+) -> Result<parakeet_rs::Nemotron>
 where
     F: FnOnce(&Path) -> Result<parakeet_rs::Nemotron, anyhow::Error>,
 {
@@ -82,8 +91,12 @@ where
     let exec = parakeet_rs::ExecutionConfig::new()
         .with_execution_provider(parakeet_rs::ExecutionProvider::Cpu);
     eprintln!("info: Nemotron using execution provider: Cpu");
-    parakeet_rs::Nemotron::from_pretrained(model_dir, Some(exec))
-        .with_context(|| format!("loading Nemotron from {} (provider=Cpu)", model_dir.display()))
+    parakeet_rs::Nemotron::from_pretrained(model_dir, Some(exec)).with_context(|| {
+        format!(
+            "loading Nemotron from {} (provider=Cpu)",
+            model_dir.display()
+        )
+    })
 }
 
 impl SttEngine for NemotronEngine {
@@ -97,7 +110,9 @@ impl SttEngine for NemotronEngine {
         // Drain exactly NEMOTRON_CHUNK_SAMPLES and process.
         let chunk: Vec<f32> = self.chunk_buf.drain(..NEMOTRON_CHUNK_SAMPLES).collect();
 
-        let text = self.inner.transcribe_chunk(&chunk)
+        let text = self
+            .inner
+            .transcribe_chunk(&chunk)
             .context("Nemotron transcribe_chunk")?;
 
         if text.is_empty() {

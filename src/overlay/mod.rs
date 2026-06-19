@@ -21,8 +21,8 @@ mod macos;
 #[cfg(target_os = "macos")]
 pub use macos::run_app;
 
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 use crate::config::{AppearanceConfig, OverlayMode};
 

@@ -15,7 +15,8 @@ use std::path::Path;
 /// .so files from the ORT build cache into the exe dir so ORT's GetRuntimePath
 /// finds them regardless of how subtidal was launched (CLI, app launcher, systemd).
 pub fn ensure_provider_libs_next_to_exe() {
-    let exe_dir = match std::env::current_exe().ok()
+    let exe_dir = match std::env::current_exe()
+        .ok()
         .and_then(|p| std::fs::canonicalize(p).ok())
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
     {
@@ -36,10 +37,15 @@ pub fn ensure_provider_libs_next_to_exe() {
         return;
     }
 
-    for name in ["libonnxruntime_providers_cuda.so", "libonnxruntime_providers_shared.so"] {
+    for name in [
+        "libonnxruntime_providers_cuda.so",
+        "libonnxruntime_providers_shared.so",
+    ] {
         let src = source_dir.join(name);
         let dst = exe_dir.join(name);
-        if !src.exists() || dst.exists() { continue; }
+        if !src.exists() || dst.exists() {
+            continue;
+        }
         let _ = std::os::unix::fs::symlink(&src, &dst);
     }
 }
@@ -70,7 +76,8 @@ fn find_ort_cache_dir() -> Option<std::path::PathBuf> {
 /// or use the provider directory embedded at compile time by build.rs.
 fn find_provider_dir() -> Option<std::path::PathBuf> {
     // Check next to the binary (cargo run with symlinks in target/release/)
-    if let Some(exe_dir) = std::env::current_exe().ok()
+    if let Some(exe_dir) = std::env::current_exe()
+        .ok()
         .and_then(|p| std::fs::canonicalize(p).ok())
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
     {
@@ -111,7 +118,11 @@ pub fn reexec_with_absolute_argv0_if_needed() {
         Some(a) => a,
         None => return,
     };
-    if std::path::Path::new(&argv0).parent().map(|p| !p.as_os_str().is_empty()).unwrap_or(false) {
+    if std::path::Path::new(&argv0)
+        .parent()
+        .map(|p| !p.as_os_str().is_empty())
+        .unwrap_or(false)
+    {
         return; // already has a directory component
     }
     let exe = match std::env::current_exe() {
@@ -173,10 +184,8 @@ pub fn run_cuda_probe() -> ! {
     if let Some(model_dir) = std::env::var_os("__SUBTIDAL_CUDA_PROBE_MODEL_DIR") {
         let config = parakeet_rs::ExecutionConfig::new()
             .with_execution_provider(parakeet_rs::ExecutionProvider::Cuda);
-        let loaded = parakeet_rs::Nemotron::from_pretrained(
-            std::path::Path::new(&model_dir),
-            Some(config),
-        );
+        let loaded =
+            parakeet_rs::Nemotron::from_pretrained(std::path::Path::new(&model_dir), Some(config));
         if loaded.is_err() {
             unsafe { libc::_exit(1) };
         }
@@ -222,13 +231,15 @@ fn ensure_desktop_entry_installed() {
     let icon_path = data_dir.join("icons/hicolor/scalable/apps/subtidal.svg");
     let desktop_path = data_dir.join("applications/subtidal.desktop");
 
-    let files: &[(&std::path::Path, &[u8])] = &[
-        (&icon_path, APP_ICON),
-        (&desktop_path, DESKTOP_ENTRY),
-    ];
+    let files: &[(&std::path::Path, &[u8])] =
+        &[(&icon_path, APP_ICON), (&desktop_path, DESKTOP_ENTRY)];
 
     let needs_install = files.iter().any(|(path, data)| {
-        !path.exists() || path.metadata().map(|m| m.len() != data.len() as u64).unwrap_or(true)
+        !path.exists()
+            || path
+                .metadata()
+                .map(|m| m.len() != data.len() as u64)
+                .unwrap_or(true)
     });
 
     if needs_install {
@@ -247,12 +258,19 @@ fn ensure_desktop_entry_installed() {
 pub fn main() {
     use arc_swap::ArcSwap;
     use clap::Parser;
-    use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
-    use subtidal::{audio, config::{self, Config}, models, overlay, stt, tray};
+    use std::sync::Arc;
+    use subtidal::{
+        audio,
+        config::{self, Config},
+        models, overlay, stt, tray,
+    };
 
     #[derive(Parser, Debug)]
-    #[command(name = "subtidal", about = "Real-time speech-to-text overlay for Linux/Wayland")]
+    #[command(
+        name = "subtidal",
+        about = "Real-time speech-to-text overlay for Linux/Wayland"
+    )]
     struct Args {
         /// Path to config file (default: ~/.config/subtidal/config.toml)
         #[arg(long)]
@@ -289,7 +307,10 @@ pub fn main() {
         Config::default()
     } else if let Some(ref config_path) = args.config {
         Config::load_from(config_path).unwrap_or_else(|e| {
-            eprintln!("warn: failed to load config from {}: {e}", config_path.display());
+            eprintln!(
+                "warn: failed to load config from {}: {e}",
+                config_path.display()
+            );
             eprintln!("warn: using default configuration");
             Config::default()
         })
@@ -302,7 +323,10 @@ pub fn main() {
         match Config::parse_engine(&engine_str) {
             Some(engine) => cfg.engine = engine,
             None => {
-                eprintln!("Unknown engine '{}'. Valid engines: nemotron, parakeet.", engine_str);
+                eprintln!(
+                    "Unknown engine '{}'. Valid engines: nemotron, parakeet.",
+                    engine_str
+                );
                 std::process::exit(1);
             }
         };
@@ -421,6 +445,8 @@ pub fn main() {
             diarization_enabled: Arc::clone(&diarization_enabled),
             diarization_preset: cfg.diarization_preset.clone(),
             diarization_model_dir: models::diarization_model_dir(),
+            diarization_display_delay_ms: cfg.diarization_display_delay_ms,
+            diarization_alignment_lag_ms: cfg.diarization_alignment_lag_ms,
         },
     );
 
@@ -464,9 +490,11 @@ pub fn main() {
             // Update tray to reflect fallback source.
             // Uses the captured Handle to run the async update on the Tokio runtime.
             tokio_handle.block_on(async {
-                tray_handle_for_fallback.update(|tray: &mut tray::TrayState| {
-                    tray.active_source = config::AudioSource::SystemOutput;
-                }).await;
+                tray_handle_for_fallback
+                    .update(|tray: &mut tray::TrayState| {
+                        tray.active_source = config::AudioSource::SystemOutput;
+                    })
+                    .await;
             });
 
             // Update config.
@@ -480,7 +508,11 @@ pub fn main() {
     // _config_watcher must stay in scope until process exit (drop = stop watching).
     // Typed as Option so the failure path compiles without a dummy Debouncer.
     let _config_watcher: Option<notify_debouncer_mini::Debouncer<notify::RecommendedWatcher>> =
-        match config::start_hot_reload(cmd_tx.clone(), tray_handle.clone(), runtime.handle().clone()) {
+        match config::start_hot_reload(
+            cmd_tx.clone(),
+            tray_handle.clone(),
+            runtime.handle().clone(),
+        ) {
             Ok(watcher) => {
                 eprintln!("info: config hot-reload active (watching config.toml)");
                 Some(watcher)
@@ -511,7 +543,13 @@ pub fn main() {
         let _ = cmd_tx.send_blocking(overlay::OverlayCommand::SetVisible(false));
     }
 
-    overlay::run_gtk_app(cfg, caption_rx, cmd_rx, cmd_tx.clone(), Arc::clone(&captions_enabled));
+    overlay::run_gtk_app(
+        cfg,
+        caption_rx,
+        cmd_rx,
+        cmd_tx.clone(),
+        Arc::clone(&captions_enabled),
+    );
 
     exit_without_atexit(0)
 }

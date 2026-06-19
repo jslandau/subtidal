@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use notify_debouncer_mini::{new_debouncer, DebounceEventResult};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-use notify_debouncer_mini::{new_debouncer, DebounceEventResult};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::time::Duration;
 
@@ -229,6 +229,18 @@ pub struct Config {
     #[serde(default)]
     pub diarization_preset: DiarizationPreset,
 
+    /// Additional holdback before diarized captions are displayed so speaker
+    /// assignment can use a short rolling segment timeline. Startup-only in this
+    /// iteration; changing it requires restarting the app.
+    #[serde(default = "default_diarization_display_delay_ms")]
+    pub diarization_display_delay_ms: u64,
+
+    /// Estimated STT↔diarization alignment lag used when matching queued
+    /// captions onto the recent segment timeline. Startup-only in this
+    /// iteration; changing it requires restarting the app.
+    #[serde(default = "default_diarization_alignment_lag_ms")]
+    pub diarization_alignment_lag_ms: u64,
+
     /// Session-scoped speaker display names. Not persisted to config —
     /// reset on each launch because speaker identity is not stable across sessions.
     /// Populated at runtime via the rename dialog.
@@ -253,6 +265,14 @@ fn default_vram_unload_secs() -> u64 {
     300
 }
 
+fn default_diarization_display_delay_ms() -> u64 {
+    600
+}
+
+fn default_diarization_alignment_lag_ms() -> u64 {
+    600
+}
+
 impl Default for Config {
     fn default() -> Self {
         Config {
@@ -268,6 +288,8 @@ impl Default for Config {
             vram_unload_secs: default_vram_unload_secs(),
             diarization_enabled: false,
             diarization_preset: DiarizationPreset::default(),
+            diarization_display_delay_ms: default_diarization_display_delay_ms(),
+            diarization_alignment_lag_ms: default_diarization_alignment_lag_ms(),
             speaker_names: HashMap::new(),
             config_file_path: None,
         }
@@ -322,9 +344,10 @@ impl Config {
     }
 
     pub fn load_from(path: &Path) -> Result<Config> {
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("reading {}", path.display()))?;
-        let mut cfg: Config = toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let mut cfg: Config =
+            toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
         cfg.config_file_path = Some(path.to_path_buf());
         Ok(cfg)
     }
@@ -359,13 +382,8 @@ impl Config {
         };
         std::fs::write(&tmp_path, text)
             .with_context(|| format!("writing config tmp {}", tmp_path.display()))?;
-        std::fs::rename(&tmp_path, &path).with_context(|| {
-            format!(
-                "renaming {} -> {}",
-                tmp_path.display(),
-                path.display()
-            )
-        })?;
+        std::fs::rename(&tmp_path, &path)
+            .with_context(|| format!("renaming {} -> {}", tmp_path.display(), path.display()))?;
         Ok(())
     }
 }
@@ -402,75 +420,85 @@ pub fn start_hot_reload(
     let prev_above_fullscreen = std::sync::Mutex::new(initial_cfg.above_fullscreen);
 
     // Debounce at 500ms: multiple rapid writes (e.g. from an editor) collapse into one event.
-    let mut debouncer = new_debouncer(Duration::from_millis(500), move |result: DebounceEventResult| {
-        match result {
-            Ok(_events) => {
-                // Config file changed: reload and apply.
-                match Config::load_from(&Config::config_path()) {
-                    Ok(new_cfg) => {
-                        // Only send overlay commands when the relevant values actually changed.
-                        // Position-only saves (from dragging) must not trigger any overlay
-                        // commands, as CSS reloads and relayouts during a drag cause jitter.
-                        if let Ok(mut prev) = prev_appearance.lock() {
-                            if *prev != new_cfg.appearance {
-                                let _ = overlay_tx.send_blocking(
-                                    crate::overlay::OverlayCommand::UpdateAppearance(new_cfg.appearance.clone())
-                                );
-                                *prev = new_cfg.appearance.clone();
+    let mut debouncer = new_debouncer(
+        Duration::from_millis(500),
+        move |result: DebounceEventResult| {
+            match result {
+                Ok(_events) => {
+                    // Config file changed: reload and apply.
+                    match Config::load_from(&Config::config_path()) {
+                        Ok(new_cfg) => {
+                            // Only send overlay commands when the relevant values actually changed.
+                            // Position-only saves (from dragging) must not trigger any overlay
+                            // commands, as CSS reloads and relayouts during a drag cause jitter.
+                            if let Ok(mut prev) = prev_appearance.lock() {
+                                if *prev != new_cfg.appearance {
+                                    let _ = overlay_tx.send_blocking(
+                                        crate::overlay::OverlayCommand::UpdateAppearance(
+                                            new_cfg.appearance.clone(),
+                                        ),
+                                    );
+                                    *prev = new_cfg.appearance.clone();
+                                }
                             }
-                        }
-                        if let Ok(mut prev) = prev_mode.lock() {
-                            if *prev != new_cfg.overlay_mode {
-                                let _ = overlay_tx.send_blocking(
-                                    crate::overlay::OverlayCommand::SetMode(new_cfg.overlay_mode.clone())
-                                );
-                                *prev = new_cfg.overlay_mode.clone();
+                            if let Ok(mut prev) = prev_mode.lock() {
+                                if *prev != new_cfg.overlay_mode {
+                                    let _ = overlay_tx.send_blocking(
+                                        crate::overlay::OverlayCommand::SetMode(
+                                            new_cfg.overlay_mode.clone(),
+                                        ),
+                                    );
+                                    *prev = new_cfg.overlay_mode.clone();
+                                }
                             }
-                        }
-                        if let Ok(mut prev) = prev_locked.lock() {
-                            if *prev != new_cfg.locked {
-                                let _ = overlay_tx.send_blocking(
-                                    crate::overlay::OverlayCommand::SetLocked(new_cfg.locked)
-                                );
-                                *prev = new_cfg.locked;
+                            if let Ok(mut prev) = prev_locked.lock() {
+                                if *prev != new_cfg.locked {
+                                    let _ = overlay_tx.send_blocking(
+                                        crate::overlay::OverlayCommand::SetLocked(new_cfg.locked),
+                                    );
+                                    *prev = new_cfg.locked;
+                                }
                             }
-                        }
-                        if let Ok(mut prev) = prev_above_fullscreen.lock() {
-                            if *prev != new_cfg.above_fullscreen {
-                                let _ = overlay_tx.send_blocking(
-                                    crate::overlay::OverlayCommand::SetAboveFullscreen(new_cfg.above_fullscreen)
-                                );
-                                *prev = new_cfg.above_fullscreen;
+                            if let Ok(mut prev) = prev_above_fullscreen.lock() {
+                                if *prev != new_cfg.above_fullscreen {
+                                    let _ = overlay_tx.send_blocking(
+                                        crate::overlay::OverlayCommand::SetAboveFullscreen(
+                                            new_cfg.above_fullscreen,
+                                        ),
+                                    );
+                                    *prev = new_cfg.above_fullscreen;
+                                }
                             }
+                            // Update tray to reflect new config state.
+                            let tray_handle = tray_handle.clone();
+                            tokio_handle.block_on(async {
+                                tray_handle
+                                    .update(|tray: &mut crate::tray::TrayState| {
+                                        tray.active_engine = new_cfg.engine.clone();
+                                        tray.overlay_mode = new_cfg.overlay_mode.clone();
+                                        tray.locked = new_cfg.locked;
+                                    })
+                                    .await;
+                            });
                         }
-                        // Update tray to reflect new config state.
-                        let tray_handle = tray_handle.clone();
-                        tokio_handle.block_on(async {
-                            tray_handle.update(|tray: &mut crate::tray::TrayState| {
-                                tray.active_engine = new_cfg.engine.clone();
-                                tray.overlay_mode = new_cfg.overlay_mode.clone();
-                                tray.locked = new_cfg.locked;
-                            }).await;
-                        });
-                    }
-                    Err(e) => {
-                        // AC6.3: malformed TOML → warn and keep current state.
-                        eprintln!("warn: config hot-reload failed (malformed TOML): {e}");
-                        eprintln!("warn: keeping current overlay appearance");
+                        Err(e) => {
+                            // AC6.3: malformed TOML → warn and keep current state.
+                            eprintln!("warn: config hot-reload failed (malformed TOML): {e}");
+                            eprintln!("warn: keeping current overlay appearance");
+                        }
                     }
                 }
+                Err(e) => {
+                    eprintln!("warn: config file watch error: {e:?}");
+                }
             }
-            Err(e) => {
-                eprintln!("warn: config file watch error: {e:?}");
-            }
-        }
-    })?;
+        },
+    )?;
 
     // Watch the config file itself (NonRecursive = only the file).
-    debouncer.watcher().watch(
-        &config_path,
-        notify::RecursiveMode::NonRecursive,
-    )?;
+    debouncer
+        .watcher()
+        .watch(&config_path, notify::RecursiveMode::NonRecursive)?;
 
     Ok(debouncer)
 }
@@ -500,65 +528,75 @@ pub fn start_hot_reload_macos(
     let prev_locked = std::sync::Mutex::new(initial_cfg.locked);
     let prev_above_fullscreen = std::sync::Mutex::new(initial_cfg.above_fullscreen);
 
-    let mut debouncer = new_debouncer(Duration::from_millis(500), move |result: DebounceEventResult| {
-        match result {
-            Ok(_events) => match Config::load_from(&Config::config_path()) {
-                Ok(new_cfg) => {
-                    // Only emit when a value actually changed — defends against
-                    // the drag-save echo (position-only writes match position-only
-                    // in new_cfg and produce no commands).
-                    if let Ok(mut prev) = prev_source.lock() {
-                        if *prev != new_cfg.audio_source {
-                            eprintln!(
-                                "info: hot-reload: audio_source {:?} -> {:?}",
-                                *prev, new_cfg.audio_source
-                            );
-                            let _ = audio_cmd_tx.send(
-                                crate::audio::AudioCommand::SwitchSource(new_cfg.audio_source.clone())
-                            );
-                            *prev = new_cfg.audio_source.clone();
+    let mut debouncer = new_debouncer(
+        Duration::from_millis(500),
+        move |result: DebounceEventResult| {
+            match result {
+                Ok(_events) => match Config::load_from(&Config::config_path()) {
+                    Ok(new_cfg) => {
+                        // Only emit when a value actually changed — defends against
+                        // the drag-save echo (position-only writes match position-only
+                        // in new_cfg and produce no commands).
+                        if let Ok(mut prev) = prev_source.lock() {
+                            if *prev != new_cfg.audio_source {
+                                eprintln!(
+                                    "info: hot-reload: audio_source {:?} -> {:?}",
+                                    *prev, new_cfg.audio_source
+                                );
+                                let _ =
+                                    audio_cmd_tx.send(crate::audio::AudioCommand::SwitchSource(
+                                        new_cfg.audio_source.clone(),
+                                    ));
+                                *prev = new_cfg.audio_source.clone();
+                            }
+                        }
+                        if let Ok(mut prev) = prev_appearance.lock() {
+                            if *prev != new_cfg.appearance {
+                                let _ = overlay_tx.send_blocking(
+                                    crate::overlay::OverlayCommand::UpdateAppearance(
+                                        new_cfg.appearance.clone(),
+                                    ),
+                                );
+                                *prev = new_cfg.appearance.clone();
+                            }
+                        }
+                        if let Ok(mut prev) = prev_mode.lock() {
+                            if *prev != new_cfg.overlay_mode {
+                                let _ = overlay_tx.send_blocking(
+                                    crate::overlay::OverlayCommand::SetMode(
+                                        new_cfg.overlay_mode.clone(),
+                                    ),
+                                );
+                                *prev = new_cfg.overlay_mode.clone();
+                            }
+                        }
+                        if let Ok(mut prev) = prev_locked.lock() {
+                            if *prev != new_cfg.locked {
+                                let _ = overlay_tx.send_blocking(
+                                    crate::overlay::OverlayCommand::SetLocked(new_cfg.locked),
+                                );
+                                *prev = new_cfg.locked;
+                            }
+                        }
+                        if let Ok(mut prev) = prev_above_fullscreen.lock() {
+                            if *prev != new_cfg.above_fullscreen {
+                                let _ = overlay_tx.send_blocking(
+                                    crate::overlay::OverlayCommand::SetAboveFullscreen(
+                                        new_cfg.above_fullscreen,
+                                    ),
+                                );
+                                *prev = new_cfg.above_fullscreen;
+                            }
                         }
                     }
-                    if let Ok(mut prev) = prev_appearance.lock() {
-                        if *prev != new_cfg.appearance {
-                            let _ = overlay_tx.send_blocking(
-                                crate::overlay::OverlayCommand::UpdateAppearance(new_cfg.appearance.clone())
-                            );
-                            *prev = new_cfg.appearance.clone();
-                        }
+                    Err(e) => {
+                        eprintln!("warn: config hot-reload failed (malformed TOML): {e}");
                     }
-                    if let Ok(mut prev) = prev_mode.lock() {
-                        if *prev != new_cfg.overlay_mode {
-                            let _ = overlay_tx.send_blocking(
-                                crate::overlay::OverlayCommand::SetMode(new_cfg.overlay_mode.clone())
-                            );
-                            *prev = new_cfg.overlay_mode.clone();
-                        }
-                    }
-                    if let Ok(mut prev) = prev_locked.lock() {
-                        if *prev != new_cfg.locked {
-                            let _ = overlay_tx.send_blocking(
-                                crate::overlay::OverlayCommand::SetLocked(new_cfg.locked)
-                            );
-                            *prev = new_cfg.locked;
-                        }
-                    }
-                    if let Ok(mut prev) = prev_above_fullscreen.lock() {
-                        if *prev != new_cfg.above_fullscreen {
-                            let _ = overlay_tx.send_blocking(
-                                crate::overlay::OverlayCommand::SetAboveFullscreen(new_cfg.above_fullscreen)
-                            );
-                            *prev = new_cfg.above_fullscreen;
-                        }
-                    }
-                }
-                Err(e) => {
-                    eprintln!("warn: config hot-reload failed (malformed TOML): {e}");
-                }
-            },
-            Err(e) => eprintln!("warn: config file watch error: {e:?}"),
-        }
-    })?;
+                },
+                Err(e) => eprintln!("warn: config file watch error: {e:?}"),
+            }
+        },
+    )?;
 
     debouncer
         .watcher()
@@ -629,7 +667,10 @@ mod tests {
         fs::write(&path, "engine = \"moonshine\"\n").unwrap();
         // The deserialization should fail because "moonshine" is not a valid Engine variant.
         let result = Config::load_from(&path);
-        assert!(result.is_err(), "Expected deserialization error for unknown engine");
+        assert!(
+            result.is_err(),
+            "Expected deserialization error for unknown engine"
+        );
     }
 
     /// AC2.2: CLI engine string-to-Engine mapping.
@@ -669,7 +710,9 @@ bundle_id = "com.apple.Safari"
 label = "Safari"
 "#;
         #[derive(serde::Deserialize)]
-        struct Wrapper { audio_source: AudioSource }
+        struct Wrapper {
+            audio_source: AudioSource,
+        }
         let w: Wrapper = toml::from_str(toml_input).expect("parse audio_source App variant");
         assert!(
             matches!(&w.audio_source, AudioSource::App { bundle_id, label }
@@ -737,7 +780,10 @@ label = "Safari"
 
         // Deserialize and verify
         let loaded = Config::load_from(&path).unwrap();
-        assert_eq!(loaded.appearance.expire_secs, 10, "expire_secs should survive roundtrip");
+        assert_eq!(
+            loaded.appearance.expire_secs, 10,
+            "expire_secs should survive roundtrip"
+        );
     }
 
     /// AC3.3: Deserializing expire_secs = 0 and calling effective_expire_secs() returns default.
@@ -751,7 +797,10 @@ label = "Safari"
         fs::write(&path, toml_content).unwrap();
 
         let cfg = Config::load_from(&path).unwrap();
-        assert_eq!(cfg.appearance.expire_secs, 0, "expire_secs should be 0 as read from TOML");
+        assert_eq!(
+            cfg.appearance.expire_secs, 0,
+            "expire_secs should be 0 as read from TOML"
+        );
         assert_eq!(
             cfg.appearance.effective_expire_secs(),
             8,
@@ -770,7 +819,10 @@ label = "Safari"
         fs::write(&path, toml_content).unwrap();
 
         let cfg = Config::load_from(&path).unwrap();
-        assert_eq!(cfg.appearance.expire_secs, 8, "Missing expire_secs should default to 8");
+        assert_eq!(
+            cfg.appearance.expire_secs, 8,
+            "Missing expire_secs should default to 8"
+        );
         assert_eq!(
             cfg.appearance.effective_expire_secs(),
             8,
@@ -783,11 +835,16 @@ label = "Safari"
     fn ac2_4_overlay_mode_transcript_round_trips_through_toml() {
         let toml_input = r#"overlay_mode = "transcript""#;
         #[derive(serde::Deserialize, serde::Serialize)]
-        struct Wrapper { overlay_mode: super::OverlayMode }
+        struct Wrapper {
+            overlay_mode: super::OverlayMode,
+        }
         let w: Wrapper = toml::from_str(toml_input).expect("parse");
         assert_eq!(w.overlay_mode, super::OverlayMode::Transcript);
 
-        let serialized = toml::to_string(&Wrapper { overlay_mode: super::OverlayMode::Transcript }).expect("serialize");
+        let serialized = toml::to_string(&Wrapper {
+            overlay_mode: super::OverlayMode::Transcript,
+        })
+        .expect("serialize");
         assert!(
             serialized.contains(r#"overlay_mode = "transcript""#),
             "expected serialized TOML to contain `overlay_mode = \"transcript\"`, got: {serialized}"

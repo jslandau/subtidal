@@ -2,13 +2,13 @@
 //! Phase 5 (revised) implementation: real STT pipeline fed by Core Audio Process Taps.
 
 use objc2::MainThreadMarker;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use subtidal::audio::{self, AudioCommand};
 use subtidal::config::{self, Config};
 use subtidal::overlay::{self, CaptionsEnabled, OverlayCommand};
 use subtidal::tray;
 use subtidal::{models, stt};
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 /// Main entry point for macOS Subtidal.
 /// Acquires main-thread proof, loads config, builds shared state, spawns workers,
@@ -16,8 +16,7 @@ use std::sync::atomic::AtomicBool;
 pub fn main() {
     // 1. Acquire MainThreadMarker at the very top. main() always starts on the main
     // thread, but be explicit.
-    let _mtm = MainThreadMarker::new()
-        .expect("main_macos::main must run on the main thread");
+    let _mtm = MainThreadMarker::new().expect("main_macos::main must run on the main thread");
 
     // 2. Load config (use the neutral Config::load() which defaults gracefully).
     let config = Config::load();
@@ -31,11 +30,10 @@ pub fn main() {
             .build()
             .expect("tokio runtime");
         rt.block_on(async {
-            models::ensure_nemotron_models().await
-                .unwrap_or_else(|e| {
-                    eprintln!("error: {e}");
-                    std::process::exit(1);
-                });
+            models::ensure_nemotron_models().await.unwrap_or_else(|e| {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            });
         });
     }
 
@@ -47,10 +45,13 @@ pub fn main() {
             .build()
             .expect("tokio runtime");
         rt.block_on(async {
-            models::ensure_diarization_models().await
+            models::ensure_diarization_models()
+                .await
                 .unwrap_or_else(|e| {
                     eprintln!("warn: failed to download Sortformer model: {e:#}");
-                    eprintln!("hint: diarization will be unavailable until the model is downloaded");
+                    eprintln!(
+                        "hint: diarization will be unavailable until the model is downloaded"
+                    );
                 });
         });
         println!("Sortformer diarization model ready.");
@@ -77,7 +78,10 @@ pub fn main() {
                 if !present {
                     eprintln!("info: persisted app '{}' has no audio process; falling back to SystemOutput", bundle_id);
                     eprintln!("info: available app bundle IDs from Core Audio:");
-                    for s in sources.iter().filter(|s| matches!(s.source, config::AudioSource::App { .. })) {
+                    for s in sources
+                        .iter()
+                        .filter(|s| matches!(s.source, config::AudioSource::App { .. }))
+                    {
                         if let config::AudioSource::App { bundle_id: b, .. } = &s.source {
                             eprintln!("  - {}", b);
                         }
@@ -144,6 +148,8 @@ pub fn main() {
         diarization_enabled: Arc::clone(&diarization_enabled),
         diarization_preset: config.diarization_preset.clone(),
         diarization_model_dir: models::diarization_model_dir(),
+        diarization_display_delay_ms: config.diarization_display_delay_ms,
+        diarization_alignment_lag_ms: config.diarization_alignment_lag_ms,
     };
     let _stt_handle = stt::spawn_stt_thread(
         ring_consumer,
@@ -155,13 +161,18 @@ pub fn main() {
     // 10b. Start config hot-reload watcher. On audio_source edits it sends
     // SwitchSource to the audio worker so users can change capture target by
     // editing config.toml. _watcher must stay alive for the process lifetime.
-    let _config_watcher = match config::start_hot_reload_macos(audio_cmd_tx.clone(), cmd_tx.clone()) {
+    let _config_watcher = match config::start_hot_reload_macos(audio_cmd_tx.clone(), cmd_tx.clone())
+    {
         Ok(w) => {
-            eprintln!("info: config hot-reload active (watching config.toml for audio_source changes)");
+            eprintln!(
+                "info: config hot-reload active (watching config.toml for audio_source changes)"
+            );
             Some(w)
         }
         Err(e) => {
-            eprintln!("warn: config hot-reload unavailable: {e}; config changes will need a restart");
+            eprintln!(
+                "warn: config hot-reload unavailable: {e}; config changes will need a restart"
+            );
             None
         }
     };
@@ -184,7 +195,7 @@ pub fn main() {
         .expect("main_macos::main must run on the main thread (needed for tray install)");
 
     let audio_sources = Arc::new(std::sync::Mutex::new(
-        audio::list_sources().unwrap_or_default()
+        audio::list_sources().unwrap_or_default(),
     ));
 
     let tray_state = tray::TrayState {
@@ -201,7 +212,7 @@ pub fn main() {
 
     // 13. Call overlay::run_app to build the panel and run NSApplication.run().
     // This blocks until Quit is posted by the ctrlc handler.
-    overlay::run_app(config, caption_rx, cmd_rx, captions_enabled);
+    overlay::run_app(config, caption_rx, cmd_rx, cmd_tx.clone(), captions_enabled);
 
     // 14. After run_app returns, release the STT thread + audio tap thread and clean up.
     audio_wake.shutdown();

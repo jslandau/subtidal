@@ -47,9 +47,13 @@ impl TrayState {
         // the window contradicts the design's "blank, don't hide" intent. Gate
         // it by mode.
         if !matches!(self.overlay_mode, OverlayMode::Transcript) {
-            let _ = self.overlay_tx.send_blocking(OverlayCommand::SetVisible(next));
+            let _ = self
+                .overlay_tx
+                .send_blocking(OverlayCommand::SetVisible(next));
         }
-        let _ = self.overlay_tx.send_blocking(OverlayCommand::SetCaptionsEnabled(next));
+        let _ = self
+            .overlay_tx
+            .send_blocking(OverlayCommand::SetCaptionsEnabled(next));
     }
 }
 
@@ -66,8 +70,15 @@ fn ensure_icons_installed() -> String {
             .and_then(|p| p.parent().map(|d| d.to_path_buf()));
         if let Some(dir) = &exe_dir {
             let dev = dir.join("../../assets/icons");
-            if dev.join("hicolor/scalable/status/subtidal-captions-on-symbolic.svg").exists() {
-                return dev.canonicalize().unwrap_or(dev).to_string_lossy().to_string();
+            if dev
+                .join("hicolor/scalable/status/subtidal-captions-on-symbolic.svg")
+                .exists()
+            {
+                return dev
+                    .canonicalize()
+                    .unwrap_or(dev)
+                    .to_string_lossy()
+                    .to_string();
             }
         }
 
@@ -77,17 +88,31 @@ fn ensure_icons_installed() -> String {
             .join("icons");
         let status_dir = icons_base.join("hicolor/scalable/status");
 
-        static ICON_ON: &[u8] = include_bytes!("../../assets/icons/hicolor/scalable/status/subtidal-captions-on-symbolic.svg");
-        static ICON_OFF: &[u8] = include_bytes!("../../assets/icons/hicolor/scalable/status/subtidal-captions-off-symbolic.svg");
+        static ICON_ON: &[u8] = include_bytes!(
+            "../../assets/icons/hicolor/scalable/status/subtidal-captions-on-symbolic.svg"
+        );
+        static ICON_OFF: &[u8] = include_bytes!(
+            "../../assets/icons/hicolor/scalable/status/subtidal-captions-off-symbolic.svg"
+        );
 
         let files = [
-            (status_dir.join("subtidal-captions-on-symbolic.svg"), ICON_ON),
-            (status_dir.join("subtidal-captions-off-symbolic.svg"), ICON_OFF),
+            (
+                status_dir.join("subtidal-captions-on-symbolic.svg"),
+                ICON_ON,
+            ),
+            (
+                status_dir.join("subtidal-captions-off-symbolic.svg"),
+                ICON_OFF,
+            ),
         ];
 
         // Only write if any file is missing or differs in size.
         let needs_install = files.iter().any(|(path, data)| {
-            !path.exists() || path.metadata().map(|m| m.len() != data.len() as u64).unwrap_or(true)
+            !path.exists()
+                || path
+                    .metadata()
+                    .map(|m| m.len() != data.len() as u64)
+                    .unwrap_or(true)
         });
 
         if needs_install {
@@ -110,23 +135,32 @@ fn ensure_icons_installed() -> String {
         }
 
         icons_base.to_string_lossy().to_string()
-    }).clone()
+    })
+    .clone()
 }
 
 /// Render the CC tray icon as ARGB32 pixel data (ksni format) at 64×64.
 /// Delegates geometry to the shared RGBA renderer, then converts byte order.
 fn render_cc_icon(opacity: f32, strikethrough: bool, gpu: bool) -> ksni::Icon {
-    let (r, g, b) = if gpu { (100u8, 255u8, 100u8) } else { (255u8, 255u8, 255u8) };
+    let (r, g, b) = if gpu {
+        (100u8, 255u8, 100u8)
+    } else {
+        (255u8, 255u8, 255u8)
+    };
     let rgba = super::icon::render_cc_icon_rgba(r, g, b, opacity, strikethrough);
     // ksni Icon.data is ARGB in network (big-endian) byte order: [A, R, G, B].
     let mut argb = vec![0u8; rgba.len()];
     for i in (0..rgba.len()).step_by(4) {
-        argb[i]     = rgba[i + 3]; // A
-        argb[i + 1] = rgba[i];     // R
+        argb[i] = rgba[i + 3]; // A
+        argb[i + 1] = rgba[i]; // R
         argb[i + 2] = rgba[i + 1]; // G
         argb[i + 3] = rgba[i + 2]; // B
     }
-    ksni::Icon { width: 64, height: 64, data: argb }
+    ksni::Icon {
+        width: 64,
+        height: 64,
+        data: argb,
+    }
 }
 
 /// Whether the tray host is known to resolve icon names via icon_theme_path.
@@ -137,7 +171,9 @@ fn tray_host_supports_icon_themes() -> bool {
     *RESULT.get_or_init(|| {
         // KDE Plasma's system tray resolves icon themes + symbolic recoloring.
         // Check for KDE by looking at XDG_CURRENT_DESKTOP.
-        let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default().to_lowercase();
+        let desktop = std::env::var("XDG_CURRENT_DESKTOP")
+            .unwrap_or_default()
+            .to_lowercase();
         desktop.contains("kde") || desktop.contains("plasma")
     })
 }
@@ -201,7 +237,6 @@ impl Tray for TrayState {
                 ..Default::default()
             }
             .into(),
-
             // --- Diarization on/off ---
             CheckmarkItem {
                 label: "Diarization".to_string(),
@@ -209,12 +244,14 @@ impl Tray for TrayState {
                 activate: Box::new(|tray: &mut TrayState| {
                     let prev = tray.diarization_enabled.load(Ordering::Relaxed);
                     tray.diarization_enabled.store(!prev, Ordering::Relaxed);
-                    eprintln!("info: diarization {}", if !prev { "enabled" } else { "disabled" });
+                    eprintln!(
+                        "info: diarization {}",
+                        if !prev { "enabled" } else { "disabled" }
+                    );
                 }),
                 ..Default::default()
             }
             .into(),
-
             // --- Rename speakers... ---
             // Enabled regardless of diarization state so users can pre-set
             // names before turning diarization on. No-op when nothing is
@@ -222,14 +259,14 @@ impl Tray for TrayState {
             StandardItem {
                 label: "Rename Speakers...".to_string(),
                 activate: Box::new(|tray: &mut TrayState| {
-                    let _ = tray.overlay_tx.send_blocking(OverlayCommand::ShowRenameDialog);
+                    let _ = tray
+                        .overlay_tx
+                        .send_blocking(OverlayCommand::ShowRenameDialog);
                 }),
                 ..Default::default()
             }
             .into(),
-
             MenuItem::Separator,
-
             // --- Audio Source submenu ---
             SubMenu {
                 label: "Audio Source".to_string(),
@@ -237,7 +274,6 @@ impl Tray for TrayState {
                 ..Default::default()
             }
             .into(),
-
             // --- Overlay submenu ---
             SubMenu {
                 label: "Overlay".to_string(),
@@ -245,9 +281,7 @@ impl Tray for TrayState {
                 ..Default::default()
             }
             .into(),
-
             MenuItem::Separator,
-
             // --- Settings ---
             StandardItem {
                 label: "Settings...".to_string(),
@@ -261,7 +295,6 @@ impl Tray for TrayState {
                 ..Default::default()
             }
             .into(),
-
             // --- Quit ---
             StandardItem {
                 label: "Quit".to_string(),
@@ -285,16 +318,20 @@ fn build_audio_source_submenu(
     let system_selected = matches!(active, AudioSource::SystemOutput);
 
     let items: Vec<MenuItem<TrayState>> = vec![RadioGroup {
-        selected: if system_selected { 0 } else {
-            nodes.iter().position(|n| {
-                if let AudioSource::Application { node_id, .. } = active {
-                    n.node_id == *node_id
-                } else {
-                    false
-                }
-            })
-            .map(|i| i + 1)
-            .unwrap_or(0)
+        selected: if system_selected {
+            0
+        } else {
+            nodes
+                .iter()
+                .position(|n| {
+                    if let AudioSource::Application { node_id, .. } = active {
+                        n.node_id == *node_id
+                    } else {
+                        false
+                    }
+                })
+                .map(|i| i + 1)
+                .unwrap_or(0)
         },
         select: Box::new(|tray: &mut TrayState, idx: usize| {
             let nodes = tray.node_list.lock().unwrap().clone();
@@ -309,7 +346,9 @@ fn build_audio_source_submenu(
                 AudioSource::SystemOutput
             };
             tray.active_source = new_source.clone();
-            let _ = tray.audio_tx.send(AudioCommand::SwitchSource(new_source.clone()));
+            let _ = tray
+                .audio_tx
+                .send(AudioCommand::SwitchSource(new_source.clone()));
             // Persist audio source change to config.
             // Note: load-modify-save pattern has a theoretical race if multiple tray actions fire simultaneously. Acceptable for single-user desktop app.
             let mut cfg = crate::config::Config::load();
@@ -342,7 +381,7 @@ fn build_audio_source_submenu(
 }
 
 /// Width presets for the overlay size submenu.
-const SIZE_PRESETS: &[(& str, i32)] = &[
+const SIZE_PRESETS: &[(&str, i32)] = &[
     ("Small (400px)", 400),
     ("Medium (600px)", 600),
     ("Large (800px)", 800),
@@ -376,7 +415,9 @@ fn build_overlay_submenu(tray: &TrayState) -> Vec<MenuItem<TrayState>> {
                     _ => return, // ksni shouldn't pass out-of-range indices, but be safe
                 };
                 tray.overlay_mode = mode.clone();
-                let _ = tray.overlay_tx.send_blocking(OverlayCommand::SetMode(mode.clone()));
+                let _ = tray
+                    .overlay_tx
+                    .send_blocking(OverlayCommand::SetMode(mode.clone()));
                 let mut cfg = crate::config::Config::load();
                 cfg.overlay_mode = tray.overlay_mode.clone();
                 if let Err(e) = cfg.save() {
@@ -384,15 +425,25 @@ fn build_overlay_submenu(tray: &TrayState) -> Vec<MenuItem<TrayState>> {
                 }
             }),
             options: vec![
-                RadioItem { label: "Docked".to_string(), enabled: true, ..Default::default() },
-                RadioItem { label: "Floating".to_string(), enabled: true, ..Default::default() },
-                RadioItem { label: "Transcript".to_string(), enabled: true, ..Default::default() },
+                RadioItem {
+                    label: "Docked".to_string(),
+                    enabled: true,
+                    ..Default::default()
+                },
+                RadioItem {
+                    label: "Floating".to_string(),
+                    enabled: true,
+                    ..Default::default()
+                },
+                RadioItem {
+                    label: "Transcript".to_string(),
+                    enabled: true,
+                    ..Default::default()
+                },
             ],
         }
         .into(),
-
         MenuItem::Separator,
-
         // Overlay width presets.
         SubMenu {
             label: "Size".to_string(),
@@ -406,7 +457,9 @@ fn build_overlay_submenu(tray: &TrayState) -> Vec<MenuItem<TrayState>> {
                     if let Err(e) = cfg.save() {
                         eprintln!("warn: failed to save config: {e}");
                     }
-                    let _ = tray.overlay_tx.send_blocking(OverlayCommand::UpdateAppearance(appearance));
+                    let _ = tray
+                        .overlay_tx
+                        .send_blocking(OverlayCommand::UpdateAppearance(appearance));
                 }),
                 options: SIZE_PRESETS
                     .iter()
@@ -421,9 +474,7 @@ fn build_overlay_submenu(tray: &TrayState) -> Vec<MenuItem<TrayState>> {
             ..Default::default()
         }
         .into(),
-
         MenuItem::Separator,
-
         // Lock overlay position (enabled only in Floating mode).
         CheckmarkItem {
             label: "Lock Overlay Position".to_string(),
@@ -432,7 +483,9 @@ fn build_overlay_submenu(tray: &TrayState) -> Vec<MenuItem<TrayState>> {
             activate: Box::new(|tray: &mut TrayState| {
                 if tray.overlay_mode == OverlayMode::Floating {
                     tray.locked = !tray.locked;
-                    let _ = tray.overlay_tx.send_blocking(OverlayCommand::SetLocked(tray.locked));
+                    let _ = tray
+                        .overlay_tx
+                        .send_blocking(OverlayCommand::SetLocked(tray.locked));
                     let mut cfg = crate::config::Config::load();
                     cfg.locked = tray.locked;
                     if let Err(e) = cfg.save() {
@@ -443,7 +496,6 @@ fn build_overlay_submenu(tray: &TrayState) -> Vec<MenuItem<TrayState>> {
             ..Default::default()
         }
         .into(),
-
         // Show above fullscreen windows (wlr-layer-shell Overlay layer).
         // Disabled in Transcript mode since that uses a regular toplevel,
         // not a layer-shell surface.
@@ -456,9 +508,9 @@ fn build_overlay_submenu(tray: &TrayState) -> Vec<MenuItem<TrayState>> {
                     return;
                 }
                 tray.above_fullscreen = !tray.above_fullscreen;
-                let _ = tray.overlay_tx.send_blocking(
-                    OverlayCommand::SetAboveFullscreen(tray.above_fullscreen),
-                );
+                let _ = tray
+                    .overlay_tx
+                    .send_blocking(OverlayCommand::SetAboveFullscreen(tray.above_fullscreen));
                 let mut cfg = crate::config::Config::load();
                 cfg.above_fullscreen = tray.above_fullscreen;
                 if let Err(e) = cfg.save() {
@@ -477,9 +529,7 @@ pub fn spawn_tray(
     tray_state: TrayState,
     runtime: &tokio::runtime::Runtime,
 ) -> ksni::Handle<TrayState> {
-    runtime.block_on(async {
-        tray_state.spawn().await.expect("spawning ksni tray")
-    })
+    runtime.block_on(async { tray_state.spawn().await.expect("spawning ksni tray") })
 }
 
 #[cfg(test)]
@@ -516,8 +566,14 @@ mod tests {
         // In the submenu, the Lock item should have enabled=false when overlay is Docked
         // The submenu structure should have the Lock item with enabled=false
         // We verify this by checking that locked=false doesn't affect the menu structure
-        assert!(!overlay_submenu.is_empty(), "Overlay submenu should not be empty");
-        assert!(!tray.overlay_mode.eq(&OverlayMode::Floating), "Tray should be in Docked mode");
+        assert!(
+            !overlay_submenu.is_empty(),
+            "Overlay submenu should not be empty"
+        );
+        assert!(
+            !tray.overlay_mode.eq(&OverlayMode::Floating),
+            "Tray should be in Docked mode"
+        );
     }
 
     /// AC4.5: Lock enabled in floating mode.
@@ -548,8 +604,14 @@ mod tests {
         let overlay_submenu = build_overlay_submenu(&tray);
 
         // In the submenu, the Lock item should have enabled=true when overlay is Floating
-        assert!(!overlay_submenu.is_empty(), "Overlay submenu should not be empty");
-        assert!(tray.overlay_mode.eq(&OverlayMode::Floating), "Tray should be in Floating mode");
+        assert!(
+            !overlay_submenu.is_empty(),
+            "Overlay submenu should not be empty"
+        );
+        assert!(
+            tray.overlay_mode.eq(&OverlayMode::Floating),
+            "Tray should be in Floating mode"
+        );
     }
 
     /// AC4.1: Verify that menu() output excludes "STT Engine" submenu.
@@ -623,7 +685,10 @@ mod tests {
         // The submenu builder must produce a non-empty submenu and report Transcript
         // (not Floating) as the current mode.
         let overlay_submenu = build_overlay_submenu(&tray);
-        assert!(!overlay_submenu.is_empty(), "Overlay submenu should not be empty");
+        assert!(
+            !overlay_submenu.is_empty(),
+            "Overlay submenu should not be empty"
+        );
         assert_eq!(tray.overlay_mode, OverlayMode::Transcript);
     }
 

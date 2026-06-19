@@ -6,9 +6,9 @@
 //! (watchdog detection of source disappearance).
 
 use anyhow::Result;
-use coreaudio_sys::*;
-use core_foundation::string::CFString;
 use core_foundation::base::FromVoid;
+use core_foundation::string::CFString;
+use coreaudio_sys::*;
 
 /// Basic info about an audio-producing process.
 #[derive(Debug, Clone)]
@@ -67,7 +67,10 @@ pub fn enumerate_audio_processes() -> Result<Vec<ProcessInfo>> {
             process_ids.as_mut_ptr() as *mut std::ffi::c_void,
         );
         if status != 0 {
-            anyhow::bail!("AudioObjectGetPropertyData (list) failed: status={}", status);
+            anyhow::bail!(
+                "AudioObjectGetPropertyData (list) failed: status={}",
+                status
+            );
         }
 
         // Step 3: For each process, read PID and bundle ID. Skip entries with no
@@ -116,7 +119,10 @@ pub fn translate_pid_to_process_object(pid: std::ffi::c_int) -> Result<AudioObje
             &mut out_id as *mut _ as *mut std::ffi::c_void,
         );
         if status != 0 {
-            anyhow::bail!("AudioObjectGetPropertyData (PID translate) failed: status={}", status);
+            anyhow::bail!(
+                "AudioObjectGetPropertyData (PID translate) failed: status={}",
+                status
+            );
         }
         Ok(out_id)
     }
@@ -228,7 +234,10 @@ mod tests {
         let procs = enumerate_audio_processes().expect("enumerate should succeed");
         // On any graphical macOS session, there should be at least one process
         // with audio activity (kernel, Finder, or similar).
-        assert!(!procs.is_empty(), "expected at least one audio process on a live system");
+        assert!(
+            !procs.is_empty(),
+            "expected at least one audio process on a live system"
+        );
     }
 
     #[test]

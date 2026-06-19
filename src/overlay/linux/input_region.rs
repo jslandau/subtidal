@@ -7,9 +7,9 @@
 //! Additionally, `gtk4_layer_shell::LayerShell::set_keyboard_mode(KeyboardMode::None)`
 //! prevents the overlay from stealing keyboard focus.
 
+use gtk4::cairo;
 use gtk4::prelude::*;
 use gtk4::ApplicationWindow;
-use gtk4::cairo;
 use gtk4_layer_shell::{KeyboardMode, LayerShell};
 
 /// Make the window click-through: set an empty GDK surface input region.

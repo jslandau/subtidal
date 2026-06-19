@@ -47,10 +47,22 @@ pub fn nemotron_model_dir() -> PathBuf {
 /// Nemotron model files derives from this list.
 const NEMOTRON_REPO: &str = "altunenes/parakeet-rs";
 const NEMOTRON_FILES: &[(&str, &str)] = &[
-    ("nemotron-speech-streaming-en-0.6b/encoder.onnx", "encoder.onnx"),
-    ("nemotron-speech-streaming-en-0.6b/encoder.onnx.data", "encoder.onnx.data"),
-    ("nemotron-speech-streaming-en-0.6b/decoder_joint.onnx", "decoder_joint.onnx"),
-    ("nemotron-speech-streaming-en-0.6b/tokenizer.model", "tokenizer.model"),
+    (
+        "nemotron-speech-streaming-en-0.6b/encoder.onnx",
+        "encoder.onnx",
+    ),
+    (
+        "nemotron-speech-streaming-en-0.6b/encoder.onnx.data",
+        "encoder.onnx.data",
+    ),
+    (
+        "nemotron-speech-streaming-en-0.6b/decoder_joint.onnx",
+        "decoder_joint.onnx",
+    ),
+    (
+        "nemotron-speech-streaming-en-0.6b/tokenizer.model",
+        "tokenizer.model",
+    ),
 ];
 
 /// HuggingFace repo and file path for the Sortformer diarization model.
@@ -118,17 +130,21 @@ pub async fn ensure_diarization_models() -> Result<()> {
 
     let dest = dest_dir.join(SORTFORMER_FILE.1);
     if dest.exists() {
-        eprintln!("info: Sortformer model file already present: {}", dest.display());
+        eprintln!(
+            "info: Sortformer model file already present: {}",
+            dest.display()
+        );
         return Ok(());
     }
 
     eprintln!("info: downloading Sortformer diarization model (~492 MB) ...");
 
-    let api = hf_hub::api::tokio::Api::new()
-        .context("initializing HuggingFace API")?;
+    let api = hf_hub::api::tokio::Api::new().context("initializing HuggingFace API")?;
     let repo = api.model(SORTFORMER_REPO.to_string());
 
-    let cached = repo.get(SORTFORMER_FILE.0).await
+    let cached = repo
+        .get(SORTFORMER_FILE.0)
+        .await
         .with_context(|| format!("downloading {} from {SORTFORMER_REPO}", SORTFORMER_FILE.0))?;
     copy_model_file(&cached, &dest)
         .with_context(|| format!("copying Sortformer model to {}", dest.display()))?;
@@ -145,18 +161,22 @@ pub async fn ensure_nemotron_models() -> Result<()> {
     std::fs::create_dir_all(&dest_dir)
         .with_context(|| format!("creating {}", dest_dir.display()))?;
 
-    let api = hf_hub::api::tokio::Api::new()
-        .context("initializing HuggingFace API")?;
+    let api = hf_hub::api::tokio::Api::new().context("initializing HuggingFace API")?;
     let repo = api.model(NEMOTRON_REPO.to_string());
 
     for (remote_path, local_name) in NEMOTRON_FILES {
         let dest = dest_dir.join(local_name);
         if dest.exists() {
-            eprintln!("info: nemotron model file already present: {}", dest.display());
+            eprintln!(
+                "info: nemotron model file already present: {}",
+                dest.display()
+            );
             continue;
         }
         eprintln!("info: downloading {} ...", remote_path);
-        let cached = repo.get(remote_path).await
+        let cached = repo
+            .get(remote_path)
+            .await
             .with_context(|| format!("downloading {remote_path} from {NEMOTRON_REPO}"))?;
         copy_model_file(&cached, &dest)
             .with_context(|| format!("copying {remote_path} to {}", dest.display()))?;
@@ -209,7 +229,12 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            ["encoder.onnx", "encoder.onnx.data", "decoder_joint.onnx", "tokenizer.model"]
+            [
+                "encoder.onnx",
+                "encoder.onnx.data",
+                "decoder_joint.onnx",
+                "tokenizer.model"
+            ]
         );
         for p in &files {
             assert!(p.starts_with("/base/nemotron"));

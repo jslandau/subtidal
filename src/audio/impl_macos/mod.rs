@@ -3,18 +3,18 @@
 //! mechanism that uses system Audio Capture permission instead of Screen Recording.
 
 use anyhow::Result;
-use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
+use std::sync::{Arc, Mutex};
 
-use ringbuf::HeapRb;
 use ringbuf::traits::Split;
+use ringbuf::HeapRb;
 
-use crate::stt::AudioWake;
 use crate::audio::FallbackEvent;
+use crate::stt::AudioWake;
 
-mod tap_processes;    // Core Audio process enumeration (Task 2, Phase 5 revised)
-mod tap;              // Core Audio process tap RAII (Task 3, Phase 5 revised)
-mod notify;           // UNUserNotificationCenter helper (Task 5, Phase 5 revised)
+mod notify;
+mod tap; // Core Audio process tap RAII (Task 3, Phase 5 revised)
+mod tap_processes; // Core Audio process enumeration (Task 2, Phase 5 revised) // UNUserNotificationCenter helper (Task 5, Phase 5 revised)
 
 /// Commands sent to the audio thread.
 pub enum AudioCommand {
@@ -50,13 +50,17 @@ const TCC_DENIED_PANEL_MESSAGE: &str =
 /// the audio thread auto-switches to SystemOutput. The caller should spawn a
 /// thread to drain this receiver for logging and future tray-state updates.
 ///
-/// `error_caption_tx` is the same caption channel the STT pipeline writes
-/// into; on TCC denial the audio thread posts a one-shot caption to it.
+/// `error_caption_tx` is the same caption-event channel the STT pipeline writes
+/// into; on TCC denial the audio thread posts a one-shot non-diarized caption to it.
 pub fn start_audio_thread(
     initial_source: crate::config::AudioSource,
     audio_wake: Arc<AudioWake>,
-    error_caption_tx: async_channel::Sender<String>,
-) -> Result<(SyncSender<AudioCommand>, ringbuf::HeapCons<f32>, Receiver<FallbackEvent>)> {
+    error_caption_tx: async_channel::Sender<crate::overlay::CaptionEvent>,
+) -> Result<(
+    SyncSender<AudioCommand>,
+    ringbuf::HeapCons<f32>,
+    Receiver<FallbackEvent>,
+)> {
     // Same capacity as Linux: 48000 frames × 2 channels = 96_000 f32 elements.
     const RING_BUF_CAPACITY: usize = 96_000;
     let (ring_producer, ring_consumer) = HeapRb::<f32>::new(RING_BUF_CAPACITY).split();
@@ -84,14 +88,20 @@ pub fn start_audio_thread(
                 Err(CaptureError::InitialBuildFailed(e)) => {
                     eprintln!("error: initial audio tap construction failed: {e:#}");
                     // Surface TCC denial message in the NSPanel.
-                    let _ = error_caption_tx.send_blocking(TCC_DENIED_PANEL_MESSAGE.to_string());
+                    let _ = error_caption_tx.send_blocking(crate::overlay::CaptionEvent::Append {
+                        text: TCC_DENIED_PANEL_MESSAGE.to_string(),
+                        speaker_id: None,
+                        emit_sample: 0,
+                    });
                 }
                 Err(CaptureError::RuntimeFailure(e)) => {
                     eprintln!("error: audio tap capture exited: {e:#}");
                     // For runtime failures (rebuild failed, etc.), post a generic error message.
-                    let _ = error_caption_tx.send_blocking(
-                        format!("Audio capture failed: {e}")
-                    );
+                    let _ = error_caption_tx.send_blocking(crate::overlay::CaptionEvent::Append {
+                        text: format!("Audio capture failed: {e}"),
+                        speaker_id: None,
+                        emit_sample: 0,
+                    });
                 }
             }
         })?;
@@ -115,7 +125,12 @@ fn run_tap_capture(
         tap_target_for(&current_source)?,
         Arc::clone(&ring_producer),
         Arc::clone(&audio_wake),
-    ).map_err(|e| CaptureError::InitialBuildFailed(e.context("initial tap construction (Audio Capture permission denied?)")))?;
+    )
+    .map_err(|e| {
+        CaptureError::InitialBuildFailed(
+            e.context("initial tap construction (Audio Capture permission denied?)"),
+        )
+    })?;
 
     // Watchdog: every 1 second, if we're capturing a specific process,
     // check if it's still running. On disappearance, fall back to SystemOutput.
@@ -199,7 +214,10 @@ fn run_tap_capture(
                     );
 
                     // Post a user notification about the disappearance.
-                    let notification_msg = format!("'{}' stopped producing audio. Falling back to System Output.", current_label);
+                    let notification_msg = format!(
+                        "'{}' stopped producing audio. Falling back to System Output.",
+                        current_label
+                    );
                     let _ = notify::post_user_notification(
                         "Subtidal: audio source unavailable",
                         &notification_msg,
@@ -281,7 +299,10 @@ fn tap_target_for(src: &crate::config::AudioSource) -> Result<tap::TapTarget> {
             }
             let object_ids = matches.iter().map(|p| p.audio_object_id).collect();
             let watchdog_pids = matches.iter().map(|p| p.pid).collect();
-            Ok(tap::TapTarget::Processes { object_ids, watchdog_pids })
+            Ok(tap::TapTarget::Processes {
+                object_ids,
+                watchdog_pids,
+            })
         }
     }
 }
@@ -377,7 +398,7 @@ mod tests {
         const _: fn(
             crate::config::AudioSource,
             std::sync::Arc<crate::stt::AudioWake>,
-            async_channel::Sender<String>,
+            async_channel::Sender<crate::overlay::CaptionEvent>,
         ) -> anyhow::Result<(
             std::sync::mpsc::SyncSender<crate::audio::AudioCommand>,
             ringbuf::HeapCons<f32>,
@@ -390,11 +411,16 @@ mod tests {
     fn list_sources_returns_system_output_plus_running_apps() {
         let sources = list_sources().expect("list_sources should succeed");
         assert!(
-            sources.iter().any(|s| matches!(s.source, AudioSource::SystemOutput)),
+            sources
+                .iter()
+                .any(|s| matches!(s.source, AudioSource::SystemOutput)),
             "SystemOutput must always appear",
         );
         // App entries are environment-dependent: they appear only if audio-producing apps are running.
         // On CI with no GUI session or audio apps, there may be zero App entries.
-        assert!(sources.len() >= 1, "at least SystemOutput should be present");
+        assert!(
+            sources.len() >= 1,
+            "at least SystemOutput should be present"
+        );
     }
 }

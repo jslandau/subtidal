@@ -2,13 +2,15 @@
 //! Phase 2 implementation: caption bridge + OverlayCommand dispatch loop.
 //! Phase 6: full OverlayCommand handlers, transcript window, drag observer, caption buffer.
 
-use std::sync::{Arc, Mutex};
-use objc2::MainThreadMarker;
-use objc2_app_kit::{NSApplication, NSPanel, NSTextField, NSApplicationActivationPolicy};
-use objc2::rc::Retained;
+use super::{drag, panel, rename_dialog, transcript_window};
 use crate::config::{Config, OverlayMode};
-use crate::overlay::{OverlayCommand, CaptionsEnabled, caption_buffer::CaptionBuffer, transcript_log::TranscriptLog};
-use super::{panel, transcript_window, drag};
+use crate::overlay::{
+    caption_buffer::CaptionBuffer, transcript_log::TranscriptLog, CaptionsEnabled, OverlayCommand,
+};
+use objc2::rc::Retained;
+use objc2::MainThreadMarker;
+use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSPanel, NSTextField};
+use std::sync::{Arc, Mutex};
 
 /// Handles to overlay UI elements (panel, label, transcript window, caption buffer, log).
 /// Wrapped in Arc so references can be cloned into worker closure scopes.
@@ -25,6 +27,7 @@ struct OverlayHandles {
     caption_buffer: Arc<Mutex<CaptionBuffer>>,
     transcript_log: Arc<Mutex<TranscriptLog>>,
     config: Arc<Mutex<Config>>,
+    cmd_tx: async_channel::Sender<OverlayCommand>,
 }
 
 unsafe impl Send for OverlayHandles {}
@@ -63,12 +66,12 @@ pub fn run_app(
     config: Config,
     caption_rx: async_channel::Receiver<crate::overlay::CaptionEvent>,
     cmd_rx: async_channel::Receiver<OverlayCommand>,
+    cmd_tx: async_channel::Sender<OverlayCommand>,
     captions_enabled: CaptionsEnabled,
 ) {
     // 1. Acquire MainThreadMarker. run_app is always called from main_macos::main,
     // which has already verified main-thread-ness, but be explicit at the boundary.
-    let mtm = MainThreadMarker::new()
-        .expect("run_app must run on the main thread");
+    let mtm = MainThreadMarker::new().expect("run_app must run on the main thread");
 
     // 2. Get NSApplication and use Regular activation policy so Transcript
     // mode participates in the Dock like a normal document-style window.
@@ -78,24 +81,32 @@ pub fn run_app(
     // 3. Build the overlay panel and retain both panel and content label.
     let (panel, label) = panel::build_overlay_panel(mtm, &config);
     // Apply mode-specific geometry + mouse-event state on startup so the
-    // initial Floating panel is draggable without the user having to
-    // toggle Lock Position to force a property write.
+    // initial window state matches the configured mode.
     panel::apply_geometry(&panel, &label, mtm, config.overlay_mode.clone(), &config);
 
     // 4. Build the transcript window.
-    let transcript_log = Arc::new(Mutex::new(TranscriptLog::new(std::time::Duration::from_millis(1500))));
-    let transcript_window_bundle = transcript_window::build_transcript_window(mtm, Arc::clone(&transcript_log));
+    let transcript_log = Arc::new(Mutex::new(TranscriptLog::new(
+        std::time::Duration::from_millis(1500),
+    )));
+    let transcript_window_bundle =
+        transcript_window::build_transcript_window(mtm, Arc::clone(&transcript_log));
     let transcript_state = transcript_window_bundle.state.clone();
     // Save-button target is held weakly by NSButton; keep the actions object alive.
     let _transcript_actions = transcript_window_bundle.actions;
+    match config.overlay_mode {
+        OverlayMode::Docked | OverlayMode::Floating => panel.orderFront(None),
+        OverlayMode::Transcript => transcript_window::order_front(&transcript_state, mtm),
+    }
 
     // 5. Create caption buffer with initial config.
     let max_chars = derive_max_chars(&config.appearance);
-    let caption_buffer = Arc::new(Mutex::new(CaptionBuffer::new(
+    let mut initial_caption_buffer = CaptionBuffer::new(
         config.appearance.max_lines as usize,
         max_chars,
         config.appearance.effective_expire_secs(),
-    )));
+    );
+    initial_caption_buffer.speaker_names = config.speaker_names.clone();
+    let caption_buffer = Arc::new(Mutex::new(initial_caption_buffer));
 
     // 6. Create config Arc for command handlers.
     let config_arc = Arc::new(Mutex::new(config));
@@ -103,7 +114,8 @@ pub fn run_app(
     // 7. Install drag observer for floating mode.
     let _drag_observer = drag::install_drag_observer(&panel, Arc::clone(&config_arc), mtm);
     // 7b. AC1.6 — re-apply geometry on display attach/detach.
-    let _screen_observer = panel::install_screen_observer(&panel, &label, Arc::clone(&config_arc), mtm);
+    let _screen_observer =
+        panel::install_screen_observer(&panel, &label, Arc::clone(&config_arc), mtm);
 
     // Wrap all handles in Arc so workers can share ownership.
     let handles = Arc::new(OverlayHandles {
@@ -113,6 +125,7 @@ pub fn run_app(
         caption_buffer,
         transcript_log,
         config: config_arc,
+        cmd_tx,
     });
 
     let initial_mode = handles.config.lock().unwrap().overlay_mode.clone();
@@ -154,49 +167,26 @@ pub fn run_app(
 
                             // Append to transcript log (always, regardless of mode).
                             let mode = handles_closure.config.lock().unwrap().overlay_mode.clone();
-                            let kind = {
+                            {
                                 let mut log = handles_closure.transcript_log.lock().unwrap();
-                                log.push_with_speaker_and_sample(text.clone(), speaker_id, emit_sample)
-                            };
+                                log.push_with_speaker_and_sample(text.clone(), speaker_id, emit_sample);
+                            }
 
-                            // If in Transcript mode, update the window.
+                            // If in Transcript mode, rebuild from fragments so speaker labels
+                            // and paragraph boundaries stay consistent with relabel/name changes.
                             if matches!(mode, OverlayMode::Transcript) {
-                                let log = handles_closure.transcript_log.lock().unwrap();
-                                if let Some(fragment) = log.fragments().last().cloned() {
-                                    drop(log);
-                                    let label = match fragment.speaker_id {
-                                        Some(id) => {
-                                            let config = handles_closure.config.lock().unwrap();
-                                            config.speaker_names.get(&id)
-                                                .cloned()
-                                                .unwrap_or_else(|| format!("Speaker {}", id + 1))
-                                        }
-                                        None => String::new(),
-                                    };
-                                    let text_with_label = if label.is_empty() {
-                                        fragment.text.clone()
-                                    } else if matches!(kind, crate::overlay::transcript_log::AppendKind::NewParagraph) {
-                                        format!("{}: {}", label, fragment.text.trim_start())
-                                    } else {
-                                        fragment.text.clone()
-                                    };
-                                    transcript_window::append_fragment(
-                                        &handles_closure.transcript_state,
-                                        mtm,
-                                        text_with_label,
-                                        chrono::Utc::now(),
-                                    );
-                                }
+                                let speaker_names = handles_closure.config.lock().unwrap().speaker_names.clone();
+                                transcript_window::rebuild_view(
+                                    &handles_closure.transcript_state,
+                                    mtm,
+                                    &speaker_names,
+                                );
                             }
                         }
                         crate::overlay::CaptionEvent::Relabel { from_sample, new_speaker_id } => {
                             // Retroactively re-attribute. Transcript log update is
-                            // unconditional; overlay buffer update only matters when
-                            // overlay is visible. The Transcript NSTextView is not
-                            // re-rendered here — its content was already drawn with
-                            // the old labels and we'd need a full rebuild to fix
-                            // them in place. Acceptable trade-off: Save export
-                            // reads the (corrected) log.
+                            // unconditional; rebuild the visible transcript so late
+                            // Sortformer corrections are reflected immediately.
                             let n_log = handles_closure.transcript_log
                                 .lock().unwrap()
                                 .relabel_since(from_sample, new_speaker_id);
@@ -221,6 +211,16 @@ pub fn run_app(
                                     &cfg_snapshot,
                                 );
                             }
+                            if n_log > 0 {
+                                let cfg = handles_closure.config.lock().unwrap().clone();
+                                if matches!(cfg.overlay_mode, OverlayMode::Transcript) {
+                                    transcript_window::rebuild_view(
+                                        &handles_closure.transcript_state,
+                                        mtm,
+                                        &cfg.speaker_names,
+                                    );
+                                }
+                            }
                         }
                     }
                 });
@@ -233,29 +233,31 @@ pub fn run_app(
         let handles_timer = Arc::clone(&handles);
         std::thread::Builder::new()
             .name("caption-expiry".into())
-            .spawn(move || {
-                loop {
-                    std::thread::sleep(std::time::Duration::from_secs(1));
-                    let handles_closure = Arc::clone(&handles_timer);
-                    dispatch2::DispatchQueue::main().exec_async(move || {
-                        let _mtm = MainThreadMarker::new()
-                            .expect("dispatch main queue runs on main thread");
-                        let display_opt = {
-                            let mut buf = handles_closure.caption_buffer.lock().unwrap();
-                            if buf.expire() { Some(buf.display_text()) } else { None }
-                        };
-                        if let Some(display) = display_opt {
-                            let cfg_snapshot = handles_closure.config.lock().unwrap().clone();
-                            panel::set_caption_text(
-                                &handles_closure.panel,
-                                &handles_closure.label,
-                                &display,
-                                _mtm,
-                                &cfg_snapshot,
-                            );
+            .spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                let handles_closure = Arc::clone(&handles_timer);
+                dispatch2::DispatchQueue::main().exec_async(move || {
+                    let _mtm =
+                        MainThreadMarker::new().expect("dispatch main queue runs on main thread");
+                    let display_opt = {
+                        let mut buf = handles_closure.caption_buffer.lock().unwrap();
+                        if buf.expire() {
+                            Some(buf.display_text())
+                        } else {
+                            None
                         }
-                    });
-                }
+                    };
+                    if let Some(display) = display_opt {
+                        let cfg_snapshot = handles_closure.config.lock().unwrap().clone();
+                        panel::set_caption_text(
+                            &handles_closure.panel,
+                            &handles_closure.label,
+                            &display,
+                            _mtm,
+                            &cfg_snapshot,
+                        );
+                    }
+                });
             })
             .expect("spawn caption-expiry thread");
     }
@@ -271,14 +273,8 @@ pub fn run_app(
                 let captions_enabled = Arc::clone(&cmd_captions_enabled);
                 let handles_closure = Arc::clone(&handles_copy);
                 dispatch2::DispatchQueue::main().exec_async(move || {
-                    let mtm = MainThreadMarker::new()
-                        .expect("main queue runs on main thread");
-                    handle_overlay_command(
-                        cmd,
-                        &handles_closure,
-                        mtm,
-                        &captions_enabled,
-                    );
+                    let mtm = MainThreadMarker::new().expect("main queue runs on main thread");
+                    handle_overlay_command(cmd, &handles_closure, mtm, &captions_enabled);
                 });
             }
         })
@@ -307,10 +303,9 @@ fn derive_max_chars(appearance: &crate::config::AppearanceConfig) -> usize {
     let char_width_pixels = (appearance.font_size as f64 * 0.65).max(6.0);
     // Subtract the wrapper inset on each side (panel::INSET) so the budget
     // matches the label's actual rendered width, not the panel width.
-    let label_width = (appearance.width as f64 - 2.0 * crate::overlay::macos::panel::INSET)
-        .max(40.0);
-    let effective_width = label_width
-        * appearance.effective_char_width_fraction() as f64;
+    let label_width =
+        (appearance.width as f64 - 2.0 * crate::overlay::macos::panel::INSET).max(40.0);
+    let effective_width = label_width * appearance.effective_char_width_fraction() as f64;
     (effective_width / char_width_pixels).max(20.0) as usize
 }
 
@@ -400,9 +395,12 @@ fn handle_overlay_command(
             }
 
             // Re-apply font + text color.
-            let font = panel::resolve_font(&appearance.font_family, appearance.font_size as f64, mtm);
+            let font =
+                panel::resolve_font(&appearance.font_family, appearance.font_size as f64, mtm);
             handles.label.setFont(Some(&font));
-            handles.label.setTextColor(Some(&panel::resolve_text_color(&appearance.text_color)));
+            handles
+                .label
+                .setTextColor(Some(&panel::resolve_text_color(&appearance.text_color)));
 
             // Re-apply background color from CSS string. The wrapper view
             // (panel's contentView) carries the rounded translucent layer.
@@ -433,11 +431,12 @@ fn handle_overlay_command(
             let mode = handles.config.lock().unwrap().overlay_mode.clone();
             if !enabled {
                 // 4-surface clear on captions disable.
-                handles.transcript_log.lock().unwrap().clear();                  // surface 1
-                transcript_window::clear_view(&handles.transcript_state, mtm);    // surface 2
-                handles.caption_buffer.lock().unwrap().clear();                   // surface 3
+                handles.transcript_log.lock().unwrap().clear(); // surface 1
+                transcript_window::clear_view(&handles.transcript_state, mtm); // surface 2
+                handles.caption_buffer.lock().unwrap().clear(); // surface 3
                 let cfg_snapshot = handles.config.lock().unwrap().clone();
-                panel::set_caption_text(                                          // surface 4
+                panel::set_caption_text(
+                    // surface 4
                     &handles.panel,
                     &handles.label,
                     "",
@@ -450,13 +449,65 @@ fn handle_overlay_command(
         OverlayCommand::SetCaption(_text) => {
             // SetCaption is handled via the caption-bridge; this arm is a no-op.
         }
-        OverlayCommand::SetSpeakerNames(_names) => {
-            // TODO (Phase 3): Update CaptionBuffer and TranscriptLog speaker name maps.
-            // For now, this is a no-op until the rename dialog is implemented.
+        OverlayCommand::SetSpeakerNames(names) => {
+            let old_names = {
+                let mut cfg = handles.config.lock().unwrap();
+                let old = cfg.speaker_names.clone();
+                cfg.speaker_names = names.clone();
+                old
+            };
+
+            let display = {
+                let mut buf = handles.caption_buffer.lock().unwrap();
+                rewrite_embedded_labels(&mut buf, &old_names, &names);
+                buf.speaker_names = names.clone();
+                buf.display_text()
+            };
+
+            let cfg_snapshot = handles.config.lock().unwrap().clone();
+            if matches!(
+                cfg_snapshot.overlay_mode,
+                OverlayMode::Docked | OverlayMode::Floating
+            ) {
+                panel::set_caption_text(
+                    &handles.panel,
+                    &handles.label,
+                    &display,
+                    mtm,
+                    &cfg_snapshot,
+                );
+            }
+            transcript_window::rebuild_view(&handles.transcript_state, mtm, &names);
         }
         OverlayCommand::ShowRenameDialog => {
-            // TODO (Phase 3): Show the speaker rename dialog.
-            // For now, this is a no-op until the dialog is implemented.
+            let current = handles.config.lock().unwrap().speaker_names.clone();
+            rename_dialog::show_rename_dialog(current, handles.cmd_tx.clone(), mtm);
+        }
+    }
+}
+
+/// Intentionally mirrors Linux's speaker-name relabel behavior for existing
+/// overlay lines: only rewrite a leading `"old label: "` prefix, preserving the
+/// rest of the line so live caption layout does not reflow on rename.
+fn rewrite_embedded_labels(
+    buf: &mut CaptionBuffer,
+    old_names: &std::collections::HashMap<u32, String>,
+    new_names: &std::collections::HashMap<u32, String>,
+) {
+    for line in &mut buf.lines {
+        let Some(id) = line.speaker_id else { continue };
+        let old_label = old_names
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(|| format!("Speaker {}", id + 1));
+        let old_prefix = format!("{old_label}: ");
+        if line.text.starts_with(&old_prefix) {
+            let new_label = new_names
+                .get(&id)
+                .cloned()
+                .unwrap_or_else(|| format!("Speaker {}", id + 1));
+            let new_prefix = format!("{new_label}: ");
+            line.text = format!("{new_prefix}{}", &line.text[old_prefix.len()..]);
         }
     }
 }

@@ -14,11 +14,11 @@
 //! The downstream `audio/resampler.rs` handles 48 kHz stereo → 16 kHz mono.
 
 use anyhow::{Context, Result};
-use coreaudio_sys::*;
 use core_foundation::base::{FromVoid, TCFType};
 use core_foundation::dictionary::CFDictionary;
 use core_foundation::number::CFNumber;
 use core_foundation::string::CFString;
+use coreaudio_sys::*;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject};
 use objc2::{msg_send, ClassType};
@@ -105,14 +105,14 @@ impl AudioTap {
             // Step 1: Create a CATapDescription via Obj-C msg_send!.
             // No objc2 binding crate covers CATapDescription; use raw dispatch.
             // The tap_desc_owned must stay alive until after AudioHardwareCreateProcessTap returns.
-            let tap_desc_owned = create_tap_description(&target)
-                .context("failed to create CATapDescription")?;
+            let tap_desc_owned =
+                create_tap_description(&target).context("failed to create CATapDescription")?;
 
             // Step 2: Create the process tap.
             let mut tap_id: AudioObjectID = 0;
             let status = AudioHardwareCreateProcessTap(
                 Retained::as_ptr(&tap_desc_owned) as *mut AnyObject,
-                &mut tap_id
+                &mut tap_id,
             );
             // tap_desc_owned is still alive; it will drop after this block if an error occurs,
             // which is correct (the tap constructor doesn't retain the description).
@@ -133,26 +133,35 @@ impl AudioTap {
             // Protect the tap_id from leaking on read_tap_uid or create_aggregate_device failures.
             // TapGuard is a scope guard that ensures AudioHardwareDestroyProcessTap is called
             // unless explicitly defused (which happens after the IOProc is successfully created).
-            struct TapGuard { tap_id: AudioObjectID, defused: bool }
+            struct TapGuard {
+                tap_id: AudioObjectID,
+                defused: bool,
+            }
             impl TapGuard {
-                fn defuse(&mut self) { self.defused = true; }
+                fn defuse(&mut self) {
+                    self.defused = true;
+                }
             }
             impl Drop for TapGuard {
                 fn drop(&mut self) {
                     if !self.defused {
-                        unsafe { let _ = AudioHardwareDestroyProcessTap(self.tap_id); }
+                        unsafe {
+                            let _ = AudioHardwareDestroyProcessTap(self.tap_id);
+                        }
                     }
                 }
             }
-            let mut tap_guard = TapGuard { tap_id, defused: false };
+            let mut tap_guard = TapGuard {
+                tap_id,
+                defused: false,
+            };
 
             // Step 4: Read the tap's UID.
-            let tap_uid = read_tap_uid(tap_guard.tap_id)
-                .context("failed to read tap UID")?;
+            let tap_uid = read_tap_uid(tap_guard.tap_id).context("failed to read tap UID")?;
 
             // Step 5: Create aggregate device.
-            let aggregate_id = create_aggregate_device(&tap_uid)
-                .context("failed to create aggregate device")?;
+            let aggregate_id =
+                create_aggregate_device(&tap_uid).context("failed to create aggregate device")?;
 
             // Step 6: Create IOProc with a stable pointer to the callback context.
             // Use Box::into_raw to hand the Box's heap allocation to the IOProc,
@@ -240,13 +249,19 @@ impl Drop for AudioTap {
             // Step 4: Destroy the aggregate device.
             let status = AudioHardwareDestroyAggregateDevice(self.aggregate_id);
             if status != 0 {
-                eprintln!("warn: AudioHardwareDestroyAggregateDevice failed: status={}", status);
+                eprintln!(
+                    "warn: AudioHardwareDestroyAggregateDevice failed: status={}",
+                    status
+                );
             }
 
             // Step 5: Destroy the tap.
             let status = AudioHardwareDestroyProcessTap(self.tap_id);
             if status != 0 {
-                eprintln!("warn: AudioHardwareDestroyProcessTap failed: status={}", status);
+                eprintln!(
+                    "warn: AudioHardwareDestroyProcessTap failed: status={}",
+                    status
+                );
             }
         }
     }
@@ -409,9 +424,7 @@ unsafe fn create_tap_description(target: &TapTarget) -> Result<objc2::rc::Retain
     // Use objc2 to look up the CATapDescription class.
     let tap_class = match AnyClass::get(c"CATapDescription") {
         Some(cls) => cls,
-        None => anyhow::bail!(
-            "CATapDescription class not found (requires macOS 14.2+; check SDK)"
-        ),
+        None => anyhow::bail!("CATapDescription class not found (requires macOS 14.2+; check SDK)"),
     };
 
     // Allocate and initialize.
@@ -422,7 +435,7 @@ unsafe fn create_tap_description(target: &TapTarget) -> Result<objc2::rc::Retain
             let allocated: *mut AnyObject = msg_send![tap_class, alloc];
             let empty_array: *mut AnyObject = msg_send![NSArray::<AnyObject>::class(), array];
             let desc: Option<Retained<AnyObject>> = Retained::from_raw(
-                msg_send![allocated, initStereoGlobalTapButExcludeProcesses: empty_array]
+                msg_send![allocated, initStereoGlobalTapButExcludeProcesses: empty_array],
             );
             desc.context("CATapDescription initStereoGlobalTapButExcludeProcesses: returned nil")?
         }
@@ -440,9 +453,8 @@ unsafe fn create_tap_description(target: &TapTarget) -> Result<objc2::rc::Retain
             let ptr_refs: Vec<&NSNumber> = number_objs.iter().map(|n| &**n).collect();
             let arr: Retained<NSArray<NSNumber>> = NSArray::from_slice(&ptr_refs);
 
-            let desc: Option<Retained<AnyObject>> = Retained::from_raw(
-                msg_send![allocated, initStereoMixdownOfProcesses: &*arr]
-            );
+            let desc: Option<Retained<AnyObject>> =
+                Retained::from_raw(msg_send![allocated, initStereoMixdownOfProcesses: &*arr]);
             desc.context("CATapDescription initStereoMixdownOfProcesses: returned nil")?
         }
     };
@@ -472,7 +484,10 @@ unsafe fn read_tap_uid(tap_id: AudioObjectID) -> Result<String> {
     );
 
     if status != 0 {
-        anyhow::bail!("AudioObjectGetPropertyData (kAudioTapPropertyUID) failed: status={}", status);
+        anyhow::bail!(
+            "AudioObjectGetPropertyData (kAudioTapPropertyUID) failed: status={}",
+            status
+        );
     }
 
     if cf_string.is_null() {
@@ -514,15 +529,16 @@ unsafe fn create_aggregate_device(tap_uid: &str) -> Result<AudioObjectID> {
     // Build the tap sub-dictionary: { kAudioSubTapUIDKey: tap_uid }
     let sub_uid_key = const_key(coreaudio_sys::kAudioSubTapUIDKey);
     let sub_uid_val = CFString::new(tap_uid);
-    let tap_sub_dict = CFDictionary::from_CFType_pairs(&[
-        (sub_uid_key.clone(), sub_uid_val.clone())
-    ]);
+    let tap_sub_dict =
+        CFDictionary::from_CFType_pairs(&[(sub_uid_key.clone(), sub_uid_val.clone())]);
 
     // Build the tap list array containing the sub-dict.
     // Cast the dictionary to a generic CFDictionary with void pointers.
-    let tap_list_val = core_foundation::array::CFArray::<CFDictionary<*const std::ffi::c_void, *const std::ffi::c_void>>::from_CFTypes(&[
+    let tap_list_val = core_foundation::array::CFArray::<
+        CFDictionary<*const std::ffi::c_void, *const std::ffi::c_void>,
+    >::from_CFTypes(&[
         // Cast tap_sub_dict to the expected type by going through CFTypeRef
-        std::mem::transmute(tap_sub_dict)
+        std::mem::transmute(tap_sub_dict),
     ]);
 
     // Build the aggregate device dictionary with all required keys.
@@ -574,16 +590,16 @@ unsafe fn create_aggregate_device(tap_uid: &str) -> Result<AudioObjectID> {
 
     // Create the aggregate device.
     let mut aggregate_id: AudioObjectID = 0;
-    let status = AudioHardwareCreateAggregateDevice(
-        agg_dict,
-        &mut aggregate_id,
-    );
+    let status = AudioHardwareCreateAggregateDevice(agg_dict, &mut aggregate_id);
 
     // Release the dictionary.
     coreaudio_sys::CFRelease(agg_dict as CFTypeRef);
 
     if status != 0 {
-        anyhow::bail!("AudioHardwareCreateAggregateDevice failed: status={}", status);
+        anyhow::bail!(
+            "AudioHardwareCreateAggregateDevice failed: status={}",
+            status
+        );
     }
 
     Ok(aggregate_id)

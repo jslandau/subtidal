@@ -108,7 +108,8 @@ impl TranscriptLog {
             if speaker_id.is_some() && last.speaker_id.is_some() && speaker_id != last.speaker_id {
                 AppendKind::NewParagraph
             } else {
-                let gap = ts.signed_duration_since(last.timestamp)
+                let gap = ts
+                    .signed_duration_since(last.timestamp)
                     .to_std()
                     .unwrap_or(StdDuration::ZERO);
                 if gap > self.paragraph_gap {
@@ -119,7 +120,12 @@ impl TranscriptLog {
             }
         };
 
-        self.fragments.push(Fragment { timestamp: ts, text, speaker_id, emit_sample });
+        self.fragments.push(Fragment {
+            timestamp: ts,
+            text,
+            speaker_id,
+            emit_sample,
+        });
         kind
     }
 
@@ -172,7 +178,8 @@ impl TranscriptLog {
             let prev = &self.fragments[i - 1];
             let curr = &self.fragments[i];
 
-            let gap = curr.timestamp
+            let gap = curr
+                .timestamp
                 .signed_duration_since(prev.timestamp)
                 .to_std()
                 .unwrap_or(StdDuration::ZERO);
@@ -285,7 +292,10 @@ mod tests {
 
         let paras = log.paragraphs();
         assert_eq!(paras.len(), 1);
-        assert_eq!(paras[0].text, "Hello world,", "Whitespace should be preserved");
+        assert_eq!(
+            paras[0].text, "Hello world,",
+            "Whitespace should be preserved"
+        );
     }
 
     /// AC1.4: Verify the shape of JSON output.
@@ -398,12 +408,21 @@ mod tests {
         let mut log = TranscriptLog::new(std::time::Duration::from_millis(1500));
         let t0 = ts(1_700_000_000, 0);
         log.push_at("hello".to_string(), t0);
-        log.push_at(" world".to_string(), t0 + chrono::Duration::milliseconds(200));
+        log.push_at(
+            " world".to_string(),
+            t0 + chrono::Duration::milliseconds(200),
+        );
         // simulate user toggling mode (no effect on the log itself)
-        log.push_at("again".to_string(), t0 + chrono::Duration::milliseconds(2000));
+        log.push_at(
+            "again".to_string(),
+            t0 + chrono::Duration::milliseconds(2000),
+        );
         assert_eq!(log.fragments().len(), 3);
-        assert_eq!(log.paragraphs().len(), 2,
-            "second paragraph starts after >1.5s gap");
+        assert_eq!(
+            log.paragraphs().len(),
+            2,
+            "second paragraph starts after >1.5s gap"
+        );
     }
 
     /// relabel_since rewrites the speaker_id of trailing fragments whose
@@ -415,12 +434,16 @@ mod tests {
         let t0 = ts(1_700_000_000, 0);
         log.push_at_with_speaker("first".to_string(), Some(0), 16_000, t0);
         log.push_at_with_speaker(
-            " second".to_string(), Some(0), 32_000,
+            " second".to_string(),
+            Some(0),
+            32_000,
             t0 + chrono::Duration::milliseconds(100),
         );
         // Third fragment is misattributed to Speaker 1 but should be Speaker 2.
         log.push_at_with_speaker(
-            " third".to_string(), Some(0), 48_000,
+            " third".to_string(),
+            Some(0),
+            48_000,
             t0 + chrono::Duration::milliseconds(200),
         );
 
