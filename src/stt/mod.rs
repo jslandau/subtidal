@@ -732,27 +732,24 @@ mod tests {
             },
         ]);
 
-        let dropped = flush_pending_captions(
-            &tx,
-            &mut pending,
-            &segments,
-            None,
-            0,
-            Instant::now(),
-            false,
-        );
+        let dropped =
+            flush_pending_captions(&tx, &mut pending, &segments, None, 0, Instant::now(), false);
         assert!(!dropped);
         assert!(pending.is_empty());
 
         match rx.try_recv().unwrap() {
-            CaptionEvent::Append { text, speaker_id, .. } => {
+            CaptionEvent::Append {
+                text, speaker_id, ..
+            } => {
                 assert_eq!(text, "first");
                 assert_eq!(speaker_id, Some(0));
             }
             other => panic!("unexpected event: {other:?}"),
         }
         match rx.try_recv().unwrap() {
-            CaptionEvent::Append { text, speaker_id, .. } => {
+            CaptionEvent::Append {
+                text, speaker_id, ..
+            } => {
                 assert_eq!(text, "second");
                 assert_eq!(speaker_id, Some(1));
             }

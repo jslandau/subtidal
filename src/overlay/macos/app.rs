@@ -369,7 +369,13 @@ fn handle_overlay_command(
                 cfg.clone()
             };
 
-            panel::apply_geometry(&handles.panel, &handles.label, mtm, mode.clone(), &cfg_snapshot);
+            panel::apply_geometry(
+                &handles.panel,
+                &handles.label,
+                mtm,
+                mode.clone(),
+                &cfg_snapshot,
+            );
             let enabled = captions_enabled.load(std::sync::atomic::Ordering::Relaxed);
             reconcile_caption_surface_visibility(handles, mtm, &mode, enabled);
         }

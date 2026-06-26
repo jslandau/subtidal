@@ -49,8 +49,18 @@ pub enum AudioSource {
     SystemOutput,
     /// (Linux/PipeWire) A specific application's PipeWire node, identified by node ID.
     Application { node_id: u32, node_name: String },
-    /// (macOS/Core Audio Taps) A specific application, identified by bundle ID.
-    App { bundle_id: String, label: String },
+    /// (macOS/Core Audio Taps) A user-facing application source.
+    ///
+    /// `bundle_id` is the stable/display app bundle ID used for source identity.
+    /// `capture_bundle_ids` contains the raw Core Audio process bundle IDs that
+    /// should be tapped for this row, including helper processes. Legacy configs
+    /// omit this field; an empty vector means “capture `bundle_id`”.
+    App {
+        bundle_id: String,
+        label: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        capture_bundle_ids: Vec<String>,
+    },
 }
 
 /// Overlay display mode.
@@ -725,7 +735,7 @@ mod tests {
         assert_eq!(Config::parse_engine("unknown"), None);
     }
 
-    /// Task 1: AudioSource::App variant round-trips through TOML serde.
+    /// AudioSource::App legacy TOML without capture_bundle_ids still parses.
     #[test]
     fn audio_source_app_variant_serializes_correctly() {
         let toml_input = r#"
@@ -740,39 +750,77 @@ label = "Safari"
         }
         let w: Wrapper = toml::from_str(toml_input).expect("parse audio_source App variant");
         assert!(
-            matches!(&w.audio_source, AudioSource::App { bundle_id, label }
-                if bundle_id == "com.apple.Safari" && label == "Safari"),
+            matches!(&w.audio_source, AudioSource::App { bundle_id, label, capture_bundle_ids }
+                if bundle_id == "com.apple.Safari" && label == "Safari" && capture_bundle_ids.is_empty()),
             "Expected App variant, got: {:?}",
             w.audio_source
         );
     }
 
-    /// Task 1: AudioSource::App variant deserializes and round-trips back to TOML.
+    /// AudioSource::App variant deserializes and round-trips back to TOML.
     #[test]
     fn audio_source_app_variant_round_trips() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
 
-        // Create a config with App audio source
+        // Create a config with legacy single-bundle App audio source.
         let mut original = Config::default();
         original.audio_source = AudioSource::App {
             bundle_id: "com.apple.Safari".to_string(),
             label: "Safari".to_string(),
+            capture_bundle_ids: Vec::new(),
         };
         original.config_file_path = Some(path.clone());
 
         // Serialize to TOML
         let text = toml::to_string_pretty(&original).unwrap();
+        assert!(
+            !text.contains("capture_bundle_ids"),
+            "empty capture_bundle_ids should serialize like legacy configs: {text}"
+        );
         fs::write(&path, &text).unwrap();
 
         // Deserialize and verify
         let loaded = Config::load_from(&path).unwrap();
         assert!(
-            matches!(&loaded.audio_source, AudioSource::App { bundle_id, label }
-                if bundle_id == "com.apple.Safari" && label == "Safari"),
+            matches!(&loaded.audio_source, AudioSource::App { bundle_id, label, capture_bundle_ids }
+                if bundle_id == "com.apple.Safari" && label == "Safari" && capture_bundle_ids.is_empty()),
             "Expected App variant after round-trip, got: {:?}",
             loaded.audio_source
         );
+    }
+
+    #[test]
+    fn audio_source_app_variant_with_capture_bundle_ids_round_trips() {
+        let toml_input = r#"
+[audio_source]
+type = "app"
+bundle_id = "com.hnc.Discord"
+label = "Discord"
+capture_bundle_ids = ["com.hnc.Discord", "com.hnc.Discord.helper", "com.hnc.Discord.helper.Renderer"]
+"#;
+        #[derive(serde::Deserialize, serde::Serialize)]
+        struct Wrapper {
+            audio_source: AudioSource,
+        }
+        let w: Wrapper = toml::from_str(toml_input).expect("parse grouped App variant");
+        assert!(
+            matches!(&w.audio_source, AudioSource::App { bundle_id, label, capture_bundle_ids }
+            if bundle_id == "com.hnc.Discord"
+                && label == "Discord"
+                && capture_bundle_ids == &vec![
+                    "com.hnc.Discord".to_string(),
+                    "com.hnc.Discord.helper".to_string(),
+                    "com.hnc.Discord.helper.Renderer".to_string(),
+                ]),
+            "Expected grouped App variant, got: {:?}",
+            w.audio_source
+        );
+
+        let text = toml::to_string_pretty(&w).unwrap();
+        assert!(text.contains("capture_bundle_ids"));
+        let reparsed: Wrapper = toml::from_str(&text).expect("reparse grouped App variant");
+        assert_eq!(reparsed.audio_source, w.audio_source);
     }
 
     /// Task 1: SystemOutput remains the default audio source.

@@ -19,7 +19,7 @@ pub fn main() {
     let _mtm = MainThreadMarker::new().expect("main_macos::main must run on the main thread");
 
     // 2. Load config (use the neutral Config::load() which defaults gracefully).
-    let config = Config::load();
+    let mut config = Config::load();
 
     // 3. Ensure selected engine model files are present before starting.
     let model_paths = models::ModelPaths::from_conventional_dirs();
@@ -63,35 +63,68 @@ pub fn main() {
     audio::notify_request_authorization_best_effort();
 
     // 4. Validate persisted audio source: if the config specifies an app that's
-    // not currently running, fall back to SystemOutput before spawning the audio thread.
+    // not currently reported by Core Audio, fall back to SystemOutput before
+    // spawning the audio thread. Legacy configs may point at a helper bundle ID;
+    // normalize those to the grouped user-facing source so helper capture IDs are
+    // complete and tray checkmarks use the same canonical value.
     let mut initial_audio_source = config.audio_source.clone();
+    let original_audio_source = initial_audio_source.clone();
     if let config::AudioSource::App { bundle_id, .. } = &initial_audio_source {
         match audio::list_sources() {
             Ok(sources) => {
-                let present = sources.iter().any(|s| {
-                    if let config::AudioSource::App { bundle_id: b, .. } = &s.source {
-                        b == bundle_id
-                    } else {
-                        false
+                let normalized = sources.iter().find_map(|s| {
+                    if let config::AudioSource::App {
+                        bundle_id: listed_bundle_id,
+                        capture_bundle_ids,
+                        ..
+                    } = &s.source
+                    {
+                        if listed_bundle_id == bundle_id
+                            || capture_bundle_ids.iter().any(|id| id == bundle_id)
+                        {
+                            return Some(s.source.clone());
+                        }
                     }
+                    None
                 });
-                if !present {
+
+                if let Some(source) = normalized {
+                    if source != initial_audio_source {
+                        eprintln!(
+                            "info: normalized persisted audio source '{}' to grouped source {:?}",
+                            bundle_id, source
+                        );
+                    }
+                    initial_audio_source = source;
+                    config.audio_source = initial_audio_source.clone();
+                } else {
                     eprintln!("info: persisted app '{}' has no audio process; falling back to SystemOutput", bundle_id);
-                    eprintln!("info: available app bundle IDs from Core Audio:");
+                    eprintln!("info: available app sources from Core Audio:");
                     for s in sources
                         .iter()
                         .filter(|s| matches!(s.source, config::AudioSource::App { .. }))
                     {
-                        if let config::AudioSource::App { bundle_id: b, .. } = &s.source {
-                            eprintln!("  - {}", b);
+                        if let config::AudioSource::App {
+                            bundle_id: b,
+                            capture_bundle_ids,
+                            ..
+                        } = &s.source
+                        {
+                            eprintln!("  - {} captures {:?}", b, capture_bundle_ids);
                         }
                     }
                     initial_audio_source = config::AudioSource::SystemOutput;
+                    config.audio_source = initial_audio_source.clone();
                 }
             }
             Err(e) => {
                 eprintln!("warn: could not validate persisted audio source: {e}; attempting to use it anyway");
             }
+        }
+    }
+    if config.audio_source != original_audio_source {
+        if let Err(e) = config.save() {
+            eprintln!("warn: failed to persist normalized audio source: {e}");
         }
     }
 

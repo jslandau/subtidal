@@ -174,13 +174,14 @@ define_class!(
             let Some(sender) = sender else { return };
             let title = sender.title().to_string();
             let ivars = self.ivars();
-            let new_source = if title == "System Output" {
-                AudioSource::SystemOutput
-            } else {
+            let new_source = {
                 let sources = ivars.state.audio_sources.lock().unwrap();
-                match sources.iter().find(|s| s.label == title) {
-                    Some(info) => info.source.clone(),
-                    None => return,
+                if let Some(info) = sources.iter().find(|s| s.label == title) {
+                    info.source.clone()
+                } else if title == "System Output" {
+                    AudioSource::SystemOutput
+                } else {
+                    return;
                 }
             };
             {
@@ -430,8 +431,14 @@ impl TrayActions {
         let prev = ivars.state.captions_enabled.load(Ordering::Relaxed);
         let next = !prev;
         ivars.state.captions_enabled.store(next, Ordering::Relaxed);
-        let _ = ivars.state.cmd_tx.send_blocking(OverlayCommand::SetCaptionsEnabled(next));
-        ivars.captions_item.borrow().setState(if next { 1 } else { 0 });
+        let _ = ivars
+            .state
+            .cmd_tx
+            .send_blocking(OverlayCommand::SetCaptionsEnabled(next));
+        ivars
+            .captions_item
+            .borrow()
+            .setState(if next { 1 } else { 0 });
         let mtm = MainThreadMarker::from(self);
         let icon = if next {
             &ivars.icon_on
@@ -473,11 +480,19 @@ fn build_audio_submenu_for(
         mi
     };
 
-    let system_on = matches!(current_source, AudioSource::SystemOutput);
-    menu.addItem(&make_item("System Output", system_on));
+    let mut added_system = false;
     for info in &sources {
+        match &info.source {
+            AudioSource::SystemOutput if added_system => continue,
+            AudioSource::SystemOutput => added_system = true,
+            _ => {}
+        }
         let on = info.source == current_source;
         menu.addItem(&make_item(&info.label, on));
+    }
+    if !added_system {
+        let system_on = matches!(current_source, AudioSource::SystemOutput);
+        menu.insertItem_atIndex(&make_item("System Output", system_on), 0);
     }
     menu
 }

@@ -7,7 +7,7 @@ All processing happens locally — no cloud services, no network requests (excep
 ## Features
 
 - **STT engine**: Nemotron RNNT — CUDA (Linux), WebGPU/Metal (macOS Apple Silicon), or CPU fallback on both.
-- **Per-application audio capture**: PipeWire on Linux, Core Audio Process Taps on macOS. Caption any app, not just the mic. Multi-PID aware on macOS (browsers split audio across helper processes).
+- **Per-application audio capture**: PipeWire on Linux, Core Audio Process Taps on macOS. Caption any app, not just the mic. On macOS, helper-heavy apps are grouped under user-facing app names while preserving helper process capture.
 - **Auto-fallback** when the captured app exits: switches back to system output, with a desktop notification.
 - **Overlay modes**: Docked (edge-anchored, click-through) and Floating (draggable, lockable for click-through).
 - **Transcript mode**: separate scrollable window with timestamped paragraphs and "Save as JSON".
@@ -58,7 +58,7 @@ Launch `Subtidal.app`. Configuration lives in `~/Library/Application Support/Sub
 ### Tray controls (both platforms)
 - Captions on/off
 - Mode: Docked / Floating / Transcript
-- Audio source: System Output or specific running application (pretty names on macOS)
+- Audio source: System Output or a specific application. macOS shows user-facing app names and hides grouped helper/background processes.
 - Engine: Nemotron
 - Font: curated picks plus all installed monospace families (macOS)
 - Lines: 1–5
