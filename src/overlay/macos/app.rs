@@ -63,7 +63,7 @@ unsafe impl Sync for OverlayHandles {}
 /// Phase 3 may require an NSApplicationDelegate with applicationShouldTerminate
 /// if the shutdown becomes fragile with real STT/audio workers.
 pub fn run_app(
-    config: Config,
+    mut config: Config,
     caption_rx: async_channel::Receiver<crate::overlay::CaptionEvent>,
     cmd_rx: async_channel::Receiver<OverlayCommand>,
     cmd_tx: async_channel::Sender<OverlayCommand>,
@@ -78,7 +78,12 @@ pub fn run_app(
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
 
-    // 3. Build the overlay panel and retain both panel and content label.
+    // 3. Repair a persisted Floating position before constructing the panel.
+    // This handles a display being detached while Subtidal was not running;
+    // the screen-change observer cannot see that transition retroactively.
+    panel::repair_floating_position(mtm, &mut config);
+
+    // 4. Build the overlay panel and retain both panel and content label.
     let (panel, label) = panel::build_overlay_panel(mtm, &config);
     // Apply mode-specific geometry + mouse-event state on startup so the
     // initial window state matches the configured mode.
@@ -390,6 +395,25 @@ fn handle_overlay_command(
             if matches!(cfg.overlay_mode, OverlayMode::Floating) {
                 handles.panel.setMovableByWindowBackground(!locked);
                 handles.panel.setIgnoresMouseEvents(locked);
+            }
+        }
+        OverlayCommand::ResetFloatingPosition => {
+            let cfg_snapshot = {
+                let mut cfg = handles.config.lock().unwrap();
+                cfg.position = crate::config::OverlayPosition::default();
+                if let Err(e) = cfg.save() {
+                    eprintln!("warn: failed to save reset floating position: {e}");
+                }
+                cfg.clone()
+            };
+            if matches!(cfg_snapshot.overlay_mode, OverlayMode::Floating) {
+                panel::apply_geometry(
+                    &handles.panel,
+                    &handles.label,
+                    mtm,
+                    OverlayMode::Floating,
+                    &cfg_snapshot,
+                );
             }
         }
         OverlayCommand::UpdateAppearance(appearance) => {

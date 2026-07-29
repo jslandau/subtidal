@@ -245,6 +245,21 @@ define_class!(
             ivars.lock_item.borrow().setState(if next { 1 } else { 0 });
         }
 
+        #[unsafe(method(resetFloatingPosition:))]
+        fn reset_floating_position(&self, _sender: Option<&NSMenuItem>) {
+            let ivars = self.ivars();
+            let in_floating = {
+                let cfg = ivars.state.config.lock().unwrap();
+                matches!(cfg.overlay_mode, OverlayMode::Floating)
+            };
+            if in_floating {
+                let _ = ivars
+                    .state
+                    .cmd_tx
+                    .send_blocking(OverlayCommand::ResetFloatingPosition);
+            }
+        }
+
         #[unsafe(method(selectFont:))]
         fn select_font(&self, sender: Option<&NSMenuItem>) {
             let Some(sender) = sender else { return };
@@ -751,7 +766,11 @@ pub fn install_tray(
             &NSString::from_str(""),
         )
     };
-    nemotron_item.setState(if current_engine == Engine::Nemotron { 1 } else { 0 });
+    nemotron_item.setState(if current_engine == Engine::Nemotron {
+        1
+    } else {
+        0
+    });
     engine_menu.addItem(&nemotron_item);
     engine_parent.setSubmenu(Some(&engine_menu));
     menu.addItem(&engine_parent);
@@ -814,6 +833,17 @@ pub fn install_tray(
     lock_item.setEnabled(matches!(current_mode, OverlayMode::Floating));
     menu.addItem(&lock_item);
 
+    let reset_position_item = unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            &NSString::from_str("Reset Floating Position"),
+            Some(sel!(resetFloatingPosition:)),
+            &NSString::from_str(""),
+        )
+    };
+    reset_position_item.setEnabled(matches!(current_mode, OverlayMode::Floating));
+    menu.addItem(&reset_position_item);
+
     menu.addItem(&NSMenuItem::separatorItem(mtm));
 
     let quit_item = unsafe {
@@ -864,6 +894,7 @@ pub fn install_tray(
         rename_speakers_item.setTarget(Some(target_obj));
         above_item.setTarget(Some(target_obj));
         lock_item.setTarget(Some(target_obj));
+        reset_position_item.setTarget(Some(target_obj));
         quit_item.setTarget(Some(target_obj));
         nemotron_item.setTarget(Some(target_obj));
         for mi in &mode_items {

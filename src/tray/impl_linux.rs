@@ -385,7 +385,6 @@ const SIZE_PRESETS: &[(&str, i32)] = &[
     ("Extra Large (1000px)", 1000),
 ];
 
-
 fn build_overlay_submenu(tray: &TrayState) -> Vec<MenuItem<TrayState>> {
     let is_floating = tray.overlay_mode == OverlayMode::Floating;
 
@@ -489,6 +488,19 @@ fn build_overlay_submenu(tray: &TrayState) -> Vec<MenuItem<TrayState>> {
                     if let Err(e) = cfg.save() {
                         eprintln!("warn: failed to save config: {e}");
                     }
+                }
+            }),
+            ..Default::default()
+        }
+        .into(),
+        StandardItem {
+            label: "Reset Floating Position".to_string(),
+            enabled: is_floating,
+            activate: Box::new(|tray: &mut TrayState| {
+                if tray.overlay_mode == OverlayMode::Floating {
+                    let _ = tray
+                        .overlay_tx
+                        .send_blocking(OverlayCommand::ResetFloatingPosition);
                 }
             }),
             ..Default::default()

@@ -211,12 +211,116 @@ pub fn inspect(panel: &NSPanel) -> PanelConfig {
     }
 }
 
+const MIN_VISIBLE_FRACTION: f64 = 0.25;
+
+/// Clamp an origin while allowing the panel to overhang a screen. At least
+/// 25% of the panel's width and height remain on-screen, so up to 75% may be
+/// outside the visible frame on either axis.
+fn clamp_floating_origin(x: f64, y: f64, width: f64, height: f64, visible: &CGRect) -> (f64, f64) {
+    let min_x = visible.origin.x - width * (1.0 - MIN_VISIBLE_FRACTION);
+    let max_x = visible.origin.x + visible.size.width - width * MIN_VISIBLE_FRACTION;
+    let min_y = visible.origin.y - height * (1.0 - MIN_VISIBLE_FRACTION);
+    let max_y = visible.origin.y + visible.size.height - height * MIN_VISIBLE_FRACTION;
+    (
+        x.clamp(min_x.min(max_x), min_x.max(max_x)),
+        y.clamp(min_y.min(max_y), min_y.max(max_y)),
+    )
+}
+
+fn overlap_area(x: f64, y: f64, width: f64, height: f64, visible: &CGRect) -> f64 {
+    let overlap_width =
+        ((x + width).min(visible.origin.x + visible.size.width) - x.max(visible.origin.x)).max(0.0);
+    let overlap_height = ((y + height).min(visible.origin.y + visible.size.height)
+        - y.max(visible.origin.y))
+    .max(0.0);
+    overlap_width * overlap_height
+}
+
+fn has_minimum_visible_overlap(x: f64, y: f64, width: f64, height: f64, visible: &CGRect) -> bool {
+    let overlap_width =
+        (x + width).min(visible.origin.x + visible.size.width) - x.max(visible.origin.x);
+    let overlap_height =
+        (y + height).min(visible.origin.y + visible.size.height) - y.max(visible.origin.y);
+    overlap_width >= width * MIN_VISIBLE_FRACTION && overlap_height >= height * MIN_VISIBLE_FRACTION
+}
+
+/// Return a floating origin that keeps at least 25% of the panel on one of
+/// the currently visible screens. An already-valid position is preserved
+/// exactly. Positions below the threshold are clamped only to the minimum
+/// visible boundary of the screen they overlap most; a detached-display
+/// position falls back to the main screen.
+fn safe_floating_origin(
+    mtm: MainThreadMarker,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> Option<(f64, f64)> {
+    let screens = NSScreen::screens(mtm);
+    let visible_frames: Vec<CGRect> = screens.iter().map(|screen| screen.visibleFrame()).collect();
+
+    if visible_frames
+        .iter()
+        .any(|visible| has_minimum_visible_overlap(x, y, width, height, visible))
+    {
+        return Some((x, y));
+    }
+
+    let partially_overlapped = visible_frames
+        .iter()
+        .filter(|visible| overlap_area(x, y, width, height, visible) > 0.0)
+        .max_by(|a, b| {
+            overlap_area(x, y, width, height, a)
+                .partial_cmp(&overlap_area(x, y, width, height, b))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .copied();
+    let target = partially_overlapped
+        .or_else(|| NSScreen::mainScreen(mtm).map(|screen| screen.visibleFrame()))
+        .or_else(|| visible_frames.first().copied());
+
+    target.map(|visible| clamp_floating_origin(x, y, width, height, &visible))
+}
+
+/// Repair a persisted Floating position against the screens currently known
+/// to AppKit. This is called at startup as well as after display attach/detach,
+/// so a position saved while an external display was connected cannot strand
+/// the panel across launches. It repairs the saved coordinates regardless of
+/// the current mode, because the user may switch back to Floating later.
+pub fn repair_floating_position(mtm: MainThreadMarker, config: &mut Config) -> bool {
+    let height = panel_height_for_lines(
+        config.appearance.font_size,
+        config.appearance.max_lines as usize,
+    );
+    let Some((x, y)) = safe_floating_origin(
+        mtm,
+        config.position.x as f64,
+        config.position.y as f64,
+        config.appearance.width as f64,
+        height,
+    ) else {
+        return false;
+    };
+    let x = x.round() as i32;
+    let y = y.round() as i32;
+    if config.position.x == x && config.position.y == y {
+        return false;
+    }
+
+    config.position.x = x;
+    config.position.y = y;
+    if let Err(e) = config.save() {
+        eprintln!("warn: failed to persist repaired floating position: {e}");
+    }
+    true
+}
+
 /// Apply geometry configuration for a given overlay mode.
 ///
 /// Reconfigures the same NSPanel for Docked vs Floating mode without rebuild.
 /// In Docked mode, the panel is positioned at the top of the visible screen frame,
-/// spanning the full width. In Floating mode, it uses the position and dimensions
-/// from config. In Transcript mode, the panel is hidden (order out).
+/// spanning the full width. In Floating mode, it uses a position constrained to
+/// a currently visible screen. In Transcript mode, the panel is hidden (order out).
 ///
 /// SAFETY: The mtm parameter proves this is called on the main thread, where
 /// AppKit mutations are safe.
@@ -252,8 +356,16 @@ pub fn apply_geometry(
             label.setAlignment(objc2_app_kit::NSTextAlignment::Center);
         }
         OverlayMode::Floating => {
+            let (x, y) = safe_floating_origin(
+                mtm,
+                config.position.x as f64,
+                config.position.y as f64,
+                config.appearance.width as f64,
+                max_height,
+            )
+            .unwrap_or((config.position.x as f64, config.position.y as f64));
             let rect = CGRect::new(
-                CGPoint::new(config.position.x as f64, config.position.y as f64),
+                CGPoint::new(x, y),
                 CGSize::new(config.appearance.width as f64, max_height),
             );
             panel.setFrame_display(rect, true);
@@ -400,7 +512,8 @@ fn screen_changed_reapply(
     config: &Arc<std::sync::Mutex<Config>>,
 ) {
     let (mode, cfg_snapshot) = {
-        let cfg = config.lock().unwrap();
+        let mut cfg = config.lock().unwrap();
+        repair_floating_position(mtm, &mut cfg);
         (cfg.overlay_mode.clone(), cfg.clone())
     };
     apply_geometry(panel, label, mtm, mode, &cfg_snapshot);
@@ -505,6 +618,51 @@ mod tests {
 
     use super::*;
     use crate::config::{AppearanceConfig, OverlayPosition};
+
+    #[test]
+    fn valid_floating_position_is_preserved() {
+        let visible = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1440.0, 900.0));
+        assert!(has_minimum_visible_overlap(
+            100.0, 100.0, 500.0, 100.0, &visible
+        ));
+        assert_eq!(
+            clamp_floating_origin(100.0, 100.0, 500.0, 100.0, &visible),
+            (100.0, 100.0)
+        );
+    }
+
+    #[test]
+    fn floating_position_clamps_only_to_minimum_visible_boundary() {
+        let visible = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1440.0, 900.0));
+        let width = 400.0;
+        let height = 100.0;
+        let x = 1440.0 - width * 0.25 + 1.0;
+        assert!(!has_minimum_visible_overlap(
+            x, 100.0, width, height, &visible
+        ));
+
+        let repaired = clamp_floating_origin(x, 100.0, width, height, &visible);
+        assert_eq!(repaired.0, 1440.0 - width * 0.25);
+        assert_eq!(repaired.1, 100.0);
+        assert_eq!(
+            overlap_area(repaired.0, repaired.1, width, height, &visible),
+            width * 0.25 * height
+        );
+    }
+
+    #[test]
+    fn far_offscreen_position_is_clamped_to_boundary_not_screen_origin() {
+        let visible = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1440.0, 900.0));
+        let repaired = clamp_floating_origin(5000.0, -5000.0, 400.0, 100.0, &visible);
+        assert_eq!(repaired, (1440.0 - 400.0 * 0.25, -100.0 * 0.75));
+    }
+
+    #[test]
+    fn overlap_area_is_zero_for_disjoint_rectangles() {
+        let visible = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(1440.0, 900.0));
+        assert_eq!(overlap_area(2000.0, 100.0, 400.0, 100.0, &visible), 0.0);
+        assert_eq!(overlap_area(100.0, -200.0, 400.0, 100.0, &visible), 0.0);
+    }
 
     #[test]
     fn panel_constructed_with_required_flags() {

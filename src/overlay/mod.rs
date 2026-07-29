@@ -67,6 +67,8 @@ pub enum OverlayCommand {
     SetMode(OverlayMode),
     /// Lock or unlock the floating overlay.
     SetLocked(bool),
+    /// Restore the floating overlay to its default position.
+    ResetFloatingPosition,
     /// Toggle whether the overlay renders above fullscreen windows
     /// (switches the layer-shell layer between Top and Overlay).
     SetAboveFullscreen(bool),

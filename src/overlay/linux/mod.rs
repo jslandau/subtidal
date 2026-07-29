@@ -358,6 +358,21 @@ fn handle_overlay_command(
                 add_drag_handler(window, is_dragging);
             }
         }
+        OverlayCommand::ResetFloatingPosition => {
+            if !matches!(*current_mode.borrow(), OverlayMode::Floating) {
+                return;
+            }
+            let position = crate::config::OverlayPosition::default();
+            {
+                let mut cfg = config.lock().unwrap();
+                cfg.position = position.clone();
+                if let Err(e) = cfg.save() {
+                    eprintln!("warn: failed to save reset floating position: {e}");
+                }
+            }
+            window.set_margin(Edge::Left, position.x);
+            window.set_margin(Edge::Top, position.y);
+        }
         OverlayCommand::UpdateAppearance(appearance) => {
             // No-op when in Transcript mode: appearance config applies to the
             // overlay only (per design "explicitly out of scope").
