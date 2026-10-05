@@ -1,0 +1,124 @@
+name: Native transcript tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  linux:
+    name: Linux GTK transcript tests (Ubuntu 24.04)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Rust native build and display dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            build-essential \
+            git \
+            libclang-dev \
+            libgtk-4-dev \
+            libpipewire-0.3-dev \
+            libssl-dev \
+            libwayland-dev \
+            meson \
+            ninja-build \
+            pkg-config \
+            wayland-protocols \
+            xvfb \
+            xauth
+
+      - name: Require GTK 4.10 or newer and build gtk4-layer-shell
+        run: |
+          set -eu
+          pkg-config --atleast-version=4.10 gtk4
+          pkg-config --modversion gtk4
+          command -v xvfb-run
+
+          # Noble does not package libgtk4-layer-shell-dev. Build a pinned
+          # upstream release against Noble's GTK4 and Wayland development files.
+          git clone --depth 1 --branch v1.0.2 \
+            https://github.com/wmww/gtk4-layer-shell.git /tmp/gtk4-layer-shell
+          meson setup /tmp/gtk4-layer-shell/build /tmp/gtk4-layer-shell \
+            --prefix=/usr/local \
+            -Dexamples=false \
+            -Ddocs=false \
+            -Dtests=false \
+            -Dsmoke-tests=false \
+            -Dintrospection=false \
+            -Dvapi=false
+          ninja -C /tmp/gtk4-layer-shell/build
+          sudo ninja -C /tmp/gtk4-layer-shell/build install
+          sudo ldconfig
+          # Match gtk4-layer-shell-sys 0.5.2's declared system-deps module.
+          pkg-config --atleast-version=1.0 gtk4-layer-shell-0
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Compile tests and discover ORT runtime from dependency output
+        run: |
+          set -eu
+          cargo test --lib --no-run
+
+          # build.rs discovers the ort-sys distribution by following this
+          # provider symlink in target/debug. The ORT runtime is alongside the
+          # resolved provider library; never search model directories.
+          provider_link="$(find target/debug -name 'libonnxruntime_providers_cuda.so' -print -quit)"
+          if [ -z "$provider_link" ] || [ ! -e "$provider_link" ]; then
+            echo "::error::ort-sys provider library was not produced under target/debug"
+            exit 1
+          fi
+          ort_dir="$(dirname "$(realpath "$provider_link")")"
+          ort_runtime="$ort_dir/libonnxruntime.so"
+          if [ ! -e "$ort_runtime" ]; then
+            echo "::error::ORT runtime missing beside resolved provider: $ort_runtime"
+            exit 1
+          fi
+          printf 'LD_LIBRARY_PATH=%s:%s:%s\n' \
+            "$ort_dir" "$PWD/target/debug" "$PWD/target/debug/deps" >> "$GITHUB_ENV"
+          echo "Using ORT runtime from $ort_runtime"
+
+      - name: Run ordinary Linux library tests
+        run: cargo test --lib
+
+      - name: Require the ignored Linux native transcript test
+        run: |
+          set -eu
+          test_list="$(xvfb-run --auto-servernum --server-args='-screen 0 1280x1024x24' \
+            env GDK_BACKEND=x11 cargo test --lib linux_transcript_native_routing -- --ignored --test-threads=1 --list)"
+          printf '%s\n' "$test_list"
+          match_count="$(printf '%s\n' "$test_list" | grep -Fc 'linux_transcript_native_routing: test' || true)"
+          if [ "$match_count" -ne 1 ]; then
+            echo "::error::Expected exactly one ignored test named linux_transcript_native_routing; found $match_count"
+            exit 1
+          fi
+
+      - name: Run native Linux transcript test under Xvfb
+        run: |
+          set -eu
+          xvfb-run --auto-servernum --server-args='-screen 0 1280x1024x24' \
+            env GDK_BACKEND=x11 cargo test --lib linux_transcript_native_routing -- --ignored --test-threads=1
+
+  macos:
+    name: macOS AppKit transcript tests (Apple Silicon)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting and run ordinary library tests
+        run: |
+          cargo fmt --all -- --check
+          cargo test --lib
+
+      - name: Run harness-free AppKit transcript tests on the main thread
+        run: cargo test --features native-transcript-tests --test native_transcript

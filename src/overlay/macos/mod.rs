@@ -7,6 +7,11 @@ mod app;
 pub mod drag;
 pub mod panel;
 pub mod rename_dialog;
+#[cfg(feature = "native-transcript-tests")]
+mod transcript_native_tests;
+mod transcript_routing;
 pub mod transcript_window;
+#[cfg(feature = "native-transcript-tests")]
+pub use transcript_native_tests::run as run_native_transcript_scenarios;
 
 pub use app::run_app;

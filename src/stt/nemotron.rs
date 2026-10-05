@@ -51,7 +51,8 @@ impl NemotronEngine {
         let mut inner = build_macos(model_dir, use_cuda)?;
 
         if inner.mode() == NemotronMode::Multilingual {
-            inner.set_target_lang("auto")
+            inner
+                .set_target_lang("auto")
                 .context("setting Nemotron 3.5 target language to auto")?;
         }
 

@@ -611,10 +611,16 @@ pub fn spawn_stt_thread(
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn build_engine(choice: &Engine, model_paths: &ModelPaths, use_cuda: bool) -> Result<Box<dyn SttEngine>> {
+fn build_engine(
+    choice: &Engine,
+    model_paths: &ModelPaths,
+    use_cuda: bool,
+) -> Result<Box<dyn SttEngine>> {
     let model_dir = model_paths.for_engine(choice);
     match choice {
-        Engine::Nemotron => Ok(Box::new(nemotron::NemotronEngine::new(model_dir, use_cuda)?)),
+        Engine::Nemotron => Ok(Box::new(nemotron::NemotronEngine::new(
+            model_dir, use_cuda,
+        )?)),
     }
 }
 

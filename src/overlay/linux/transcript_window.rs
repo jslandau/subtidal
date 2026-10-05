@@ -4,14 +4,16 @@
 //! a ScrolledWindow + TextView for displaying timestamped speech fragments. Provides
 //! `append_fragment_to_view` (called per caption) and `clear_view` (reset on session end).
 
+use crate::overlay::transcript_follow::FollowState;
 use crate::overlay::transcript_log::{AppendKind, Fragment};
+use crate::overlay::transcript_presentation::{gtk_offset, MetadataKind, Presentation};
 use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{
     Application, ApplicationWindow, Button, HeaderBar, ScrolledWindow, TextBuffer, TextTag,
     TextTagTable, TextView, WrapMode,
 };
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 /// Handles needed by the orchestration layer to drive the transcript window.
@@ -24,15 +26,224 @@ pub struct TranscriptWindowState {
     pub scrolled: ScrolledWindow,
     /// Tag applied to the timestamp prefix on each paragraph.
     pub timestamp_tag: TextTag,
+    speaker_tag: TextTag,
+    tick: Rc<RefCell<Option<gtk4::TickCallbackId>>>,
+    pub text_view: TextView,
+    presentation: Rc<RefCell<Presentation>>,
+    follow: Rc<RefCell<FollowState>>,
+    programmatic: Rc<Cell<bool>>,
+    user_input: Rc<Cell<bool>>,
+    input_serial: Rc<Cell<u64>>,
+    input_settle_serial: Rc<Cell<u64>>,
+    input_cleanup: Rc<RefCell<Option<glib::SourceId>>>,
+    #[cfg(test)]
+    cleanup_registrations: Rc<Cell<usize>>,
+    #[cfg(test)]
+    cleanup_current: Rc<Cell<usize>>,
+    scroll_sequence: Rc<Cell<bool>>,
+    input_baseline: Rc<Cell<Option<(f64, f64, f64)>>>,
+    reading_anchor: Rc<
+        Cell<
+            Option<(
+                crate::overlay::transcript_presentation::FragmentPosition,
+                i32,
+            )>,
+        >,
+    >,
+    follow_button: gtk4::CheckButton,
+    status_label: gtk4::Label,
+    empty_label: gtk4::Label,
 }
 
-/// Threshold (in pixels) below the scroll bottom at which the view is
-/// considered "tailing" and new appends should auto-scroll.
-const AUTOSCROLL_THRESHOLD_PX: f64 = 16.0;
+impl TranscriptWindowState {
+    fn update_status(&self) {
+        let follow = self.follow.borrow();
+        self.status_label.set_text(follow.status());
+    }
 
-/// Foreground color for paragraph timestamp prefix. Approximates GNOME's
-/// `dim_label_color` without using the deprecated StyleContext::lookup_color API.
-const TIMESTAMP_RGBA: (f32, f32, f32, f32) = (0.6, 0.6, 0.6, 1.0);
+    fn capture_anchor(&self) {
+        let rect = self.text_view.visible_rect();
+        if let Some(iter) = self.text_view.iter_at_location(rect.x(), rect.y()) {
+            let p = self.presentation.borrow();
+            let byte = p
+                .text
+                .char_indices()
+                .nth(iter.offset().max(0) as usize)
+                .map(|(b, _)| b)
+                .unwrap_or(p.text.len());
+            if let Some(position) = p.position(byte) {
+                self.reading_anchor.set(Some((
+                    position,
+                    rect.y() - self.text_view.iter_location(&iter).y(),
+                )));
+            }
+        }
+    }
+
+    fn restore_anchor(&self) {
+        if self.user_input.get() {
+            return;
+        }
+        let Some((position, pixel)) = self.reading_anchor.get() else {
+            return;
+        };
+        if !self.window.is_mapped() {
+            return;
+        }
+        self.cancel_follow();
+        let generation = self.follow.borrow().generation;
+        let state = self.clone();
+        let previous = Cell::new(None);
+        let frames = Cell::new(0);
+        let id = self.text_view.add_tick_callback(move |_, _| {
+            if state.follow.borrow().generation != generation || !state.window.is_mapped() {
+                state.tick.borrow_mut().take();
+                return glib::ControlFlow::Break;
+            }
+            let adj = state.scrolled.vadjustment();
+            let geometry = (adj.upper(), adj.page_size(), state.text_view.width());
+            frames.set(frames.get() + 1);
+            if previous.get() != Some(geometry) && frames.get() < 8 {
+                previous.set(Some(geometry));
+                return glib::ControlFlow::Continue;
+            }
+            let target = {
+                let p = state.presentation.borrow();
+                let iter = state
+                    .buffer
+                    .iter_at_offset(gtk_offset(&p.text, p.resolve(position)) as i32);
+                f64::from(state.text_view.iter_location(&iter).y() + pixel)
+            };
+            state.programmatic.set(true);
+            adj.set_value(target);
+            state.programmatic.set(false);
+            state.tick.borrow_mut().take();
+            glib::ControlFlow::Break
+        });
+        *self.tick.borrow_mut() = Some(id);
+    }
+
+    fn cancel_input_cleanup(&self) {
+        let source = self.input_cleanup.borrow_mut().take();
+        if let Some(source) = source {
+            source.remove();
+            #[cfg(test)]
+            self.cleanup_current.set(self.cleanup_current.get() - 1);
+        }
+    }
+
+    fn input_cleanup_finished(&self) {
+        // Returning Break removes the executing source; do not remove it twice.
+        let source = self.input_cleanup.borrow_mut().take();
+        #[cfg(test)]
+        if source.is_some() {
+            self.cleanup_current.set(self.cleanup_current.get() - 1);
+        }
+        drop(source);
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_cleanup_counts(&self) -> (usize, usize) {
+        (self.cleanup_registrations.get(), self.cleanup_current.get())
+    }
+
+    fn cancel_follow(&self) {
+        let id = self.tick.borrow_mut().take();
+        if let Some(id) = id {
+            id.remove();
+        }
+        self.follow.borrow_mut().invalidate();
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_anchor(
+        &self,
+    ) -> Option<(
+        crate::overlay::transcript_presentation::FragmentPosition,
+        i32,
+    )> {
+        self.capture_anchor();
+        self.reading_anchor.get()
+    }
+    #[cfg(test)]
+    pub(super) fn test_anchor_pixel(
+        &self,
+        position: crate::overlay::transcript_presentation::FragmentPosition,
+    ) -> i32 {
+        let p = self.presentation.borrow();
+        let iter = self
+            .buffer
+            .iter_at_offset(gtk_offset(&p.text, p.resolve(position)) as i32);
+        self.text_view.visible_rect().y() - self.text_view.iter_location(&iter).y()
+    }
+    #[cfg(test)]
+    pub(super) fn test_follow_enabled(&self, enabled: bool) {
+        self.follow_button.set_active(enabled);
+    }
+    #[cfg(test)]
+    pub(super) fn test_input_active(&self) -> bool {
+        self.user_input.get()
+    }
+    #[cfg(test)]
+    pub(super) fn test_pending(&self) -> bool {
+        self.tick.borrow().is_some()
+    }
+    #[cfg(test)]
+    pub(super) fn test_user_scroll(&self, value: f64) {
+        self.cancel_follow();
+        let adj = self.scrolled.vadjustment();
+        self.programmatic.set(true);
+        adj.set_value(value);
+        self.programmatic.set(false);
+        self.follow
+            .borrow_mut()
+            .observe_user(adj.value(), adj.upper(), adj.page_size());
+        self.capture_anchor();
+        self.update_status();
+    }
+
+    /// Coalesce appends; stale callbacks cannot override a newer user decision.
+    fn schedule_follow(&self) {
+        if self.user_input.get() {
+            return;
+        }
+        if !self.window.is_mapped() {
+            return;
+        }
+        let Some(generation) = self.follow.borrow_mut().request() else {
+            return;
+        };
+        let state = self.clone();
+        let old_id = self.tick.borrow_mut().take();
+        if let Some(id) = old_id {
+            id.remove();
+        }
+        let previous = Cell::new(None);
+        let frames = Cell::new(0);
+        let id = self.text_view.add_tick_callback(move |_, _| {
+            if !state.follow.borrow().eligible(generation) || !state.window.is_mapped() {
+                state.follow.borrow_mut().complete(generation);
+                state.tick.borrow_mut().take();
+                return glib::ControlFlow::Break;
+            }
+            let adj = state.scrolled.vadjustment();
+            let extent = (adj.upper(), adj.page_size());
+            frames.set(frames.get() + 1);
+            if previous.get() != Some(extent) && frames.get() < 8 {
+                previous.set(Some(extent));
+                return glib::ControlFlow::Continue;
+            }
+            state.programmatic.set(true);
+            adj.set_value((adj.upper() - adj.page_size()).max(adj.lower()));
+            state.programmatic.set(false);
+            state.follow.borrow_mut().complete(generation);
+            state.update_status();
+            state.tick.borrow_mut().take();
+            glib::ControlFlow::Break
+        });
+        *self.tick.borrow_mut() = Some(id);
+    }
+}
 
 /// Build the transcript window: ApplicationWindow with HeaderBar (Save button),
 /// ScrolledWindow wrapping a TextView, and timestamped-text rendering.
@@ -47,16 +258,10 @@ pub fn build_transcript_window(
 ) -> TranscriptWindowState {
     // 1. Tag table + dimmed timestamp tag.
     let tag_table = TextTagTable::new();
-    let timestamp_tag = TextTag::builder()
-        .name("timestamp")
-        .foreground_rgba(&gtk4::gdk::RGBA::new(
-            TIMESTAMP_RGBA.0,
-            TIMESTAMP_RGBA.1,
-            TIMESTAMP_RGBA.2,
-            TIMESTAMP_RGBA.3,
-        ))
-        .build();
+    let timestamp_tag = TextTag::builder().name("timestamp").build();
     tag_table.add(&timestamp_tag);
+    let speaker_tag = TextTag::builder().name("speaker").weight(600).build();
+    tag_table.add(&speaker_tag);
 
     // 2. Buffer using that tag table.
     let buffer = TextBuffer::new(Some(&tag_table));
@@ -67,15 +272,24 @@ pub fn build_transcript_window(
         .wrap_mode(WrapMode::WordChar)
         .editable(false)
         .cursor_visible(false)
-        .top_margin(12)
-        .bottom_margin(12)
-        .left_margin(12)
-        .right_margin(12)
+        .top_margin(20)
+        .bottom_margin(20)
+        .left_margin(20)
+        .right_margin(20)
+        .css_classes(["transcript-text"])
         .build();
+
+    let tag = timestamp_tag.clone();
+    text_view.connect_map(move |view| {
+        let mut color = view.color();
+        color.set_alpha(0.65);
+        tag.set_foreground_rgba(Some(&color));
+    });
 
     // 4. ScrolledWindow wrapping the TextView.
     let scrolled = ScrolledWindow::builder()
         .child(&text_view)
+        .hscrollbar_policy(gtk4::PolicyType::Never)
         .vexpand(true)
         .hexpand(true)
         .build();
@@ -85,13 +299,40 @@ pub fn build_transcript_window(
     let save_button = Button::with_label("Save…");
     header_bar.pack_end(&save_button);
 
+    let empty_label = gtk4::Label::new(Some("Waiting for speech"));
+    empty_label.set_can_target(false);
+    empty_label.add_css_class("dim-label");
+    let content = gtk4::Overlay::new();
+    content.set_child(Some(&scrolled));
+    content.add_overlay(&empty_label);
+    let status_label = gtk4::Label::new(Some("Following live"));
+    status_label.set_margin_start(20);
+    status_label.set_margin_end(20);
+    status_label.set_margin_top(8);
+    status_label.set_margin_bottom(8);
+    status_label.set_xalign(0.0);
+    status_label.add_css_class("dim-label");
+    let body = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    body.append(&content);
+    body.append(&gtk4::Separator::new(gtk4::Orientation::Horizontal));
+    body.append(&status_label);
+    let css = gtk4::CssProvider::new();
+    css.load_from_data(".transcript-text { font-family: sans-serif; font-size: 14pt; }");
+    gtk4::style_context_add_provider_for_display(
+        &text_view.display(),
+        &css,
+        gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
+
     // 6. ApplicationWindow.
     let window = ApplicationWindow::builder()
         .application(app)
         .title("Subtidal Transcript")
         .default_width(700)
         .default_height(500)
-        .child(&scrolled)
+        .child(&body)
+        .width_request(360)
+        .height_request(260)
         .build();
     window.set_titlebar(Some(&header_bar));
     window.set_visible(false); // mode-switch wiring in Phase 4 controls visibility
@@ -211,11 +452,289 @@ pub fn build_transcript_window(
         });
     }
 
-    TranscriptWindowState {
+    let follow_button = gtk4::CheckButton::with_label("Autoscroll");
+    follow_button.set_active(true);
+    let jump_button = Button::with_label("Jump to latest");
+    follow_button.set_tooltip_text(Some("Automatically follow new speech when at the bottom"));
+    jump_button.set_tooltip_text(Some(
+        "Scroll to the latest speech without changing Autoscroll",
+    ));
+    save_button.set_tooltip_text(Some("Save transcript as text and JSON"));
+    header_bar.pack_start(&follow_button);
+    header_bar.pack_start(&jump_button);
+    header_bar.set_title_widget(Some(&gtk4::Label::new(Some("Transcript"))));
+    let state = TranscriptWindowState {
         window,
         buffer,
         scrolled,
         timestamp_tag,
+        speaker_tag,
+        tick: Rc::new(RefCell::new(None)),
+        text_view,
+        presentation: Rc::new(RefCell::new(Presentation::default())),
+        follow: Rc::new(RefCell::new(FollowState::default())),
+        programmatic: Rc::new(Cell::new(false)),
+        user_input: Rc::new(Cell::new(false)),
+        input_serial: Rc::new(Cell::new(0)),
+        input_settle_serial: Rc::new(Cell::new(0)),
+        input_cleanup: Rc::new(RefCell::new(None)),
+        #[cfg(test)]
+        cleanup_registrations: Rc::new(Cell::new(0)),
+        #[cfg(test)]
+        cleanup_current: Rc::new(Cell::new(0)),
+        scroll_sequence: Rc::new(Cell::new(false)),
+        input_baseline: Rc::new(Cell::new(None)),
+        reading_anchor: Rc::new(Cell::new(None)),
+        follow_button,
+        status_label,
+        empty_label,
+    };
+    let empty = state.empty_label.clone();
+    state
+        .buffer
+        .connect_changed(move |buffer| empty.set_visible(buffer.char_count() == 0));
+    let scroll = gtk4::EventControllerScroll::new(
+        gtk4::EventControllerScrollFlags::VERTICAL | gtk4::EventControllerScrollFlags::KINETIC,
+    );
+    scroll.set_propagation_phase(gtk4::PropagationPhase::Capture);
+    let s = state.clone();
+    scroll.connect_scroll(move |_, _, _| {
+        note_user_input(&s);
+        glib::Propagation::Proceed
+    });
+    let s = state.clone();
+    scroll.connect_scroll_begin(move |_| {
+        s.scroll_sequence.set(true);
+        begin_user_input(&s);
+    });
+    let s = state.clone();
+    scroll.connect_scroll_end(move |_| {
+        s.scroll_sequence.set(false);
+        settle_user_input(&s);
+    });
+    let s = state.clone();
+    scroll.connect_decelerate(move |_, _, _| {
+        s.scroll_sequence.set(false);
+        if !s.user_input.get() {
+            begin_user_input(&s);
+        }
+        settle_user_input(&s);
+    });
+    state.scrolled.add_controller(scroll);
+    let keys = gtk4::EventControllerKey::new();
+    keys.set_propagation_phase(gtk4::PropagationPhase::Capture);
+    let s = state.clone();
+    keys.connect_key_pressed(move |_, key, _, _| {
+        if matches!(
+            key,
+            gtk4::gdk::Key::Up
+                | gtk4::gdk::Key::Down
+                | gtk4::gdk::Key::Page_Up
+                | gtk4::gdk::Key::Page_Down
+                | gtk4::gdk::Key::Home
+                | gtk4::gdk::Key::End
+        ) {
+            note_user_input(&s);
+        }
+        glib::Propagation::Proceed
+    });
+    state.scrolled.add_controller(keys);
+    let click = gtk4::GestureClick::new();
+    click.set_propagation_phase(gtk4::PropagationPhase::Capture);
+    let s = state.clone();
+    click.connect_pressed(move |_, _, _, _| {
+        begin_user_input(&s);
+    });
+    let s = state.clone();
+    click.connect_released(move |_, _, _, _| settle_user_input(&s));
+    let s = state.clone();
+    click.connect_cancel(move |_, _| settle_user_input(&s));
+    state.scrolled.add_controller(click);
+    let s = state.clone();
+    state
+        .scrolled
+        .vadjustment()
+        .connect_value_changed(move |adj| {
+            if !s.programmatic.get() && s.user_input.get() {
+                if let Some((value, upper, page)) = s.input_baseline.get() {
+                    if (upper, page) == (adj.upper(), adj.page_size())
+                        && (value - adj.value()).abs() > 0.01
+                    {
+                        s.cancel_follow();
+                        s.follow.borrow_mut().observe_user(adj.value(), upper, page);
+                        s.input_baseline.set(Some((adj.value(), upper, page)));
+                        s.capture_anchor();
+                        s.update_status();
+                    }
+                }
+            }
+        });
+    let s = state.clone();
+    state.scrolled.vadjustment().connect_changed(move |adj| {
+        if s.user_input.get() {
+            s.input_baseline
+                .set(Some((adj.value(), adj.upper(), adj.page_size())));
+            return;
+        }
+        if s.programmatic.get() {
+            return;
+        }
+        let following = s.follow.borrow().following();
+        if following {
+            s.schedule_follow();
+        } else {
+            s.restore_anchor();
+        }
+    });
+    {
+        let s = state.clone();
+        state.follow_button.connect_toggled(move |button| {
+            s.cancel_input_cleanup();
+            if !button.is_active() {
+                s.capture_anchor();
+            }
+            s.input_serial.set(s.input_serial.get().wrapping_add(1));
+            s.user_input.set(false);
+            s.scroll_sequence.set(false);
+            s.input_baseline.set(None);
+            s.cancel_follow();
+            s.follow.borrow_mut().set_enabled(button.is_active());
+            s.update_status();
+            s.schedule_follow();
+        });
+    }
+    {
+        let s = state.clone();
+        jump_button.connect_clicked(move |_| {
+            s.cancel_input_cleanup();
+            s.input_serial.set(s.input_serial.get().wrapping_add(1));
+            s.user_input.set(false);
+            s.scroll_sequence.set(false);
+            s.input_baseline.set(None);
+            s.cancel_follow();
+            s.follow.borrow_mut().jump();
+            s.programmatic.set(true);
+            let adj = s.scrolled.vadjustment();
+            adj.set_value((adj.upper() - adj.page_size()).max(adj.lower()));
+            s.programmatic.set(false);
+            s.update_status();
+            s.schedule_follow();
+        });
+    }
+    {
+        let s = state.clone();
+        state.window.connect_map(move |_| {
+            let following = s.follow.borrow().following();
+            if following {
+                s.schedule_follow();
+            } else {
+                s.restore_anchor();
+            }
+        });
+        let s = state.clone();
+        state.window.connect_unmap(move |_| {
+            s.cancel_input_cleanup();
+            s.input_serial.set(s.input_serial.get().wrapping_add(1));
+            s.user_input.set(false);
+            s.scroll_sequence.set(false);
+            s.input_baseline.set(None);
+            s.cancel_follow();
+        });
+        let s = state.clone();
+        state.window.connect_close_request(move |_| {
+            s.cancel_input_cleanup();
+            s.cancel_follow();
+            s.window.set_visible(false);
+            glib::Propagation::Stop
+        });
+    }
+    state
+}
+
+fn begin_user_input(state: &TranscriptWindowState) -> u64 {
+    state.cancel_input_cleanup();
+    state.cancel_follow();
+    state
+        .input_serial
+        .set(state.input_serial.get().wrapping_add(1));
+    state.user_input.set(true);
+    let adj = state.scrolled.vadjustment();
+    state
+        .input_baseline
+        .set(Some((adj.value(), adj.upper(), adj.page_size())));
+    state.input_serial.get()
+}
+
+fn finish_user_input(state: &TranscriptWindowState, serial: u64) {
+    if state.input_serial.get() != serial {
+        return;
+    }
+    state.user_input.set(false);
+    state.input_baseline.set(None);
+    state.capture_anchor();
+    state.update_status();
+    state.schedule_follow();
+}
+
+fn settle_user_input(state: &TranscriptWindowState) {
+    state.cancel_input_cleanup();
+    if !state.user_input.get() {
+        return;
+    }
+    state
+        .input_settle_serial
+        .set(state.input_settle_serial.get().wrapping_add(1));
+    let settle_serial = state.input_settle_serial.get();
+    let serial = state.input_serial.get();
+    let s = state.clone();
+    let previous = Rc::new(Cell::new(s.scrolled.vadjustment().value()));
+    let stable = Rc::new(Cell::new(0));
+    let started = std::time::Instant::now();
+    // GTK exposes deceleration start, not ScrolledWindow kinetic completion.
+    // This bounded quiet-value heuristic still needs native momentum validation.
+    let source = glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
+        if s.input_serial.get() != serial
+            || s.input_settle_serial.get() != settle_serial
+            || !s.user_input.get()
+        {
+            s.input_cleanup_finished();
+            return glib::ControlFlow::Break;
+        }
+        let value = s.scrolled.vadjustment().value();
+        if (previous.get() - value).abs() <= 0.01 {
+            stable.set(stable.get() + 1);
+        } else {
+            stable.set(0);
+            previous.set(value);
+        }
+        if stable.get() >= 3 || started.elapsed() >= std::time::Duration::from_secs(2) {
+            s.input_cleanup_finished();
+            if !s.scroll_sequence.get() {
+                finish_user_input(&s, serial);
+            }
+            return glib::ControlFlow::Break;
+        }
+        glib::ControlFlow::Continue
+    });
+    *state.input_cleanup.borrow_mut() = Some(source);
+    #[cfg(test)]
+    {
+        state
+            .cleanup_registrations
+            .set(state.cleanup_registrations.get() + 1);
+        state.cleanup_current.set(state.cleanup_current.get() + 1);
+        assert_eq!(
+            state.cleanup_current.get(),
+            1,
+            "at most one physical input cleanup source"
+        );
+    }
+}
+
+fn note_user_input(state: &TranscriptWindowState) {
+    begin_user_input(state);
+    if !state.scroll_sequence.get() {
+        settle_user_input(state);
     }
 }
 
@@ -233,43 +752,46 @@ pub fn append_fragment_to_view(
     kind: AppendKind,
     speaker_names: &std::collections::HashMap<u32, String>,
 ) {
-    // 1. Sample autoscroll position BEFORE inserting.
-    let was_at_bottom = is_near_bottom(&state.scrolled);
+    state.programmatic.set(true);
+    insert_fragment(state, fragment, kind, speaker_names);
+    state.programmatic.set(false);
+    state.schedule_follow();
+}
 
-    // 2. Insert paragraph break + timestamp prefix on NewParagraph.
-    let mut end = state.buffer.end_iter();
-    if matches!(kind, AppendKind::NewParagraph) {
-        // If the buffer has any prior content, prepend a newline to start a new line.
-        if state.buffer.char_count() > 0 {
-            state.buffer.insert(&mut end, "\n");
-        }
-        let timestamp_text = fragment.timestamp.format("[%H:%M:%S] ").to_string();
-        state
-            .buffer
-            .insert_with_tags(&mut end, &timestamp_text, &[&state.timestamp_tag]);
-
-        // If diarization is active, prepend the speaker label.
-        if let Some(speaker_id) = fragment.speaker_id {
-            let display = speaker_names
-                .get(&speaker_id)
-                .cloned()
-                .unwrap_or_else(|| format!("Speaker {}", speaker_id + 1));
-            let label = format!("{display}: ");
-            state.buffer.insert(&mut end, &label);
-        }
-    }
-
-    // 3. Insert the fragment text (whitespace verbatim — the leading-space
-    //    word-boundary signal must be preserved per the RNNT engine contract).
-    state.buffer.insert(&mut end, &fragment.text);
-
-    // 4. If we were tailing, schedule a scroll-to-bottom for after layout.
-    if was_at_bottom {
-        let scrolled = state.scrolled.clone();
-        glib::idle_add_local_once(move || {
-            let adj = scrolled.vadjustment();
-            adj.set_value(adj.upper() - adj.page_size());
-        });
+fn insert_fragment(
+    state: &TranscriptWindowState,
+    fragment: &Fragment,
+    kind: AppendKind,
+    speaker_names: &std::collections::HashMap<u32, String>,
+) {
+    let mut presentation = state.presentation.borrow_mut();
+    let start = presentation.text.len();
+    let metadata_start = presentation.metadata.len();
+    let character_start = state.buffer.char_count();
+    presentation.append(fragment, kind, speaker_names);
+    let suffix = presentation.text[start..].to_owned();
+    let spans: Vec<_> = presentation.metadata[metadata_start..]
+        .iter()
+        .map(|span| {
+            (
+                span.kind,
+                character_start + gtk_offset(&suffix, span.range.start - start) as i32,
+                character_start + gtk_offset(&suffix, span.range.end - start) as i32,
+            )
+        })
+        .collect();
+    drop(presentation);
+    state.buffer.insert(&mut state.buffer.end_iter(), &suffix);
+    for (kind, start, end) in spans {
+        let tag = match kind {
+            MetadataKind::Timestamp => &state.timestamp_tag,
+            MetadataKind::Speaker => &state.speaker_tag,
+        };
+        state.buffer.apply_tag(
+            tag,
+            &state.buffer.iter_at_offset(start),
+            &state.buffer.iter_at_offset(end),
+        );
     }
 }
 
@@ -287,63 +809,96 @@ pub fn rebuild_view(
     log: &crate::overlay::transcript_log::TranscriptLog,
     speaker_names: &std::collections::HashMap<u32, String>,
 ) {
-    let was_at_bottom = is_near_bottom(&state.scrolled);
+    if state.window.is_mapped() {
+        state.capture_anchor();
+    }
+    state.cancel_follow();
+    let following = state.follow.borrow().following();
+    let old = state.presentation.borrow();
+    let position = |offset: i32| {
+        let byte = old
+            .text
+            .char_indices()
+            .nth(offset.max(0) as usize)
+            .map(|(b, _)| b)
+            .unwrap_or(old.text.len());
+        old.position(byte)
+    };
+    let selection = state
+        .buffer
+        .selection_bounds()
+        .and_then(|(a, b)| Some((position(a.offset())?, position(b.offset())?)));
+    drop(old);
+    state.programmatic.set(true);
 
     // Clear and re-render.
     let (mut s, mut e) = (state.buffer.start_iter(), state.buffer.end_iter());
     state.buffer.delete(&mut s, &mut e);
 
-    // Derive paragraph break locally using the same rule as TranscriptLog::push_at:
-    // first fragment, gap > 1.5s, or speaker change.
-    let paragraph_gap_secs = 1.5_f64;
-    let mut prev: Option<&Fragment> = None;
-    for frag in log.fragments() {
-        let kind = match prev {
-            None => AppendKind::NewParagraph,
-            Some(p) => {
-                let speaker_change = frag.speaker_id.is_some()
-                    && p.speaker_id.is_some()
-                    && frag.speaker_id != p.speaker_id;
-                let gap = frag.timestamp.signed_duration_since(p.timestamp);
-                let secs = gap.num_milliseconds() as f64 / 1000.0;
-                if speaker_change || secs > paragraph_gap_secs {
-                    AppendKind::NewParagraph
-                } else {
-                    AppendKind::ContinueParagraph
-                }
-            }
+    let rebuilt = Presentation::from_log(log, speaker_names);
+    let spans: Vec<_> = rebuilt
+        .metadata
+        .iter()
+        .map(|span| {
+            (
+                span.kind,
+                gtk_offset(&rebuilt.text, span.range.start) as i32,
+                gtk_offset(&rebuilt.text, span.range.end) as i32,
+            )
+        })
+        .collect();
+    state
+        .buffer
+        .insert(&mut state.buffer.end_iter(), &rebuilt.text);
+    for (kind, start, end) in spans {
+        let tag = match kind {
+            MetadataKind::Timestamp => &state.timestamp_tag,
+            MetadataKind::Speaker => &state.speaker_tag,
         };
-        append_fragment_to_view(state, frag, kind, speaker_names);
-        prev = Some(frag);
+        state.buffer.apply_tag(
+            tag,
+            &state.buffer.iter_at_offset(start),
+            &state.buffer.iter_at_offset(end),
+        );
     }
-
-    if was_at_bottom {
-        let scrolled = state.scrolled.clone();
-        glib::idle_add_local_once(move || {
-            let adj = scrolled.vadjustment();
-            adj.set_value(adj.upper() - adj.page_size());
-        });
+    *state.presentation.borrow_mut() = rebuilt;
+    let presentation = state.presentation.borrow();
+    let resolve = |p| {
+        state
+            .buffer
+            .iter_at_offset(gtk_offset(&presentation.text, presentation.resolve(p)) as i32)
+    };
+    let selection = selection.map(|(a, b)| (resolve(a), resolve(b)));
+    drop(presentation);
+    if let Some((a, b)) = selection {
+        state.buffer.select_range(&a, &b);
+    }
+    state.programmatic.set(false);
+    if following {
+        state.schedule_follow();
+    } else {
+        state.restore_anchor();
     }
 }
 
 /// Clear all text from the transcript view.
 pub fn clear_view(state: &TranscriptWindowState) {
+    state.cancel_input_cleanup();
+    state.cancel_follow();
+    state.follow.borrow_mut().clear();
+    state.reading_anchor.set(None);
+    state.user_input.set(false);
+    state
+        .input_serial
+        .set(state.input_serial.get().wrapping_add(1));
+    state.scroll_sequence.set(false);
+    state.input_baseline.set(None);
+    *state.presentation.borrow_mut() = Presentation::default();
+    state.programmatic.set(true);
     let (mut start, mut end) = (state.buffer.start_iter(), state.buffer.end_iter());
     state.buffer.delete(&mut start, &mut end);
-}
-
-/// Check if the scrolled window is near the bottom (within AUTOSCROLL_THRESHOLD_PX).
-///
-/// Returns true on a freshly-built buffer (autoscroll on by default — the "chat-app pattern").
-fn is_near_bottom(scrolled: &ScrolledWindow) -> bool {
-    let adj = scrolled.vadjustment();
-    let value = adj.value();
-    let upper = adj.upper();
-    let page_size = adj.page_size();
-    // "near" = within AUTOSCROLL_THRESHOLD_PX of the bottom edge,
-    //          or the content is shorter than one page (always tail).
-    let bottom = upper - page_size;
-    value >= bottom - AUTOSCROLL_THRESHOLD_PX
+    state.programmatic.set(false);
+    state.update_status();
 }
 
 /// Given the user-chosen `.txt` path (or any path), return the sibling `.json`

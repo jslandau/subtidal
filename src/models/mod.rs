@@ -1,5 +1,5 @@
-use anyhow::{Context, Result};
 use crate::config::Engine;
+use anyhow::{Context, Result};
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -204,8 +204,6 @@ pub async fn ensure_nemotron_models() -> Result<()> {
     }
     Ok(())
 }
-
-
 
 fn copy_model_file(src: &Path, dest: &Path) -> Result<()> {
     // Resolve symlinks: hf-hub returns paths that are symlinks into its blob store.

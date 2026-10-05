@@ -7,7 +7,9 @@
 //! re-export the platform-specific entry points from here.
 
 pub mod caption_buffer;
+pub mod transcript_follow;
 pub mod transcript_log;
+pub mod transcript_presentation;
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -20,6 +22,9 @@ mod macos;
 
 #[cfg(target_os = "macos")]
 pub use macos::run_app;
+
+#[cfg(all(target_os = "macos", feature = "native-transcript-tests"))]
+pub use macos::run_native_transcript_scenarios;
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;

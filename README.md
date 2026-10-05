@@ -10,7 +10,7 @@ All processing happens locally — no cloud services, no network requests (excep
 - **Per-application audio capture**: PipeWire on Linux, Core Audio Process Taps on macOS. Caption any app, not just the mic. On macOS, helper-heavy apps are grouped under user-facing app names while preserving helper process capture.
 - **Auto-fallback** when the captured app exits: switches back to system output, with a desktop notification.
 - **Overlay modes**: Docked (edge-anchored, click-through) and Floating (draggable, lockable for click-through).
-- **Transcript mode**: separate scrollable window with timestamped paragraphs and "Save as JSON".
+- **Transcript mode**: native selectable reading window with timestamped paragraphs, Autoscroll controls, and Save… export.
 - **System tray** for toggling captions, switching audio source / engine / font / line count, mode and lock toggles.
 - **Hot-reloadable config** — edits to the TOML file land live without restart.
 
@@ -54,6 +54,17 @@ subtidal [--engine nemotron] [--config path] [--reset-config]
 
 ### macOS
 Launch `Subtidal.app`. Configuration lives in `~/Library/Application Support/Subtidal/config.toml` (TOML, hot-reloaded).
+
+### Transcript reading
+
+Choose **Transcript** from the Mode menu to read the full session history. Text remains selectable for copying, including timestamps and speaker labels.
+
+- **Autoscroll** starts on. At the bottom, the status is **Following live**; scrolling up pauses following with **Paused — reading history**. Returning to the bottom resumes it.
+- Turning Autoscroll off shows **Autoscroll off** and leaves you in control of the reading position. Turning it on explicitly moves to the latest speech.
+- **Jump to latest** moves to the end without changing the Autoscroll preference.
+- The preference is session-local and retained when the window is hidden and reopened. Disabling captions clears the current session's caption and transcript surfaces.
+- Transcript text uses native reading typography independently of caption-overlay font and appearance settings. Native test requirements and commands are in [Native transcript tests](docs/native-transcript-tests.md).
+- **Save…** preserves the existing export formats: JSON on macOS, and TXT with a JSON sidecar on Linux.
 
 ### Tray controls (both platforms)
 - Captions on/off

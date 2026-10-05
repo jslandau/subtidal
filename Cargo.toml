@@ -13,6 +13,16 @@ path = "src/lib.rs"
 name = "subtidal"
 path = "src/main.rs"
 
+[features]
+# Explicit opt-in for the main-thread native transcript regression runner.
+native-transcript-tests = []
+
+[[test]]
+name = "native_transcript"
+path = "tests/native_transcript.rs"
+harness = false
+required-features = ["native-transcript-tests"]
+
 [dependencies]
 # Audio
 rubato = "1.0"

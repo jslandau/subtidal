@@ -2,7 +2,7 @@
 
 Real-time speech-to-text overlay for Linux/Wayland and macOS.
 
-Freshness: 2026-05-30
+Freshness: 2026-10-05
 
 ## Purpose
 
@@ -32,6 +32,11 @@ stt/diarization.rs           — Streaming Sortformer v2.1 diarization engine (p
 overlay/mod.rs               — neutral: OverlayCommand, CaptionsEnabled; re-exports overlay/linux on Linux, overlay/macos on macOS
 overlay/caption_buffer.rs    — pure text buffer: line-fill, overlap dedup, expiry (GTK-free, well-tested) [neutral]
 overlay/transcript_log.rs    — pure data: timestamped fragments, paragraph coalescing, .json serialization (GTK-free, well-tested) [neutral]
+overlay/transcript_follow.rs — neutral session-local preference, bottom pinning and generation-checked pending follow policy
+overlay/transcript_presentation.rs — selectable formatting, metadata spans and fragment-relative UTF-8/GTK/UTF-16 position mapping
+overlay/linux/transcript_tests.rs — serialized display-server transcript scenarios using production routing
+overlay/macos/transcript_native_tests.rs — main-thread AppKit scenarios, enabled by native-transcript-tests
+tests/native_transcript.rs   — harness-free main-thread macOS native runner
 overlay/linux/mod.rs         — overlay orchestration, OverlayCommand dispatch, run_gtk_app public API
 overlay/linux/window.rs      — GTK4 layer-shell window construction (docked/floating), CSS, caption label
 overlay/linux/drag.rs        — floating-mode drag gesture with compositor-quirk coordinate compensation
@@ -97,7 +102,10 @@ Engine changes are a lock-free `ArcSwap::store` read at the next chunk boundary.
 - **macOS overlay geometry** (`overlay/macos/panel.rs`, Phase 6): `apply_geometry(panel, mtm, mode, config)` reshapes the existing NSPanel for Docked / Floating / Transcript transitions without teardown — analogous to the Linux mode-switch path. `SubtidalScreenObserver` listens for `NSApplicationDidChangeScreenParametersNotification` and re-applies geometry on display changes.
 - **macOS drag persistence** (`overlay/macos/drag.rs`, Phase 6): `SubtidalDragObserver` observes `NSWindowDidMoveNotification` and writes `panel.frame.origin` back into `config.position` through `Config::save()`. The save path is the same one hot-reload watches, so writes must round-trip without re-triggering the debouncer beyond the normal SetMode-suppression logic.
 - **macOS transcript window** (`overlay/macos/transcript_window.rs`, Phase 6): NSWindow + NSScrollView + NSTextView with a Save NSButton wired to `SubtidalTranscriptActions` which spawns an NSSavePanel and writes `TranscriptLog::to_json`. The window is returned as a `TranscriptWindow { state, actions }` bundle so the caller keeps `actions` alive — NSButton's `setTarget:` is weak.
-- **Caption bridge ownership** (`overlay/macos/app.rs`, Phase 6): the caption bridge is the sole caller of `TranscriptLog::push()`. `transcript_window::append_fragment` only re-renders the view from existing log state. Splitting these responsibilities prevents the double-push that surfaced during integration.
+- **Transcript reading policy** (`overlay/transcript_follow.rs`): Autoscroll preference is session-local and separate from bottom pinning. Bottom tolerance is 2 logical units; user movement above bottom pauses without turning the preference off. On explicitly moves to latest; Jump moves once without enabling an off preference. Clear/hide invalidate pending work; clear retains the preference. Native document/layout changes are not reader intent. Transcript typography is independent of caption-overlay appearance.
+- **Transcript presentation** (`overlay/transcript_presentation.rs`): selectable timestamps/speaker labels and verbatim body text share a neutral formatter. Metadata/fragment ranges are UTF-8 bytes; adapters convert explicitly to GTK characters or AppKit UTF-16. `TranscriptLog::append_kind_at` uses the configured gap and speaker boundaries. Preserve existing TXT export's time-gap-only `paragraphs()` derivation and JSON serialization separately.
+- **Caption bridge ownership** (`overlay/macos/app.rs`): the caption bridge is the sole caller of `TranscriptLog::push()`. `transcript_window::append_fragment_to_view` consumes the already-recorded fragment and AppendKind, incrementally appending attributed native storage rather than replacing history. Main-thread mutations reject captions admitted before a captions-disable epoch. Splitting storage ownership from rendering prevents double-pushing.
+- **Native transcript tests**: requirements and commands live in `docs/native-transcript-tests.md`. The AppKit runner uses `harness = false` and the opt-in `native-transcript-tests` feature to execute on main; Linux runs its serialized ignored native library scenario explicitly under Xvfb. Ordinary worker-thread AppKit unit tests are not evidence of GUI coverage.
 - **CaptionEvent** (`overlay/mod.rs`, diarization branch — BREAKING vs the earlier struct-shaped scaffold): now an enum.
   - `Append { text: String, speaker_id: Option<u32>, emit_sample: u64 }` — normal caption append. `emit_sample` is in the diarization engine's sample-count frame (matches Sortformer's `elapsed_samples`).
   - `Relabel { from_sample: u64, new_speaker_id: u32 }` — retroactive re-attribution. Ordered ahead of subsequent `Append`s from the new speaker on the same channel so the overlay sees Relabel before the new speaker's first caption.

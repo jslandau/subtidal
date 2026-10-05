@@ -8,6 +8,8 @@
 pub mod drag;
 pub mod input_region;
 pub mod rename_dialog;
+#[cfg(test)]
+mod transcript_tests;
 pub mod transcript_window;
 pub mod window;
 
@@ -143,17 +145,10 @@ pub fn run_gtk_app(
                             // Always: append to the durable transcript log AND to the transcript
                             // window's TextBuffer (safe even while the window is hidden — GTK
                             // queues layout updates and they materialize on .present()).
-                            let kind = log.borrow_mut().push_with_speaker_and_sample(
-                                text.clone(), speaker_id, emit_sample,
-                            );
-                            let fragment = log
-                                .borrow()
-                                .fragments()
-                                .last()
-                                .cloned()
-                                .expect("just pushed a fragment");
                             let names = config.lock().unwrap().speaker_names.clone();
-                            transcript_window::append_fragment_to_view(&tstate, &fragment, kind, &names);
+                            route_transcript_event(&tstate, &log, &crate::overlay::CaptionEvent::Append {
+                                text: text.clone(), speaker_id, emit_sample,
+                            }, &names);
 
                             // Overlay surfaces (caption_buffer + label) only update when the
                             // overlay is the active mode.
@@ -169,12 +164,9 @@ pub fn run_gtk_app(
                             }
                         }
                         crate::overlay::CaptionEvent::Relabel { from_sample, new_speaker_id } => {
-                            // Retroactively correct attribution. Update the durable
-                            // transcript log first (always), then the live overlay
-                            // buffer if it's the active surface. The transcript view
-                            // currently re-renders only on next append; that's
-                            // acceptable since the Save export reads the log directly.
-                            let n_log = log.borrow_mut().relabel_since(from_sample, new_speaker_id);
+                            let names = config.lock().unwrap().speaker_names.clone();
+                            let n_log = route_transcript_event(&tstate, &log,
+                                &crate::overlay::CaptionEvent::Relabel { from_sample, new_speaker_id }, &names);
                             let n_buf = buf.borrow_mut().relabel_since(from_sample, new_speaker_id);
                             if n_log + n_buf > 0 {
                                 eprintln!(
@@ -258,6 +250,48 @@ pub fn run_gtk_app(
     });
 
     app.run_with_args::<&str>(&[]);
+}
+
+fn route_transcript_event(
+    state: &transcript_window::TranscriptWindowState,
+    log: &Rc<RefCell<crate::overlay::transcript_log::TranscriptLog>>,
+    event: &crate::overlay::CaptionEvent,
+    names: &std::collections::HashMap<u32, String>,
+) -> usize {
+    match event {
+        crate::overlay::CaptionEvent::Append {
+            text,
+            speaker_id,
+            emit_sample,
+        } => {
+            let kind = log.borrow_mut().push_with_speaker_and_sample(
+                text.clone(),
+                *speaker_id,
+                *emit_sample,
+            );
+            let fragment = log
+                .borrow()
+                .fragments()
+                .last()
+                .cloned()
+                .expect("just appended");
+            transcript_window::append_fragment_to_view(state, &fragment, kind, names);
+            0
+        }
+        crate::overlay::CaptionEvent::Relabel {
+            from_sample,
+            new_speaker_id,
+        } => {
+            let count = log
+                .borrow_mut()
+                .relabel_since(*from_sample, *new_speaker_id);
+            if count > 0 {
+                let snapshot = log.borrow().clone();
+                transcript_window::rebuild_view(state, &snapshot, names);
+            }
+            count
+        }
+    }
 }
 
 fn handle_overlay_command(
@@ -434,7 +468,8 @@ fn handle_overlay_command(
             // 4. Fully rebuild the transcript view from the log. Cheaper
             //    than walking the buffer to patch individual paragraphs, and
             //    correct regardless of which fragments are visible.
-            transcript_window::rebuild_view(transcript_state, &transcript_log.borrow(), &names);
+            let snapshot = transcript_log.borrow().clone();
+            transcript_window::rebuild_view(transcript_state, &snapshot, &names);
         }
         OverlayCommand::ShowRenameDialog => {
             let current = config.lock().unwrap().speaker_names.clone();

@@ -44,6 +44,7 @@ pub struct Paragraph {
 }
 
 /// Accumulator for speech fragments, grouping them into paragraphs on silence gaps.
+#[derive(Clone)]
 pub struct TranscriptLog {
     fragments: Vec<Fragment>,
     paragraph_gap: StdDuration,
@@ -141,7 +142,8 @@ impl TranscriptLog {
     ///
     /// Called when Sortformer reveals (a few captions late) that a speaker switch
     /// actually began at `from_sample`. After this call, paragraph boundaries
-    /// derived from `paragraphs()` automatically reflect the corrected speakers.
+    /// used by transcript presentation automatically reflect corrected speakers.
+    /// `paragraphs()` retains the historical time-gap-only TXT export grouping.
     pub fn relabel_since(&mut self, from_sample: u64, new_speaker_id: u32) -> usize {
         let mut n = 0;
         for frag in self.fragments.iter_mut().rev() {
@@ -154,6 +156,28 @@ impl TranscriptLog {
             }
         }
         n
+    }
+
+    /// Paragraph boundary for an existing fragment, using this log's configured gap.
+    pub fn append_kind_at(&self, index: usize) -> AppendKind {
+        let current = &self.fragments[index];
+        if index == 0 {
+            return AppendKind::NewParagraph;
+        }
+        let previous = &self.fragments[index - 1];
+        let speaker_change = current.speaker_id.is_some()
+            && previous.speaker_id.is_some()
+            && current.speaker_id != previous.speaker_id;
+        let gap = current
+            .timestamp
+            .signed_duration_since(previous.timestamp)
+            .to_std()
+            .unwrap_or(StdDuration::ZERO);
+        if speaker_change || gap > self.paragraph_gap {
+            AppendKind::NewParagraph
+        } else {
+            AppendKind::ContinueParagraph
+        }
     }
 
     /// Return a slice of all fragments in order.
