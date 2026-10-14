@@ -1,0 +1,7 @@
+# Isolated scoring only; no torch / production environment dependency.
+pyannote.metrics==3.2.1
+pyannote.core==5.0.0
+pyannote.database==5.1.0
+jiwer==3.1.0
+numpy==2.2.6
+pytest==8.4.2

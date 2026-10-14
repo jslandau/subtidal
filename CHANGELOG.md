@@ -5,6 +5,24 @@ All notable changes to Subtidal are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-10-14
+
+### Changed
+- **ORT inference update:** pinned parakeet-rs 0.4.1 and ONNX Runtime rc.14, retaining ORT rather than switching to Burn. The English ASR model files and digest pins are unchanged.
+- **Eight-speaker diarization:** independently pinned Nemotron-3 diarization v3, enabled its low-latency profile and default postprocessing, and expanded Linux/macOS speaker rename dialogs to eight slots. Explicit legacy postprocessing presets remain supported.
+- **Linux GPU requirements:** the pinned ORT CUDA distribution requires CUDA 13 runtime libraries and cuDNN 9; CPU fallback remains available.
+
+### Fixed
+- **Runtime initialization and fallback:** share one ORT environment, retry CPU after GPU construction failure, invalidate stale GPU verdicts, and update the Linux tray indicator to reflect the loaded ASR backend.
+- **Provider compatibility:** stage only the matching ORT CUDA/shared provider pair; failed staging cannot reuse a cached positive GPU verdict or unrelated cached libraries.
+
+### Added
+- **Reproducible inference comparison:** isolated locked ORT/Burn runners, verified AMI fixtures, quality scoring, timing/memory reports, and documented measurements supporting the decision to retain ORT.
+
+### Validation
+- Linux locked release build, all-target check, 157 library tests, and 18 CLI/static/migration/provider tests passed. Production CPU and CUDA-requested adapter smoke tests passed.
+- Native macOS compilation, bundle launch, WebGPU inference, and eight-slot dialog interaction still require native validation; Linux cross-compilation is blocked by Apple C compiler/SDK requirements.
+
 ## [0.3.3] — 2026-10-13
 
 ### Added

@@ -6,6 +6,9 @@ pub mod nemotron;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod diarization;
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod ort_runtime;
+
 use anyhow::Result;
 use arc_swap::ArcSwap;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -32,6 +35,10 @@ use crate::overlay::CaptionEvent;
 /// Trait implemented by all STT backends.
 pub trait SttEngine: Send + 'static {
     fn process_chunk(&mut self, pcm: &[f32]) -> Result<Option<String>>;
+    /// Whether GPU construction succeeded for this engine.
+    fn using_gpu(&self) -> bool {
+        false
+    }
 }
 
 /// Cross-thread wake primitive: the PipeWire RT callback calls `notify()` after
@@ -101,6 +108,8 @@ pub struct PipelineConfig {
     pub unload_after: Option<Duration>,
     pub model_paths: ModelPaths,
     pub use_cuda: bool,
+    /// Actual backend of the currently loaded ASR engine, not the GPU request.
+    pub effective_gpu: Arc<AtomicBool>,
     /// Whether speaker diarization is enabled. The Sortformer engine is
     /// built lazily when this is first set to true.
     pub diarization_enabled: Arc<AtomicBool>,
@@ -303,14 +312,16 @@ pub fn spawn_stt_thread(
             let mut pending_captions: VecDeque<PendingCaption> = VecDeque::new();
             let mut recent_segments: VecDeque<RecentSpeakerSegment> = VecDeque::new();
 
+            let mut request_gpu = cfg.use_cuda;
             if diar_was_enabled {
                 eprintln!("info: diarization enabled at startup, loading Sortformer engine");
                 match diarization::DiarizationEngine::new(
                     &cfg.diarization_model_dir,
-                    cfg.use_cuda,
+                    request_gpu,
                     &cfg.diarization_preset,
                 ) {
                     Ok(d) => {
+                        note_effective_provider(&mut request_gpu, d.using_gpu(), cfg.probe_cache_path.as_deref());
                         diar_engine = Some(d);
                         reset_diarization_state(
                             &mut current_speaker,
@@ -321,6 +332,7 @@ pub fn spawn_stt_thread(
                         );
                     }
                     Err(e) => {
+                        note_effective_provider(&mut request_gpu, false, cfg.probe_cache_path.as_deref());
                         eprintln!("warn: failed to build Sortformer engine at startup: {e:#}");
                     }
                 }
@@ -365,10 +377,11 @@ pub fn spawn_stt_thread(
                     eprintln!("info: diarization enabled, loading Sortformer engine");
                     match diarization::DiarizationEngine::new(
                         &cfg.diarization_model_dir,
-                        cfg.use_cuda,
+                        request_gpu,
                         &cfg.diarization_preset,
                     ) {
                         Ok(d) => {
+                            note_effective_provider(&mut request_gpu, d.using_gpu(), cfg.probe_cache_path.as_deref());
                             diar_engine = Some(d);
                             reset_diarization_state(
                                 &mut current_speaker,
@@ -379,6 +392,7 @@ pub fn spawn_stt_thread(
                             );
                         }
                         Err(e) => {
+                            note_effective_provider(&mut request_gpu, false, cfg.probe_cache_path.as_deref());
                             eprintln!("warn: failed to build Sortformer engine: {e:#}");
                         }
                     }
@@ -418,8 +432,10 @@ pub fn spawn_stt_thread(
                         }
                         RebuildDecision::AttemptRebuild => {
                             eprintln!("info: (re)loading STT engine: {desired:?}");
-                            match build_engine(&desired, &cfg.model_paths, cfg.use_cuda) {
+                            match build_engine(&desired, &cfg.model_paths, request_gpu) {
                                 Ok(e) => {
+                                    note_effective_provider(&mut request_gpu, e.using_gpu(), cfg.probe_cache_path.as_deref());
+                                    cfg.effective_gpu.store(e.using_gpu(), Ordering::Relaxed);
                                     engine = Some(e);
                                     engine_built_for = Some(desired);
                                     rebuild_policy.note_build_success();
@@ -440,11 +456,7 @@ pub fn spawn_stt_thread(
                                     // A CUDA-requested failure invalidates
                                     // the probe verdict cache so the next
                                     // start re-probes (F10; Linux only).
-                                    if cfg.use_cuda {
-                                        crate::probe_cache::invalidate_if_configured(
-                                            cfg.probe_cache_path.as_deref(),
-                                        );
-                                    }
+                                    note_effective_provider(&mut request_gpu, false, cfg.probe_cache_path.as_deref());
                                     rebuild_policy.note_build_failure(&err);
                                     if let Some(notice) =
                                         rebuild_policy.take_failure_notice()
@@ -643,6 +655,7 @@ pub fn spawn_stt_thread(
                                 unload_dur.as_secs()
                             );
                             engine = None;
+                            cfg.effective_gpu.store(false, Ordering::Relaxed);
                             engine_built_for = None;
                         }
                     }
@@ -650,6 +663,19 @@ pub fn spawn_stt_thread(
             }
         })
         .expect("spawning stt-pipeline thread")
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn note_effective_provider(
+    request_gpu: &mut bool,
+    using_gpu: bool,
+    cache_path: Option<&std::path::Path>,
+) {
+    if *request_gpu && !using_gpu {
+        *request_gpu = false;
+        crate::probe_cache::invalidate_if_configured(cache_path);
+        eprintln!("warn: GPU initialization did not succeed; future engine builds in this session will use CPU");
+    }
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -778,6 +804,25 @@ impl EngineRebuildPolicy {
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cpu_fallback_invalidates_cache_and_disables_future_gpu_requests() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("probe-cache.json");
+        std::fs::write(&cache, "cached GPU verdict").unwrap();
+        let mut request_gpu = true;
+        note_effective_provider(&mut request_gpu, true, Some(&cache));
+        assert!(request_gpu);
+        assert!(cache.exists());
+        note_effective_provider(&mut request_gpu, false, Some(&cache));
+        assert!(!request_gpu);
+        assert!(!cache.exists());
+        note_effective_provider(&mut request_gpu, true, None);
+        assert!(
+            !request_gpu,
+            "later builds must not restore the failed GPU preference"
+        );
+    }
     use std::thread;
     use std::time::Instant;
 

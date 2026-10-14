@@ -1,6 +1,6 @@
 // examples/macos_webgpu_smoke.rs
 //
-// Phase 0 WebGPU spike: empirically verify that parakeet-rs with the `webgpu`
+// WebGPU smoke test: empirically verify that parakeet-rs with the `webgpu`
 // feature (backed by ONNX Runtime on Metal via wgpu) loads the Nemotron model,
 // transcribes a short fixture WAV, and runs at real-time factor <= 1.0 on
 // Apple Silicon. Throwaway code — superseded by Phase 3's production wiring.
@@ -29,6 +29,7 @@ use parakeet_rs::{ExecutionConfig, ExecutionProvider, Nemotron};
 #[cfg(target_os = "macos")]
 use subtidal::models::{ensure_nemotron_models, nemotron_model_dir};
 
+#[cfg(target_os = "macos")]
 const FIXTURE: &str = "tests/fixtures/macos-webgpu-smoke.wav";
 
 // Nemotron expects 560ms chunks at 16kHz mono = 8960 samples (mirrors the
@@ -46,9 +47,11 @@ async fn main() -> Result<()> {
     let model_dir: PathBuf = nemotron_model_dir();
 
     // 2. Build the WebGPU-backed Nemotron engine directly via parakeet-rs.
-    //    Bypasses src/stt/nemotron.rs::NemotronEngine::new (still bool-cuda-only);
-    //    that production surface is widened in Phase 3.
-    let exec = ExecutionConfig::new().with_execution_provider(ExecutionProvider::WebGPU);
+    //    Use an explicit shared ONNX Runtime environment, matching production.
+    let environment = ort::init().build().context("initializing ONNX Runtime")?;
+    let exec = ExecutionConfig::new()
+        .with_environment(environment)
+        .with_execution_provider(ExecutionProvider::WebGPU);
     let t_init = Instant::now();
     let mut engine = Nemotron::from_pretrained(&model_dir, Some(exec))
         .context("constructing Nemotron with WebGPU execution provider")?;

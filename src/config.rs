@@ -22,13 +22,18 @@ pub enum Engine {
     Nemotron,
 }
 
+/// Speaker slots supported by the Nemotron-3 streaming diarization model.
+pub const MAX_DIARIZATION_SPEAKERS: usize = 8;
+
 /// Diarization quality preset for the Sortformer model.
 /// Controls post-processing thresholds for speaker segmentation.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DiarizationPreset {
-    /// CallHome dataset threshold — good default for conversational speech.
+    /// Postprocessing defaults shipped with the Nemotron-3 diarization model.
     #[default]
+    Default,
+    /// Legacy CallHome dataset thresholds, retained for explicit configurations.
     Callhome,
     /// DIHARD3 dataset threshold — more aggressive segmentation.
     Dihard3,
@@ -267,7 +272,7 @@ pub struct Config {
     #[serde(default)]
     pub diarization_enabled: bool,
 
-    /// Diarization quality preset. Default: Callhome.
+    /// Diarization quality preset. Default: Nemotron-3 model postprocessing.
     #[serde(default)]
     pub diarization_preset: DiarizationPreset,
 
@@ -703,6 +708,28 @@ pub fn start_hot_reload_macos(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diarization_v3_defaults_and_legacy_presets() {
+        assert_eq!(MAX_DIARIZATION_SPEAKERS, 8);
+        let omitted: Config = toml::from_str("").unwrap();
+        assert_eq!(omitted.diarization_preset, DiarizationPreset::Default);
+        let defaults = Config::default();
+        assert_eq!(defaults.diarization_preset, DiarizationPreset::Default);
+        let roundtrip: Config = toml::from_str(&toml::to_string(&defaults).unwrap()).unwrap();
+        assert_eq!(roundtrip.diarization_preset, DiarizationPreset::Default);
+        for (name, expected) in [
+            ("default", DiarizationPreset::Default),
+            ("callhome", DiarizationPreset::Callhome),
+            ("dihard3", DiarizationPreset::Dihard3),
+        ] {
+            let config: Config =
+                toml::from_str(&format!("diarization_preset = \"{name}\"\n")).unwrap();
+            assert_eq!(config.diarization_preset, expected);
+            let roundtrip: Config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+            assert_eq!(roundtrip.diarization_preset, expected);
+        }
+    }
 
     #[test]
     fn floating_drag_coordinate_handling_parses_and_round_trips() {

@@ -6,9 +6,8 @@ name: macOS target check
 # darwin-specific flags (-arch arm64, -mmacosx-version-min, -gfull) that
 # Linux's plain `cc` does not understand. macOS's native cc handles them,
 # and `cargo check --target aarch64-apple-darwin` from the native macos-latest
-# (Apple Silicon) host exercises full cfg-gated module isolation. ort 2.0.0-rc.12
-# provides wgpu prebuilts for aarch64 but not x86_64; Phase 7 adds an x86_64
-# matrix entry once ort supplies x86_64 wgpu prebuilt binaries.
+# (Apple Silicon) host exercises full cfg-gated module isolation with the pinned
+# ORT rc.14 WebGPU build. Intel macOS remains outside the supported product scope.
 
 on:
   push:

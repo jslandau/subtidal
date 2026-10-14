@@ -1,7 +1,7 @@
 //! GTK4 modal dialog for assigning display names to diarization speakers.
 //!
-//! Sortformer produces up to 4 speaker IDs per session (0..=3). This dialog
-//! exposes all 4 slots as text entries pre-filled with the current name (or
+//! The dialog exposes all supported speaker slots as text entries pre-filled
+//! with the current session's name (or
 //! left empty to fall back to "Speaker {N}"). On Apply, the user-provided
 //! names are sent to the overlay via `OverlayCommand::SetSpeakerNames`,
 //! which updates the config, the live `CaptionBuffer`, and re-renders the
@@ -12,10 +12,20 @@ use gtk4::prelude::*;
 use gtk4::{ApplicationWindow, Box as GtkBox, Button, Entry, Label, Orientation, Window};
 use std::collections::HashMap;
 
+use crate::config::MAX_DIARIZATION_SPEAKERS;
 use crate::overlay::OverlayCommand;
 
-/// Maximum speakers the Sortformer-4spk model can report.
-const MAX_SPEAKERS: u32 = 4;
+fn collect_names(values: impl IntoIterator<Item = String>) -> HashMap<u32, String> {
+    values
+        .into_iter()
+        .take(MAX_DIARIZATION_SPEAKERS)
+        .enumerate()
+        .filter_map(|(id, value)| {
+            let trimmed = value.trim();
+            (!trimmed.is_empty()).then(|| (id as u32, trimmed.to_string()))
+        })
+        .collect()
+}
 
 /// Show the speaker rename dialog as a transient toplevel parented to
 /// `parent`. The dialog is non-modal in the GTK4 sense (no separate event
@@ -52,8 +62,9 @@ pub fn show_rename_dialog(
     outer.append(&intro);
 
     // One row per speaker slot. Collect entries so we can read them on Apply.
-    let entries: Vec<Entry> = (0..MAX_SPEAKERS)
-        .map(|id| {
+    let entries: Vec<Entry> = (0..MAX_DIARIZATION_SPEAKERS)
+        .map(|slot| {
+            let id = slot as u32;
             let row = GtkBox::new(Orientation::Horizontal, 8);
             let label = Label::new(Some(&format!("Speaker {}:", id + 1)));
             label.set_xalign(0.0);
@@ -108,14 +119,7 @@ pub fn show_rename_dialog(
         let win = win.clone();
         let entries = entries.clone();
         apply.connect_clicked(move |_| {
-            let mut names: HashMap<u32, String> = HashMap::new();
-            for (id, entry) in entries.iter().enumerate() {
-                let text = entry.text().to_string();
-                let trimmed = text.trim();
-                if !trimmed.is_empty() {
-                    names.insert(id as u32, trimmed.to_string());
-                }
-            }
+            let names = collect_names(entries.iter().map(|entry| entry.text().to_string()));
             // send_blocking on an unbounded async-channel returns immediately;
             // this runs on the GTK main thread so we don't want to await.
             let _ = cmd_tx.send_blocking(OverlayCommand::SetSpeakerNames(names));
@@ -146,5 +150,32 @@ pub fn show_rename_dialog(
     // Focus the first entry for immediate typing.
     if let Some(first) = entries.first() {
         first.grab_focus();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_rename_covers_eight_speakers() {
+        assert_eq!(MAX_DIARIZATION_SPEAKERS, 8);
+        let names = collect_names((0..MAX_DIARIZATION_SPEAKERS).map(|id| format!(" Name {id} ")));
+        assert_eq!(names.len(), 8);
+        for id in 0..8u32 {
+            assert_eq!(names[&id], format!("Name {id}"));
+        }
+        assert_eq!(names[&7], "Name 7");
+
+        let values = (0..MAX_DIARIZATION_SPEAKERS).map(|id| {
+            if id == 7 {
+                " Eighth speaker ".to_string()
+            } else {
+                " ".to_string()
+            }
+        });
+        let names = collect_names(values);
+        assert_eq!(names, HashMap::from([(7, "Eighth speaker".to_string())]));
+        assert!(collect_names(vec![String::new(); MAX_DIARIZATION_SPEAKERS]).is_empty());
     }
 }

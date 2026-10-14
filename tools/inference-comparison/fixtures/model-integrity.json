@@ -1,0 +1,37 @@
+{
+  "english_revision": "12bca7934f692a845057af06c5861d5e99495318",
+  "v21_revision": "12bca7934f692a845057af06c5861d5e99495318",
+  "v3_revision": "52f2deee40f20d7dc1f459416e9cd213fb9472df",
+  "english": {
+    "encoder.onnx": {
+      "path": "/home/jslandau/.local/share/subtidal/models/nemotron/encoder.onnx",
+      "sha256": "4c3acc1fe273b710b818012919a53ac0d535b5cbb614eb65e240ddd9480df27b",
+      "bytes": 42159994
+    },
+    "encoder.onnx.data": {
+      "path": "/home/jslandau/.local/share/subtidal/models/nemotron/encoder.onnx.data",
+      "sha256": "2c43a65deb934ad505bf3a5c9f2e47bc59ed43daf8a806c64597e2030fcc3278",
+      "bytes": 2436567040
+    },
+    "decoder_joint.onnx": {
+      "path": "/home/jslandau/.local/share/subtidal/models/nemotron/decoder_joint.onnx",
+      "sha256": "3111f21cc147631e6038422239d974547c80915b8a7e5139a67fa5bed63d4a31",
+      "bytes": 35779239
+    },
+    "tokenizer.model": {
+      "path": "/home/jslandau/.local/share/subtidal/models/nemotron/tokenizer.model",
+      "sha256": "07d4e5a63840a53ab2d4d106d2874768143fb3fbdd47938b3910d2da05bfb0a9",
+      "bytes": 251056
+    }
+  },
+  "v21": {
+    "path": "/home/jslandau/.local/share/subtidal/models/diarization/diar_streaming_sortformer_4spk-v2.1.onnx",
+    "sha256": "f010a62654fd6d2adb70166265df2e53f5a766e354d2cce152b4c7966a04d02d",
+    "bytes": 492243003
+  },
+  "v3": {
+    "path": "/tmp/subtidal-inference-ami/nemotron3_diar_v3.onnx",
+    "sha256": "915e4fa23b0192ed9fadeb1cdd26847df986d50c92012d177be28d0343bbe03a",
+    "bytes": 400506656
+  }
+}

@@ -19,7 +19,8 @@ pub struct TrayState {
     pub locked: bool,
     pub above_fullscreen: bool,
     pub active_engine: Engine,
-    pub using_gpu: bool,
+    /// Whether the currently loaded ASR engine uses GPU execution.
+    pub effective_gpu: Arc<AtomicBool>,
     /// Whether speaker diarization is enabled. Shared with the STT pipeline thread.
     pub diarization_enabled: Arc<AtomicBool>,
     /// Channel to send OverlayCommand to the GTK4 main thread.
@@ -198,7 +199,11 @@ impl Tray for TrayState {
 
     fn icon_pixmap(&self) -> Vec<ksni::Icon> {
         if self.captions_enabled.load(Ordering::Relaxed) {
-            vec![render_cc_icon(1.0, false, self.using_gpu)]
+            vec![render_cc_icon(
+                1.0,
+                false,
+                self.effective_gpu.load(Ordering::Relaxed),
+            )]
         } else {
             vec![render_cc_icon(0.35, true, false)]
         }
@@ -539,12 +544,62 @@ pub fn spawn_tray(
     tray_state: TrayState,
     runtime: &tokio::runtime::Runtime,
 ) -> ksni::Handle<TrayState> {
-    runtime.block_on(async { tray_state.spawn().await.expect("spawning ksni tray") })
+    let effective_gpu = Arc::clone(&tray_state.effective_gpu);
+    let initial_gpu = effective_gpu.load(Ordering::Relaxed);
+    runtime.block_on(async {
+        let handle = tray_state.spawn().await.expect("spawning ksni tray");
+        let refresh_handle = handle.clone();
+        tokio::spawn(async move {
+            let mut previous = initial_gpu;
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+            loop {
+                interval.tick().await;
+                let current = effective_gpu.load(Ordering::Relaxed);
+                if current != previous {
+                    if refresh_handle.update(|_| {}).await.is_none() {
+                        break;
+                    }
+                    previous = current;
+                }
+            }
+        });
+        handle
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn icon_tracks_runtime_gpu_backend_and_preserves_disabled_appearance() {
+        let (overlay_tx, _) = async_channel::unbounded();
+        let (audio_tx, _) = std::sync::mpsc::sync_channel(1);
+        let effective_gpu = Arc::new(AtomicBool::new(false));
+        let tray = TrayState {
+            captions_enabled: Arc::new(AtomicBool::new(true)),
+            active_source: AudioSource::SystemOutput,
+            overlay_mode: OverlayMode::Docked,
+            locked: false,
+            above_fullscreen: false,
+            active_engine: Engine::Nemotron,
+            effective_gpu: Arc::clone(&effective_gpu),
+            diarization_enabled: Arc::new(AtomicBool::new(false)),
+            overlay_tx,
+            audio_tx,
+            engine_choice: Arc::new(ArcSwap::from_pointee(Engine::Nemotron)),
+            node_list: Arc::new(std::sync::Mutex::new(vec![])),
+        };
+        let cpu_icon = tray.icon_pixmap().remove(0).data;
+        effective_gpu.store(true, Ordering::Relaxed);
+        assert_ne!(tray.icon_pixmap().remove(0).data, cpu_icon);
+        effective_gpu.store(false, Ordering::Relaxed);
+        assert_eq!(tray.icon_pixmap().remove(0).data, cpu_icon);
+        tray.captions_enabled.store(false, Ordering::Relaxed);
+        let disabled_icon = tray.icon_pixmap().remove(0).data;
+        effective_gpu.store(true, Ordering::Relaxed);
+        assert_eq!(tray.icon_pixmap().remove(0).data, disabled_icon);
+    }
 
     /// AC4.5: Lock greyed out in docked mode.
     /// Test that the "Lock Overlay Position" menu item is disabled when overlay_mode is Docked.
@@ -561,7 +616,7 @@ mod tests {
             locked: false,
             above_fullscreen: false,
             active_engine: Engine::Nemotron,
-            using_gpu: false,
+            effective_gpu: Arc::new(AtomicBool::new(false)),
             diarization_enabled: Arc::new(AtomicBool::new(false)),
             overlay_tx,
             audio_tx,
@@ -601,7 +656,7 @@ mod tests {
             locked: false,
             above_fullscreen: false,
             active_engine: Engine::Nemotron,
-            using_gpu: false,
+            effective_gpu: Arc::new(AtomicBool::new(false)),
             diarization_enabled: Arc::new(AtomicBool::new(false)),
             overlay_tx,
             audio_tx,
@@ -638,7 +693,7 @@ mod tests {
             locked: true,
             above_fullscreen: false,
             active_engine: Engine::Nemotron,
-            using_gpu: false,
+            effective_gpu: Arc::new(AtomicBool::new(false)),
             diarization_enabled: Arc::new(AtomicBool::new(false)),
             overlay_tx,
             audio_tx,
@@ -678,7 +733,7 @@ mod tests {
             locked: false,
             above_fullscreen: false,
             active_engine: Engine::Nemotron,
-            using_gpu: false,
+            effective_gpu: Arc::new(AtomicBool::new(false)),
             diarization_enabled: Arc::new(AtomicBool::new(false)),
             overlay_tx,
             audio_tx,
@@ -710,7 +765,7 @@ mod tests {
             locked: false,
             above_fullscreen: false,
             active_engine: Engine::Nemotron,
-            using_gpu: false,
+            effective_gpu: Arc::new(AtomicBool::new(false)),
             diarization_enabled: Arc::new(AtomicBool::new(false)),
             overlay_tx,
             audio_tx,

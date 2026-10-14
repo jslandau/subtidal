@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "recommendation": "retain ORT",
+  "fixture": "AMI ES2008a Mix-Headset continuous 0-240 seconds",
+  "fixture_manifest": "fixtures/ES2008a.manifest.json",
+  "raw_evidence_directory": "/home/jslandau/.local/share/subtidal/inference-comparison/2026-10-14",
+  "cuda_trials": {"requested": 45, "passed": 45, "repetitions_per_mode": 5},
+  "cpu_trials": {"requested": 9, "passed": 9, "repetitions_per_mode": 1},
+  "cpu_smoke_trials": {"requested": 3, "passed": 3},
+  "combined_cuda": {
+    "A": {"runner": "runner-baseline", "median_rtf": 0.09983394238333335, "min_rtf": 0.0989020790625, "max_rtf": 0.10124037206666667, "wer": 0.13957934990439771, "der": 0.3152192662745602},
+    "B": {"runner": "runner-ort-v3", "median_rtf": 0.044333662612500005, "min_rtf": 0.04255148590833333, "max_rtf": 0.04459560251666667, "wer": 0.11281070745697896, "der": 0.2804916728339075},
+    "C": {"runner": "runner-burn", "median_rtf": 0.2266993780875, "min_rtf": 0.22236451866666668, "max_rtf": 0.3427609532625, "wer": 0.11281070745697896, "der": 0.28043602855664324}
+  },
+  "combined_cpu_single_observation_rtf": {"A": 0.6749989198875, "B": 0.6507312142666667, "C": 1.3313144354375},
+  "gates": {"C_B_WER": true, "C_B_DER": true, "C_A_WER": true, "C_A_DER": true, "C_realtime": true, "C_A_throughput": false},
+  "production_modified": false,
+  "limitations": [
+    "ORT CUDA requested and strict registration preflight passed; actual model GPU node execution unproven",
+    "Burn per-token decoding includes CPU work",
+    "Cache state unknown; no caches deleted",
+    "Single four-speaker fixture does not establish broad or eight-voice quality",
+    "CPU matrix and desktop activity overlapped CUDA matrix; host contention may affect dispersion",
+    "CPU full-fixture observations have one repetition, not five",
+    "Sampled process memory may miss transients"
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "observed_at": "2026-10-13",
+  "platform": "Linux x86_64",
+  "kernel": "7.2.9-1-cachyos",
+  "rustc": "1.93.1 (01f6ddf75 2026-02-11)",
+  "cargo": "1.93.1 (083ac5135 2025-12-15)",
+  "gpu": "NVIDIA GeForce RTX 3090 Ti",
+  "gpu_capacity_mib": 24564,
+  "driver": "615.71.09",
+  "nvcc": "13.4.92",
+  "cuda_package": "13.4.2-1",
+  "cudnn_package": "9.27.0.42-1.1",
+  "gpu_system_used_mib_before_experiment": 2140,
+  "cache_state": "unknown; existing user caches are preserved",
+  "ort_gpu_execution": "unproven even when registration and requested inference succeed",
+  "burn_rustc": "1.95.0 (59807616e 2026-04-14)",
+  "system_changes": "isolated rustup 1.95.0 minimal toolchain installed; default compiler, CUDA and drivers unchanged"
+}

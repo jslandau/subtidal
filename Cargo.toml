@@ -1,6 +1,6 @@
 [package]
 name = "subtidal"
-version = "0.3.3"
+version = "0.4.0"
 edition = "2021"
 description = "Real-time speech-to-text overlay for Linux/Wayland and macOS"
 license = "MIT"
@@ -101,8 +101,8 @@ pipewire = "0.9"
 # that don't cross-compile from Linux to darwin).
 # Pin the tested inference pair: fresh install resolution must not select
 # newer ORT prereleases with incompatible APIs or a different model contract.
-ort = { version = "=2.0.0-rc.12", features = ["cuda"] }
-parakeet-rs = { version = "=0.3.6", features = ["cuda", "sortformer"] }
+ort = { version = "=2.0.0-rc.14", features = ["cuda"] }
+parakeet-rs = { version = "=0.4.1", features = ["cuda", "sortformer"] }
 # Desktop notifications (notify-rust pulls in mac-notification-sys whose build
 # script fails when cross-compiling from Linux to darwin).
 notify-rust = "4"
@@ -117,8 +117,8 @@ libc = "0.2"
 # adds x86_64-apple-darwin once ort supplies x86_64 wgpu prebuilts.
 [target.'cfg(target_os = "macos")'.dependencies]
 # Keep the same exact inference versions as Linux.
-parakeet-rs = { version = "=0.3.6", features = ["webgpu", "sortformer"] }
-ort = { version = "=2.0.0-rc.12", features = ["webgpu"] }
+parakeet-rs = { version = "=0.4.1", features = ["webgpu", "sortformer"] }
+ort = { version = "=2.0.0-rc.14", features = ["webgpu"] }
 # AppKit bindings (used Phase 2+); declared up-front so cross-target check exercises them.
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = [

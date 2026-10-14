@@ -1,158 +1,71 @@
-//! Nemotron STT engine: wraps parakeet_rs::Nemotron (RNNT-based, 600M params).
-//!
-//! Nemotron provides built-in punctuation and capitalization.
-//! It requires 560ms (8960 sample) chunks at 16kHz, so this engine
-//! internally buffers the 160ms (2560 sample) chunks from the audio bridge
-//! until a full 560ms chunk is accumulated.
+//! Streaming Nemotron adapter with explicit CUDA/WebGPU-to-CPU construction fallback.
 
 use super::SttEngine;
 use anyhow::{Context, Result};
 use parakeet_rs::NemotronMode;
 use std::path::Path;
 
-/// Nemotron expects 560ms chunks = 8960 samples at 16kHz.
 const NEMOTRON_CHUNK_SAMPLES: usize = 8960;
 
 pub struct NemotronEngine {
     inner: parakeet_rs::Nemotron,
-    /// Internal buffer to accumulate 160ms chunks until 560ms is reached.
+    using_gpu: bool,
     chunk_buf: Vec<f32>,
-    /// Reusable drain target for the chunk handed to `transcribe_chunk`
-    /// (F13): keeps its allocation across ticks so the 560 ms inference
-    /// cadence doesn't allocate a fresh ~35 KB Vec every time.
+    /// Reused at each 560 ms inference boundary to avoid per-chunk allocation.
     process_buf: Vec<f32>,
 }
 
 impl NemotronEngine {
-    /// Load the Nemotron model from the given directory.
-    /// Directory must contain: encoder.onnx, encoder.onnx.data, decoder_joint.onnx, tokenizer.model
-    ///
-    /// On Linux, `use_cuda` requests GPU acceleration via CUDA; CPU is used when `use_cuda` is false.
-    /// On macOS, `use_cuda` requests GPU acceleration via WebGPU (backed by Metal); CPU fallback
-    /// is automatic on WebGPU init failure.
+    /// Load the model directory, retrying CPU if requested GPU construction fails.
     pub fn new(model_dir: &Path, use_cuda: bool) -> Result<Self> {
-        #[cfg(target_os = "linux")]
-        let mut inner = {
-            let exec_config =
-                parakeet_rs::ExecutionConfig::new().with_execution_provider(if use_cuda {
-                    parakeet_rs::ExecutionProvider::Cuda
-                } else {
-                    parakeet_rs::ExecutionProvider::Cpu
-                });
-            let provider = if use_cuda { "Cuda" } else { "Cpu" };
-            eprintln!("info: Nemotron using execution provider: {provider}");
-            parakeet_rs::Nemotron::from_pretrained(model_dir, Some(exec_config)).with_context(
-                || {
-                    format!(
-                        "loading Nemotron from {} (provider={provider})",
-                        model_dir.display()
-                    )
-                },
-            )?
+        let build = |gpu| -> Result<parakeet_rs::Nemotron> {
+            let exec = super::ort_runtime::execution_config(gpu)?;
+            let mut inner = parakeet_rs::Nemotron::from_pretrained(model_dir, Some(exec))
+                .with_context(|| format!("loading Nemotron from {}", model_dir.display()))?;
+            if inner.mode() == NemotronMode::Multilingual {
+                inner
+                    .set_target_lang("auto")
+                    .context("setting Nemotron target language")?;
+            }
+            Ok(inner)
         };
-
-        #[cfg(target_os = "macos")]
-        let mut inner = build_macos(model_dir, use_cuda)?;
-
-        if inner.mode() == NemotronMode::Multilingual {
-            inner
-                .set_target_lang("auto")
-                .context("setting Nemotron 3.5 target language to auto")?;
-        }
-
-        Ok(NemotronEngine {
+        let (inner, using_gpu) = super::ort_runtime::build_with_cpu_fallback(
+            "Nemotron",
+            use_cuda,
+            || build(true),
+            || build(false),
+        )?;
+        Ok(Self {
             inner,
+            using_gpu,
             chunk_buf: Vec::with_capacity(NEMOTRON_CHUNK_SAMPLES),
             process_buf: Vec::with_capacity(NEMOTRON_CHUNK_SAMPLES),
         })
     }
-}
 
-#[cfg(target_os = "macos")]
-fn build_macos(model_dir: &Path, use_cuda: bool) -> Result<parakeet_rs::Nemotron> {
-    build_macos_with(model_dir, use_cuda, |dir| {
-        let exec = parakeet_rs::ExecutionConfig::new()
-            .with_execution_provider(parakeet_rs::ExecutionProvider::WebGPU);
-        parakeet_rs::Nemotron::from_pretrained(dir, Some(exec)).map_err(anyhow::Error::from)
-    })
-}
-
-#[cfg(target_os = "macos")]
-fn build_macos_with<F>(
-    model_dir: &Path,
-    use_cuda: bool,
-    try_webgpu: F,
-) -> Result<parakeet_rs::Nemotron>
-where
-    F: FnOnce(&Path) -> Result<parakeet_rs::Nemotron, anyhow::Error>,
-{
-    // `use_cuda` here means "request GPU acceleration"; macOS uses WebGPU
-    // (backed by Metal via wgpu) as the GPU provider. CPU is the fallback
-    // both when the caller explicitly requested CPU AND when WebGPU init fails.
-    if use_cuda {
-        match try_webgpu(model_dir) {
-            Ok(inner) => {
-                eprintln!("info: Nemotron using execution provider: WebGPU");
-                return Ok(inner);
-            }
-            Err(e) => {
-                eprintln!("warn: WebGPU init failed ({e}); falling back to CPU");
-            }
-        }
+    /// Whether GPU construction succeeded (CPU-only graph operators remain allowed).
+    pub fn using_gpu(&self) -> bool {
+        self.using_gpu
     }
-    let exec = parakeet_rs::ExecutionConfig::new()
-        .with_execution_provider(parakeet_rs::ExecutionProvider::Cpu);
-    eprintln!("info: Nemotron using execution provider: Cpu");
-    parakeet_rs::Nemotron::from_pretrained(model_dir, Some(exec)).with_context(|| {
-        format!(
-            "loading Nemotron from {} (provider=Cpu)",
-            model_dir.display()
-        )
-    })
 }
 
 impl SttEngine for NemotronEngine {
+    fn using_gpu(&self) -> bool {
+        self.using_gpu
+    }
+
     fn process_chunk(&mut self, pcm: &[f32]) -> Result<Option<String>> {
         self.chunk_buf.extend_from_slice(pcm);
-
         if self.chunk_buf.len() < NEMOTRON_CHUNK_SAMPLES {
-            return Ok(None); // Still accumulating
+            return Ok(None);
         }
-
-        // Drain exactly NEMOTRON_CHUNK_SAMPLES into the reusable process
-        // buffer (F13): the allocation is retained across ticks.
         self.process_buf.clear();
         self.process_buf
             .extend(self.chunk_buf.drain(..NEMOTRON_CHUNK_SAMPLES));
-
         let text = self
             .inner
             .transcribe_chunk(&self.process_buf)
             .context("Nemotron transcribe_chunk")?;
-
-        if text.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(text))
-        }
-    }
-}
-
-#[cfg(all(test, target_os = "macos"))]
-mod tests {
-    use super::*;
-
-    #[test]
-    #[ignore = "requires Nemotron model files at the conventional model dir"]
-    fn cpu_fallback_on_simulated_webgpu_failure() {
-        let model_dir = crate::models::nemotron_model_dir();
-        let result = build_macos_with(&model_dir, true, |_dir| {
-            Err(anyhow::anyhow!("simulated WebGPU init failure"))
-        });
-        assert!(
-            result.is_ok(),
-            "CPU fallback should produce a working Nemotron, got: {:?}",
-            result.err()
-        );
+        Ok((!text.is_empty()).then_some(text))
     }
 }

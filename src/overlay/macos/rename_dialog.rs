@@ -1,7 +1,7 @@
 //! AppKit dialog for assigning display names to diarization speakers.
 //!
-//! Sortformer produces up to 4 speaker IDs per session (0..=3). This dialog
-//! exposes all 4 slots as text fields pre-filled with the current name (or
+//! The dialog exposes all supported speaker slots as text fields pre-filled
+//! with the current session's name (or
 //! left empty to fall back to "Speaker N"). On Apply, the user-provided names
 //! are sent to the overlay via `OverlayCommand::SetSpeakerNames`.
 
@@ -17,10 +17,40 @@ use objc2_app_kit::{
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_foundation::{NSObject, NSString};
 
+use crate::config::MAX_DIARIZATION_SPEAKERS;
 use crate::overlay::OverlayCommand;
 
-/// Maximum speakers the Sortformer-4spk model can report.
-const MAX_SPEAKERS: u32 = 4;
+const DIALOG_WIDTH: f64 = 380.0;
+const ROW_SPACING: f64 = 38.0;
+const FIELD_HEIGHT: f64 = 26.0;
+const BUTTON_Y: f64 = 18.0;
+const BUTTON_HEIGHT: f64 = 30.0;
+const LAST_ROW_Y: f64 = BUTTON_Y + BUTTON_HEIGHT + 16.0;
+const INTRO_HEIGHT: f64 = 34.0;
+
+fn row_y(slot: usize) -> f64 {
+    LAST_ROW_Y + (MAX_DIARIZATION_SPEAKERS - 1 - slot) as f64 * ROW_SPACING
+}
+
+fn intro_y() -> f64 {
+    row_y(0) + FIELD_HEIGHT + 14.0
+}
+
+fn dialog_height() -> f64 {
+    intro_y() + INTRO_HEIGHT + 18.0
+}
+
+fn collect_names(values: impl IntoIterator<Item = String>) -> HashMap<u32, String> {
+    values
+        .into_iter()
+        .take(MAX_DIARIZATION_SPEAKERS)
+        .enumerate()
+        .filter_map(|(id, value)| {
+            let trimmed = value.trim();
+            (!trimmed.is_empty()).then(|| (id as u32, trimmed.to_string()))
+        })
+        .collect()
+}
 
 thread_local! {
     /// AppKit controls hold `setTarget:` weakly, so keep the current dialog
@@ -53,14 +83,13 @@ define_class!(
     impl RenameDialogActions {
         #[unsafe(method(applyRenameSpeakers:))]
         fn apply(&self, _sender: Option<&NSButton>) {
-            let mut names = HashMap::new();
-            for (id, field) in self.ivars().fields.borrow().iter().enumerate() {
-                let value = field.stringValue().to_string();
-                let trimmed = value.trim();
-                if !trimmed.is_empty() {
-                    names.insert(id as u32, trimmed.to_string());
-                }
-            }
+            let names = collect_names(
+                self.ivars()
+                    .fields
+                    .borrow()
+                    .iter()
+                    .map(|field| field.stringValue().to_string()),
+            );
             if let Some(tx) = self.ivars().cmd_tx.borrow().as_ref() {
                 let _ = tx.send_blocking(OverlayCommand::SetSpeakerNames(names));
             }
@@ -134,7 +163,8 @@ pub fn show_rename_dialog(
             }
         });
 
-        let rect = CGRect::new(CGPoint::new(260.0, 260.0), CGSize::new(380.0, 270.0));
+        let content_size = CGSize::new(DIALOG_WIDTH, dialog_height());
+        let rect = CGRect::new(CGPoint::new(260.0, 260.0), content_size);
         let app = NSApplication::sharedApplication(mtm);
         let style = NSWindowStyleMask::Titled | NSWindowStyleMask::Closable;
         let window = NSWindow::initWithContentRect_styleMask_backing_defer(
@@ -147,11 +177,17 @@ pub fn show_rename_dialog(
         window.setTitle(&NSString::from_str("Rename Speakers"));
         window.setReleasedWhenClosed(false);
 
-        let container = NSView::initWithFrame(NSView::alloc(mtm), rect);
+        let container = NSView::initWithFrame(
+            NSView::alloc(mtm),
+            CGRect::new(CGPoint::new(0.0, 0.0), content_size),
+        );
 
         let intro = NSTextField::initWithFrame(
             NSTextField::alloc(mtm),
-            CGRect::new(CGPoint::new(20.0, 218.0), CGSize::new(340.0, 34.0)),
+            CGRect::new(
+                CGPoint::new(20.0, intro_y()),
+                CGSize::new(DIALOG_WIDTH - 40.0, INTRO_HEIGHT),
+            ),
         );
         intro.setStringValue(&NSString::from_str(
             "Set display names for diarization speakers. Leave blank to use the default Speaker N label.",
@@ -162,9 +198,10 @@ pub fn show_rename_dialog(
         intro.setDrawsBackground(false);
         container.addSubview(&intro);
 
-        let mut fields = Vec::new();
-        for id in 0..MAX_SPEAKERS {
-            let y = 178.0 - (id as f64 * 38.0);
+        let mut fields = Vec::with_capacity(MAX_DIARIZATION_SPEAKERS);
+        for slot in 0..MAX_DIARIZATION_SPEAKERS {
+            let id = slot as u32;
+            let y = row_y(slot);
             let label = NSTextField::initWithFrame(
                 NSTextField::alloc(mtm),
                 CGRect::new(CGPoint::new(20.0, y + 3.0), CGSize::new(90.0, 22.0)),
@@ -178,7 +215,7 @@ pub fn show_rename_dialog(
 
             let field = NSTextField::initWithFrame(
                 NSTextField::alloc(mtm),
-                CGRect::new(CGPoint::new(115.0, y), CGSize::new(245.0, 26.0)),
+                CGRect::new(CGPoint::new(115.0, y), CGSize::new(245.0, FIELD_HEIGHT)),
             );
             if let Some(name) = current_names.get(&id) {
                 field.setStringValue(&NSString::from_str(name));
@@ -189,17 +226,26 @@ pub fn show_rename_dialog(
 
         let reset = NSButton::initWithFrame(
             NSButton::alloc(mtm),
-            CGRect::new(CGPoint::new(20.0, 18.0), CGSize::new(110.0, 30.0)),
+            CGRect::new(
+                CGPoint::new(20.0, BUTTON_Y),
+                CGSize::new(110.0, BUTTON_HEIGHT),
+            ),
         );
         reset.setTitle(&NSString::from_str("Reset Names"));
         let cancel = NSButton::initWithFrame(
             NSButton::alloc(mtm),
-            CGRect::new(CGPoint::new(170.0, 18.0), CGSize::new(90.0, 30.0)),
+            CGRect::new(
+                CGPoint::new(170.0, BUTTON_Y),
+                CGSize::new(90.0, BUTTON_HEIGHT),
+            ),
         );
         cancel.setTitle(&NSString::from_str("Cancel"));
         let apply = NSButton::initWithFrame(
             NSButton::alloc(mtm),
-            CGRect::new(CGPoint::new(270.0, 18.0), CGSize::new(90.0, 30.0)),
+            CGRect::new(
+                CGPoint::new(270.0, BUTTON_Y),
+                CGSize::new(90.0, BUTTON_HEIGHT),
+            ),
         );
         apply.setTitle(&NSString::from_str("Apply"));
 
@@ -230,5 +276,52 @@ pub fn show_rename_dialog(
                 _actions: actions,
             });
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_rename_covers_eight_speakers() {
+        assert_eq!(MAX_DIARIZATION_SPEAKERS, 8);
+        let names = collect_names((0..MAX_DIARIZATION_SPEAKERS).map(|id| format!(" Name {id} ")));
+        assert_eq!(names.len(), 8);
+        for id in 0..8u32 {
+            assert_eq!(names[&id], format!("Name {id}"));
+        }
+        assert_eq!(names[&7], "Name 7");
+
+        let values = (0..MAX_DIARIZATION_SPEAKERS).map(|id| {
+            if id == 7 {
+                " Eighth speaker ".to_string()
+            } else {
+                " ".to_string()
+            }
+        });
+        assert_eq!(
+            collect_names(values),
+            HashMap::from([(7, "Eighth speaker".to_string())])
+        );
+        assert!(collect_names(vec![String::new(); MAX_DIARIZATION_SPEAKERS]).is_empty());
+    }
+
+    #[test]
+    fn eight_speaker_layout_keeps_rows_and_actions_inside_content() {
+        assert_eq!(MAX_DIARIZATION_SPEAKERS, 8);
+        for slot in 0..MAX_DIARIZATION_SPEAKERS {
+            let y = row_y(slot);
+            assert!(y >= BUTTON_Y + BUTTON_HEIGHT + 16.0);
+            assert!(y + FIELD_HEIGHT < intro_y());
+            if slot > 0 {
+                assert!(y + FIELD_HEIGHT < row_y(slot - 1));
+            }
+        }
+        assert!(intro_y() + INTRO_HEIGHT < dialog_height());
+        for (x, width) in [(20.0, 110.0), (170.0, 90.0), (270.0, 90.0)] {
+            assert!(x >= 0.0 && x + width <= DIALOG_WIDTH);
+            assert!(BUTTON_Y >= 0.0 && BUTTON_Y + BUTTON_HEIGHT < dialog_height());
+        }
     }
 }

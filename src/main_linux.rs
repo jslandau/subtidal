@@ -8,13 +8,11 @@ use ort::ep::ExecutionProvider as _;
 use ort::ep::CUDA;
 use std::path::Path;
 
-/// Ensure the CUDA provider .so files live next to the installed binary.
-///
-/// ORT's provider discovery uses dladdr on its own static code, which resolves to
-/// the binary's directory (not CWD, not LD_LIBRARY_PATH). We symlink the provider
-/// .so files from the ORT build cache into the exe dir so ORT's GetRuntimePath
-/// finds them regardless of how subtidal was launched (CLI, app launcher, systemd).
+/// Stage the exact build-selected CUDA plugins beside the installed binary.
+/// The statically linked ORT core discovers providers relative to the executable.
+/// Never trust an existing peer library: it may belong to an older installation.
 pub fn ensure_provider_libs_next_to_exe() {
+    std::env::set_var("__SUBTIDAL_PROVIDER_STAGING_FAILED", "1");
     let exe_dir = match std::env::current_exe()
         .ok()
         .and_then(|p| std::fs::canonicalize(p).ok())
@@ -23,79 +21,97 @@ pub fn ensure_provider_libs_next_to_exe() {
         Some(d) => d,
         None => return,
     };
-
-    if exe_dir.join("libonnxruntime_providers_cuda.so").exists() {
-        return;
-    }
-
     let source_dir = match find_provider_dir() {
         Some(d) => d,
-        None => return,
+        None => {
+            eprintln!(
+                "warn: exact ORT {} provider distribution {} unavailable; GPU acceleration may be unavailable",
+                option_env!("ORT_DIST_VERSION").unwrap_or("unknown"),
+                option_env!("ORT_DIST_HASH").unwrap_or("unknown")
+            );
+            return;
+        }
     };
+    match stage_provider_pair(&source_dir, &exe_dir) {
+        Ok(()) => std::env::remove_var("__SUBTIDAL_PROVIDER_STAGING_FAILED"),
+        Err(err) => eprintln!(
+            "warn: failed to stage matching ORT providers beside {}: {err}",
+            exe_dir.display()
+        ),
+    }
+}
 
-    if source_dir == exe_dir {
-        return;
+/// Stage both provider libraries from one source directory beside an executable.
+/// The explicit paths keep filesystem failures testable without global state.
+pub(crate) fn stage_provider_pair(source: &Path, exe_dir: &Path) -> std::io::Result<()> {
+    let source_dir = std::fs::canonicalize(source)?;
+    for name in PROVIDER_LIBS {
+        if !source_dir.join(name).is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!(
+                    "provider source is missing {}",
+                    source_dir.join(name).display()
+                ),
+            ));
+        }
     }
 
-    for name in [
-        "libonnxruntime_providers_cuda.so",
-        "libonnxruntime_providers_shared.so",
-    ] {
+    for name in PROVIDER_LIBS {
         let src = source_dir.join(name);
         let dst = exe_dir.join(name);
-        if !src.exists() || dst.exists() {
+        if std::fs::canonicalize(&dst).ok().as_ref() == Some(&src) {
             continue;
         }
-        let _ = std::os::unix::fs::symlink(&src, &dst);
+        // Rename atomically replaces stale/broken peers. A failed replacement
+        // is reported rather than being mistaken for a usable installation.
+        let tmp = exe_dir.join(format!(".{name}.{}.tmp", std::process::id()));
+        let result =
+            std::os::unix::fs::symlink(&src, &tmp).and_then(|()| std::fs::rename(&tmp, &dst));
+        if let Err(err) = result {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(err);
+        }
+    }
+    Ok(())
+}
+
+const PROVIDER_LIBS: [&str; 2] = [
+    "libonnxruntime_providers_cuda.so",
+    "libonnxruntime_providers_shared.so",
+];
+
+/// Require the complete provider pair from one distribution, never mixed peers.
+fn complete_provider_dir(dir: std::path::PathBuf) -> Option<std::path::PathBuf> {
+    if PROVIDER_LIBS.iter().all(|name| dir.join(name).is_file()) {
+        std::fs::canonicalize(dir).ok()
+    } else {
+        None
     }
 }
 
-/// Locate this binary's ORT provider dir inside `~/.cache/ort.pyke.io/dfbin/`.
-///
-/// Keys on the exact `dist.hash` that `build.rs` embedded into the binary —
-/// not mtime — so a stale sibling build of a different ORT version can't be
-/// picked up and cause ABI mismatch. If the build-time hash is unavailable
-/// (e.g. built without ORT_PROVIDER_LIB_DIR resolution), returns None and lets
-/// the other layers of `find_provider_dir` handle it.
+/// Relocated installs can use only the exact target and archive hash in cache.
 fn find_ort_cache_dir() -> Option<std::path::PathBuf> {
-    let expected_hash = option_env!("ORT_DIST_HASH")?;
-    let cache_dir = dirs::cache_dir()?.join("ort.pyke.io/dfbin");
-    if !cache_dir.is_dir() {
-        return None;
-    }
-    for arch_entry in std::fs::read_dir(&cache_dir).ok()?.flatten() {
-        let candidate = arch_entry.path().join(expected_hash);
-        if candidate.join("libonnxruntime_providers_cuda.so").exists() {
-            return Some(candidate);
-        }
-    }
-    None
+    let hash = option_env!("ORT_DIST_HASH")?;
+    let target = option_env!("ORT_DIST_TARGET")?;
+    // Mirror ort-sys rc14 src/internal/dirs.rs (XDG root is used directly).
+    let root = std::env::var_os("ORT_CACHE_DIR")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("XDG_CACHE_HOME")
+                .map(std::path::PathBuf::from)
+                .filter(|p| p.is_absolute())
+        })
+        .or_else(|| dirs::home_dir().map(|h| h.join(".cache/ort.pyke.io")))?;
+    complete_provider_dir(root.join("dfbin").join(target).join(hash))
 }
 
-/// Check next to the binary (cargo run with symlinks in target/release/)
-/// or use the provider directory embedded at compile time by build.rs.
+/// Resolve only the build-selected archive; sibling executable libraries are
+/// staging destinations, not evidence of runtime version or feature identity.
 fn find_provider_dir() -> Option<std::path::PathBuf> {
-    // Check next to the binary (cargo run with symlinks in target/release/)
-    if let Some(exe_dir) = std::env::current_exe()
-        .ok()
-        .and_then(|p| std::fs::canonicalize(p).ok())
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-    {
-        if exe_dir.join("libonnxruntime_providers_cuda.so").exists() {
-            return Some(exe_dir);
-        }
-    }
-
-    // Use the provider directory embedded at compile time by build.rs
-    if let Some(dir) = option_env!("ORT_PROVIDER_LIB_DIR") {
-        let p = std::path::PathBuf::from(dir);
-        if p.join("libonnxruntime_providers_cuda.so").exists() {
-            return Some(p);
-        }
-    }
-
-    // Fallback: scan ort cache at runtime
-    find_ort_cache_dir()
+    option_env!("ORT_PROVIDER_LIB_DIR")
+        .and_then(|dir| complete_provider_dir(std::path::PathBuf::from(dir)))
+        .or_else(find_ort_cache_dir)
 }
 
 /// ORT's `GetRuntimePath` locates provider .so files relative to argv[0]'s parent
@@ -141,6 +157,9 @@ pub fn reexec_with_absolute_argv0_if_needed() {
 /// Detect CUDA usability by loading the model with CUDA in a subprocess.
 /// See the comment in `run_cuda_probe` for why this is a subprocess.
 pub fn cuda_available(model_dir: &Path) -> bool {
+    if std::env::var_os("__SUBTIDAL_PROVIDER_STAGING_FAILED").is_some() {
+        return false;
+    }
     use std::io::Read as _;
     use std::process::{Command, Stdio};
 
@@ -176,13 +195,30 @@ pub fn cuda_available(model_dir: &Path) -> bool {
 pub fn run_cuda_probe() -> ! {
     use std::io::Write as _;
 
-    let available = CUDA::default().is_available().unwrap_or(false);
+    let available = CUDA::is_available().unwrap_or(false);
     if !available {
         unsafe { libc::_exit(0) };
     }
 
+    if std::env::var_os("__SUBTIDAL_PROVIDER_STAGING_FAILED").is_some()
+        || subtidal::stt::ort_runtime::require_gpu_registration().is_err()
+    {
+        use std::io::Write as _;
+        let _ = std::io::stderr().write_all(b"CUDA provider registration or staging failed\n");
+        let _ = std::io::stderr().flush();
+        unsafe { libc::_exit(1) };
+    }
+
     if let Some(model_dir) = std::env::var_os("__SUBTIDAL_CUDA_PROBE_MODEL_DIR") {
+        let environment = match subtidal::stt::ort_runtime::environment() {
+            Ok(environment) => environment,
+            Err(error) => {
+                eprintln!("warn: CUDA probe runtime initialization failed: {error:#}");
+                unsafe { libc::_exit(1) };
+            }
+        };
         let config = parakeet_rs::ExecutionConfig::new()
+            .with_environment(environment)
             .with_execution_provider(parakeet_rs::ExecutionProvider::Cuda);
         let loaded =
             parakeet_rs::Nemotron::from_pretrained(std::path::Path::new(&model_dir), Some(config));
@@ -418,11 +454,14 @@ pub fn main() {
     let model_paths = models::ModelPaths::from_conventional_dirs();
     let cuda_probe_dir = model_paths.for_engine(&cfg.engine).to_path_buf();
     let probe_cache_path = dirs::cache_dir().map(|d| d.join("subtidal").join("cuda-probe.json"));
-    let use_cuda = {
+    let use_cuda = if std::env::var_os("__SUBTIDAL_PROVIDER_STAGING_FAILED").is_some() {
+        // A cached GPU verdict cannot override failed exact-provider staging.
+        false
+    } else {
         let key = probe_cache::ProbeKey::from_parts(
             option_env!("ORT_DIST_HASH").unwrap_or(""),
             &[models::models_dir()],
-            CUDA::default().is_available().unwrap_or(false),
+            CUDA::is_available().unwrap_or(false),
         );
         match &probe_cache_path {
             Some(cache) => {
@@ -436,6 +475,7 @@ pub fn main() {
 
     // Captions-enabled flag: read by STT thread to skip inference, by tray/overlay for UI.
     let captions_enabled = Arc::new(AtomicBool::new(!args.start_disabled));
+    let effective_gpu = Arc::new(AtomicBool::new(false));
 
     // Diarization-enabled flag: shared between STT thread and tray. Written by
     // tray toggle, read by STT thread each wake cycle.
@@ -463,6 +503,7 @@ pub fn main() {
             unload_after,
             model_paths: model_paths.clone(),
             use_cuda,
+            effective_gpu: Arc::clone(&effective_gpu),
             diarization_enabled: Arc::clone(&diarization_enabled),
             diarization_preset: cfg.diarization_preset.clone(),
             diarization_model_dir: models::diarization_model_dir(),
@@ -480,7 +521,7 @@ pub fn main() {
         locked: cfg.locked,
         above_fullscreen: cfg.above_fullscreen,
         active_engine: cfg.engine.clone(),
-        using_gpu: use_cuda,
+        effective_gpu: Arc::clone(&effective_gpu),
         diarization_enabled: Arc::clone(&diarization_enabled),
         overlay_tx: cmd_tx.clone(),
         audio_tx: audio_cmd_tx.clone(),

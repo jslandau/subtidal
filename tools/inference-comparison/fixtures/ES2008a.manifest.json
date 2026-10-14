@@ -1,0 +1,130 @@
+{
+  "schema_version": 1,
+  "meeting": "ES2008a",
+  "start": 0,
+  "duration": 240,
+  "eligibility": {
+    "speaker_seconds": {
+      "A": 91.24599999999998,
+      "B": 73.75399999999993,
+      "C": 10.954000000000008,
+      "D": 3.7590000000000074
+    },
+    "raw_speaker_seconds": {
+      "A": 96.541,
+      "B": 79.41099999999994,
+      "C": 12.954000000000008,
+      "D": 5.5090000000000074
+    },
+    "scoring_policy": {
+      "pyannote_metrics": "3.2.1",
+      "collar_seconds": 0.25,
+      "skip_overlap": false,
+      "uem": [0, 240],
+      "support": "per-speaker union after all-reference-boundary collar extrusion"
+    },
+    "active_set_transitions": 71,
+    "eligible": true
+  },
+  "selection_attempts": [
+    {
+      "duration": 120,
+      "speaker_seconds": {
+        "A": 81.118,
+        "B": 4.178999999999991,
+        "D": 2.536999999999999
+      },
+      "raw_speaker_seconds": {
+        "A": 83.868,
+        "B": 5.428999999999991,
+        "D": 3.536999999999999
+      },
+      "scoring_policy": {
+        "pyannote_metrics": "3.2.1",
+        "collar_seconds": 0.25,
+        "skip_overlap": false,
+        "uem": [0, 120],
+        "support": "per-speaker union after all-reference-boundary collar extrusion"
+      },
+      "active_set_transitions": 22,
+      "eligible": false
+    },
+    {
+      "duration": 240,
+      "speaker_seconds": {
+        "A": 91.24599999999998,
+        "B": 73.75399999999993,
+        "C": 10.954000000000008,
+        "D": 3.7590000000000074
+      },
+      "raw_speaker_seconds": {
+        "A": 96.541,
+        "B": 79.41099999999994,
+        "C": 12.954000000000008,
+        "D": 5.5090000000000074
+      },
+      "scoring_policy": {
+        "pyannote_metrics": "3.2.1",
+        "collar_seconds": 0.25,
+        "skip_overlap": false,
+        "uem": [0, 240],
+        "support": "per-speaker union after all-reference-boundary collar extrusion"
+      },
+      "active_set_transitions": 71,
+      "eligible": true
+    }
+  ],
+  "eligibility_metadata_correction": {
+    "prior_manifest_sha256": "93055faeb763d2e8ca0690be8b6b4e54364905c752b3f1b8ef40333fa128f615",
+    "reason": "Raw annotated speaker seconds were incorrectly used for eligibility. Corrected using pyannote.metrics 3.2.1 uemify with collar 0.25 and skip_overlap false, from unchanged official manual annotations.",
+    "asset_bytes_changed": false,
+    "recording_or_window_changed": false,
+    "actual_inference_started": false,
+    "preparation_note": "Initial missing binary launch was preparation failure only, not an inference trial."
+  },
+  "sources": {
+    "audio": "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus/ES2008a/audio/ES2008a.Mix-Headset.wav",
+    "annotations": "https://groups.inf.ed.ac.uk/ami/AMICorpusAnnotations/ami_public_manual_1.6.2.zip",
+    "license": "AMI corpus CC BY 4.0; see https://groups.inf.ed.ac.uk/ami/download/"
+  },
+  "reference_policy": "DER: manual transcriber segments; WER: timed w elements, no punc/nonlexical tags, clipped and chronological (speaker tie-break)",
+  "conversion": {
+    "command": [
+      "ffmpeg",
+      "-nostdin",
+      "-y",
+      "-i",
+      "/tmp/subtidal-inference-ami/ES2008a.Mix-Headset.wav",
+      "-t",
+      "240",
+      "-ar",
+      "16000",
+      "-ac",
+      "1",
+      "-c:a",
+      "pcm_s16le",
+      "-map_metadata",
+      "-1",
+      "/tmp/subtidal-inference-ami/fixture.wav"
+    ],
+    "ffmpeg_version": "ffmpeg version n9.0.2 Copyright (c) 2000-2026 the FFmpeg developers"
+  },
+  "files": {
+    "ES2008a.Mix-Headset.wav": {
+      "sha256": "65fcfc924e9bdb0388cbc3242a17bda88291ebc638f486e39a9ede78e92cb1e6",
+      "bytes": 33387564
+    },
+    "annotations.zip": {
+      "sha256": "b56e5babb2496b8795deeeda7e71178d7fbc9963f94276cf2a3f4b56ebbc9f9d",
+      "bytes": 22887865
+    },
+    "fixture.wav": {
+      "sha256": "d8f334a0261ce4e3e2e45c108311513f7548de0c6c2eaa73766d203d357e64e9",
+      "bytes": 7680078
+    },
+    "reference.json": {
+      "sha256": "660a8c261d51c74a49beb0e6d5f4896e59b7888aca8b6d3b3e21a0cc316fbc0a",
+      "bytes": 54812
+    }
+  }
+}

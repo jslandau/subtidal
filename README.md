@@ -11,6 +11,7 @@ All processing happens locally — no cloud services, no network requests (excep
 - **Auto-fallback** when the captured app exits: switches back to system output, with a desktop notification.
 - **Overlay modes**: Docked (edge-anchored, click-through) and Floating (draggable, lockable for click-through).
 - **Transcript mode**: native selectable reading window with timestamped paragraphs, Autoscroll controls, and Save… export.
+- **Optional speaker diarization**: Nemotron-3 v3 with eight session-local speaker rename slots. See [ORT and diarization update](docs/ort-v3-migration.md) for model and config compatibility.
 - **System tray** for toggling captions, switching audio source / engine / font / line count, mode and lock toggles.
 - **Hot-reloadable config** — edits to the TOML file land live without restart.
 
@@ -19,7 +20,7 @@ All processing happens locally — no cloud services, no network requests (excep
 ### Linux
 - Wayland compositor supporting `wlr-layer-shell` (Sway, Hyprland, niri, etc.)
 - PipeWire
-- CUDA (optional; CPU fallback otherwise)
+- CUDA 13 runtime libraries and cuDNN 9 for GPU inference with the pinned ORT build (optional; CPU fallback otherwise)
 - Rust toolchain
 
 ### macOS

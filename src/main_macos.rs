@@ -166,6 +166,7 @@ pub fn main() {
 
     // 10. Construct the STT pipeline configuration and spawn the thread.
     let pipeline_cfg = stt::PipelineConfig {
+        effective_gpu: Arc::new(AtomicBool::new(false)),
         engine_choice: Arc::clone(&engine_choice),
         captions_enabled: Arc::clone(&captions_enabled),
         unload_after: config.vram_unload_duration(), // F16: honors cfg.vram_unload_secs (shared default), same as Linux

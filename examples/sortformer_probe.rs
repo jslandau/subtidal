@@ -1,7 +1,7 @@
 // examples/sortformer_probe.rs
 //
-// Spike: measure whether NVIDIA Sortformer v2.1 streaming diarization can run
-// alongside Nemotron in real time, on Linux+CUDA and macOS+WebGPU. Throwaway.
+// Probe: measure whether NVIDIA Sortformer v3 streaming diarization can run
+// alongside Nemotron in real time, on Linux+CUDA and macOS+WebGPU.
 //
 // Usage:
 //   # Grab the pyannote-rs 6_speakers.wav fixture into
@@ -20,6 +20,7 @@
 //   - cold-load time for each model
 //   - p50 / p95 / max wall time for Sortformer::feed() and Nemotron::transcribe_chunk()
 //     over the audio, fed in 160 ms ticks (matches the live STT pipeline cadence)
+//   - v3 speaker IDs (0–7) and the selected streaming/postprocessing profiles
 //   - speaker segment list + concatenated transcript
 //
 // Memory delta is intentionally not measured in-process — run with
@@ -34,10 +35,11 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use hound::SampleFormat;
-use parakeet_rs::sortformer::{DiarizationConfig, Sortformer};
+use parakeet_rs::sortformer::{DiarizationConfig, Sortformer, StreamingProfile};
 use parakeet_rs::{ExecutionConfig, ExecutionProvider, Nemotron};
 use subtidal::models::{
-    diarization_model_dir, ensure_diarization_models, ensure_nemotron_models, nemotron_model_dir,
+    diarization_model_file_in, ensure_diarization_models, ensure_nemotron_models, models_dir,
+    nemotron_model_dir,
 };
 
 const TICK_SAMPLES: usize = 2560; // 160 ms @ 16 kHz — same cadence as the live pipeline
@@ -55,16 +57,36 @@ async fn main() -> Result<()> {
         .position(|a| a == "--config")
         .and_then(|i| args.get(i + 1))
         .map(String::as_str)
-        .unwrap_or("callhome");
+        .unwrap_or("default");
     let diar_config = match cfg_name {
-        "callhome" => DiarizationConfig::callhome(),
-        "dihard3" => DiarizationConfig::dihard3(),
-        other => anyhow::bail!("unknown --config {other} (callhome|dihard3)"),
+        "default" => DiarizationConfig::default(),
+        // Preserve the parakeet-rs 0.3.6 presets for existing probe invocations.
+        "callhome" => DiarizationConfig {
+            onset: 0.641,
+            offset: 0.561,
+            pad_onset: 0.229,
+            pad_offset: 0.079,
+            min_duration_on: 0.511,
+            min_duration_off: 0.296,
+            median_window: 11,
+        },
+        "dihard3" => DiarizationConfig {
+            onset: 0.56,
+            offset: 1.0,
+            pad_onset: 0.063,
+            pad_offset: 0.002,
+            min_duration_on: 0.007,
+            min_duration_off: 0.151,
+            median_window: 11,
+        },
+        other => anyhow::bail!("unknown --config {other} (default|callhome|dihard3)"),
     };
     let wav_path = args
         .iter()
-        .find(|a| !a.starts_with("--") && !["callhome", "dihard3"].contains(&a.as_str()))
-        .context("usage: sortformer_probe [--config callhome|dihard3] [--offline] <audio.wav>")?
+        .find(|a| !a.starts_with("--") && !["default", "callhome", "dihard3"].contains(&a.as_str()))
+        .context(
+            "usage: sortformer_probe [--config default|callhome|dihard3] [--offline] <audio.wav>",
+        )?
         .clone();
     eprintln!(
         "info: mode={} config={cfg_name}",
@@ -74,7 +96,8 @@ async fn main() -> Result<()> {
     eprintln!("info: ensuring models present...");
     ensure_nemotron_models().await?;
     ensure_diarization_models().await?;
-    let sortformer_path = diarization_model_dir().join("diar_streaming_sortformer_4spk-v2.1.onnx");
+    let sortformer_path = diarization_model_file_in(&models_dir());
+    let ort_environment = ort::init().build().context("initializing ONNX Runtime")?;
 
     let audio = load_wav_16k_mono(&wav_path)?;
     let duration_s = audio.len() as f32 / 16_000.0;
@@ -82,18 +105,23 @@ async fn main() -> Result<()> {
 
     // --- Load Sortformer ---------------------------------------------------
     let t0 = Instant::now();
+    let sortformer_exec = default_provider().with_environment(ort_environment.clone());
     let mut sortformer =
-        Sortformer::with_config(&sortformer_path, Some(default_provider()), diar_config)
+        Sortformer::with_config(&sortformer_path, Some(sortformer_exec), diar_config)
             .context("loading Sortformer")?;
+    sortformer
+        .set_profile(StreamingProfile::low_latency())
+        .context("setting Sortformer low-latency streaming profile")?;
     let sortformer_load_ms = t0.elapsed().as_secs_f64() * 1e3;
     eprintln!(
-        "info: sortformer cold-load: {sortformer_load_ms:.1} ms; chunk_len={}, right_context={}, latency={:.2}s",
+        "info: sortformer cold-load: {sortformer_load_ms:.1} ms; profile=low_latency, chunk_len={}, right_context={}, latency={:.2}s",
         sortformer.chunk_len, sortformer.right_context, sortformer.latency()
     );
 
     // --- Load Nemotron -----------------------------------------------------
     let t0 = Instant::now();
-    let mut nemotron = Nemotron::from_pretrained(nemotron_model_dir(), Some(default_provider()))
+    let nemotron_exec = default_provider().with_environment(ort_environment.clone());
+    let mut nemotron = Nemotron::from_pretrained(nemotron_model_dir(), Some(nemotron_exec))
         .context("loading Nemotron")?;
     let nemotron_load_ms = t0.elapsed().as_secs_f64() * 1e3;
     eprintln!("info: nemotron cold-load: {nemotron_load_ms:.1} ms");
@@ -162,6 +190,10 @@ async fn main() -> Result<()> {
 
     let distinct: std::collections::BTreeSet<usize> =
         all_segments.iter().map(|s| s.speaker_id).collect();
+    anyhow::ensure!(
+        distinct.iter().all(|&speaker_id| speaker_id < 8),
+        "Sortformer v3 returned speaker IDs outside the expected eight slots (0–7)"
+    );
     println!(
         "\n=== Speaker segments ({} segs, {} distinct speakers: {:?}) ===",
         all_segments.len(),

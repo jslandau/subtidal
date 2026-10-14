@@ -76,14 +76,14 @@ pub struct ModelFile {
 /// diarizer.
 const REPO: &str = "altunenes/parakeet-rs";
 
-/// Pinned HuggingFace revision for every model file we install. Pinning the
-/// commit is load-bearing: the repo's `main` has already moved since these
-/// bytes were captured (a `nemotron-3.5-asr-streaming-0.6b-onnx/` directory
-/// with different content now exists there). Fetching from `main` would
-/// yield bytes that fail digest verification. Moving to a newer model is a
-/// deliberate operator decision: change this revision together with the
-/// paths and digests below.
+/// Pinned HuggingFace revision for the English Nemotron model. The repo's
+/// `main` has moved since these bytes were captured; never fetch these files
+/// from `main` or from the independently pinned diarization revision.
 const PINNED_REVISION: &str = "12bca7934f692a845057af06c5861d5e99495318";
+
+/// Independent pin for Nemotron 3 streaming diarization. Update this revision,
+/// remote path and digest together when deliberately changing the diarizer.
+const DIARIZATION_REVISION: &str = "52f2deee40f20d7dc1f459416e9cd213fb9472df";
 
 /// The four files of the Nemotron streaming RNNT model, with the digests of
 /// the bytes this build is pinned to (captured 2026-09-21 from the locally
@@ -112,11 +112,13 @@ const NEMOTRON_FILES: &[ModelFile] = &[
     },
 ];
 
-/// The Sortformer v2.1 streaming diarization model file.
+/// Nemotron 3 streaming diarization ONNX at `DIARIZATION_REVISION`:
+/// 400,506,656 bytes, with the SHA-256 below matching its HuggingFace LFS oid.
+/// The distinct local filename leaves previously downloaded v2.1 bytes alone.
 const SORTFORMER_FILE: ModelFile = ModelFile {
-    remote: "diar_streaming_sortformer_4spk-v2.1.onnx",
-    local: "diar_streaming_sortformer_4spk-v2.1.onnx",
-    sha256: "f010a62654fd6d2adb70166265df2e53f5a766e354d2cce152b4c7966a04d02d",
+    remote: "nemotron-3-diarization/nemotron3_diar_v3.onnx",
+    local: "nemotron3_diar_v3.onnx",
+    sha256: "915e4fa23b0192ed9fadeb1cdd26847df986d50c92012d177be28d0343bbe03a",
 };
 
 #[derive(Clone, Debug)]
@@ -469,7 +471,8 @@ pub trait ModelSource: Sync {
     ) -> Pin<Box<dyn Future<Output = Result<PathBuf>> + Send + 'a>>;
 }
 
-/// Production source: hf-hub async API against the pinned revision.
+/// Production source for the English model's pinned revision. Kept as a unit
+/// type so existing callers can continue to construct `HfHubSource` directly.
 pub struct HfHubSource;
 
 impl ModelSource for HfHubSource {
@@ -478,18 +481,43 @@ impl ModelSource for HfHubSource {
         repo: &'a str,
         file: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<PathBuf>> + Send + 'a>> {
+        HfHubRevisionSource::ENGLISH.get(repo, file)
+    }
+}
+
+/// hf-hub source with an explicit revision, independent of the English pin.
+struct HfHubRevisionSource {
+    revision: &'static str,
+}
+
+impl HfHubRevisionSource {
+    const ENGLISH: Self = Self {
+        revision: PINNED_REVISION,
+    };
+    const DIARIZATION: Self = Self {
+        revision: DIARIZATION_REVISION,
+    };
+}
+
+impl ModelSource for HfHubRevisionSource {
+    fn get<'a>(
+        &'a self,
+        repo: &'a str,
+        file: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<PathBuf>> + Send + 'a>> {
         Box::pin(async move {
+            let revision = self.revision;
             let api = hf_hub::api::tokio::Api::new().context("initializing HuggingFace API")?;
             let pinned = hf_hub::Repo::with_revision(
                 repo.to_string(),
                 hf_hub::RepoType::Model,
-                PINNED_REVISION.to_string(),
+                revision.to_string(),
             );
             let repo_api = api.repo(pinned);
             repo_api
                 .get(file)
                 .await
-                .with_context(|| format!("downloading {file} from {repo}@{PINNED_REVISION}"))
+                .with_context(|| format!("downloading {file} from {repo}@{revision}"))
         })
     }
 }
@@ -582,7 +610,7 @@ pub async fn ensure_nemotron_models() -> Result<()> {
 /// Ensure the Sortformer diarization model is present and digest-verified.
 /// Failure policy (non-fatal) is decided by the caller.
 pub async fn ensure_diarization_models() -> Result<()> {
-    let source = HfHubSource;
+    let source = HfHubRevisionSource::DIARIZATION;
     let dest_dir = diarization_model_dir();
     std::fs::create_dir_all(&dest_dir)
         .with_context(|| format!("creating {}", dest_dir.display()))?;
@@ -653,8 +681,71 @@ mod tests {
             );
             assert!(!f.remote.is_empty() && !f.local.is_empty());
         }
-        // All files share one pinned revision.
-        assert_eq!(PINNED_REVISION.len(), 40, "revision must be a git sha1 hex");
+        for revision in [PINNED_REVISION, DIARIZATION_REVISION] {
+            assert_eq!(revision.len(), 40, "revision must be a git sha1 hex");
+            assert!(revision.bytes().all(|b| b.is_ascii_hexdigit()));
+        }
+    }
+
+    #[test]
+    fn english_model_pin_is_unchanged() {
+        assert_eq!(PINNED_REVISION, "12bca7934f692a845057af06c5861d5e99495318");
+        assert_eq!(HfHubRevisionSource::ENGLISH.revision, PINNED_REVISION);
+        let expected = [
+            (
+                "nemotron-speech-streaming-en-0.6b/encoder.onnx",
+                "encoder.onnx",
+                "4c3acc1fe273b710b818012919a53ac0d535b5cbb614eb65e240ddd9480df27b",
+            ),
+            (
+                "nemotron-speech-streaming-en-0.6b/encoder.onnx.data",
+                "encoder.onnx.data",
+                "2c43a65deb934ad505bf3a5c9f2e47bc59ed43daf8a806c64597e2030fcc3278",
+            ),
+            (
+                "nemotron-speech-streaming-en-0.6b/decoder_joint.onnx",
+                "decoder_joint.onnx",
+                "3111f21cc147631e6038422239d974547c80915b8a7e5139a67fa5bed63d4a31",
+            ),
+            (
+                "nemotron-speech-streaming-en-0.6b/tokenizer.model",
+                "tokenizer.model",
+                "07d4e5a63840a53ab2d4d106d2874768143fb3fbdd47938b3910d2da05bfb0a9",
+            ),
+        ];
+        let actual: Vec<_> = NEMOTRON_FILES
+            .iter()
+            .map(|f| (f.remote, f.local, f.sha256))
+            .collect();
+        assert_eq!(actual, expected);
+        let _source = HfHubSource; // Preserve direct unit-type construction.
+    }
+
+    #[test]
+    fn diarization_v3_has_independent_exact_pin() {
+        assert_eq!(REPO, "altunenes/parakeet-rs");
+        assert_eq!(
+            DIARIZATION_REVISION,
+            "52f2deee40f20d7dc1f459416e9cd213fb9472df"
+        );
+        assert_eq!(
+            HfHubRevisionSource::DIARIZATION.revision,
+            DIARIZATION_REVISION
+        );
+        assert_ne!(DIARIZATION_REVISION, PINNED_REVISION);
+        assert_eq!(
+            SORTFORMER_FILE.remote,
+            "nemotron-3-diarization/nemotron3_diar_v3.onnx"
+        );
+        assert_eq!(SORTFORMER_FILE.local, "nemotron3_diar_v3.onnx");
+        assert_eq!(
+            SORTFORMER_FILE.sha256,
+            "915e4fa23b0192ed9fadeb1cdd26847df986d50c92012d177be28d0343bbe03a"
+        );
+        assert_eq!(
+            diarization_model_file_in(Path::new("/base")),
+            Path::new("/base/diarization/nemotron3_diar_v3.onnx")
+        );
     }
 
     // ------------------------------------------------------------------
@@ -957,6 +1048,50 @@ mod tests {
         assert!(err.to_string().contains("pinned digest"));
         assert!(!dest.exists());
         assert_no_temps(dir.path());
+    }
+
+    #[tokio::test]
+    async fn ensure_v3_filename_leaves_old_diarization_file_untouched() {
+        struct FixtureSource(PathBuf);
+        impl ModelSource for FixtureSource {
+            fn get<'a>(
+                &'a self,
+                repo: &'a str,
+                file: &'a str,
+            ) -> Pin<Box<dyn Future<Output = Result<PathBuf>> + Send + 'a>> {
+                Box::pin(async move {
+                    assert_eq!(repo, REPO);
+                    assert_eq!(file, SORTFORMER_FILE.remote);
+                    Ok(self.0.clone())
+                })
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let dest = diarization_model_file_in(dir.path());
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        let old = dest
+            .parent()
+            .unwrap()
+            .join("diar_streaming_sortformer_4spk-v2.1.onnx");
+        std::fs::write(&old, b"previously downloaded v2.1 bytes").unwrap();
+        let fetched = dir.path().join("fixture.onnx");
+        std::fs::write(&fetched, FIXTURE).unwrap();
+        let outcome = ensure_one_model(
+            &FixtureSource(fetched),
+            REPO,
+            SORTFORMER_FILE.remote,
+            &dest,
+            FIXTURE_SHA256,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, InstallOutcome::Installed);
+        verify_digest(&dest, FIXTURE_SHA256).unwrap();
+        assert_eq!(
+            std::fs::read(&old).unwrap(),
+            b"previously downloaded v2.1 bytes"
+        );
+        assert!(!quarantine_path(&old).exists());
     }
 
     #[tokio::test]
