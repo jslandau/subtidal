@@ -208,7 +208,7 @@ unsafe fn read_process_bundle_id(obj: AudioObjectID) -> Result<Option<String>> {
     // Convert CFString to Rust String. AudioObjectGetPropertyData returns a
     // +1 Create-rule reference; wrap_under_create_rule adopts it so Drop
     // releases it (from_void's ItemRef never releases — a per-call leak).
-    let cf_str = CFString::wrap_under_create_rule(cf_string);
+    let cf_str = CFString::wrap_under_create_rule(cf_string.cast());
     let bundle = cf_str.to_string();
 
     if bundle.is_empty() {

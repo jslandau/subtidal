@@ -18,6 +18,23 @@ pub fn distribution_hash(target: &str) -> Option<&'static str> {
 
 fn main() {
     let target = std::env::var("TARGET").unwrap_or_default();
+    if target.ends_with("apple-darwin") {
+        // The static ORT CoreML objects reference Clang's availability runtime.
+        // Rust links with -nodefaultlibs, so request that archive explicitly.
+        let output = std::process::Command::new("clang")
+            .arg("-print-file-name=libclang_rt.osx.a")
+            .output()
+            .expect("clang is required for macOS builds");
+        assert!(output.status.success(), "failed to locate Clang runtime");
+        let archive = String::from_utf8(output.stdout).expect("Clang runtime path is UTF-8");
+        let archive = archive.trim();
+        assert!(
+            std::path::Path::new(archive).is_file(),
+            "Clang runtime archive not found"
+        );
+        println!("cargo:rustc-link-arg={archive}");
+        return;
+    }
     if !target.contains("linux") {
         return;
     }

@@ -486,7 +486,7 @@ pub fn set_caption_text(
     let visual_lines = ((measured_h / nat_line_h).round() as usize)
         .max(text.lines().count().max(1))
         .min(appearance.max_lines);
-    let target_height = panel_height_for_lines(appearance.font_size, visual_lines);
+    let target_height = panel_height_for_lines(appearance.font_size as f32, visual_lines);
 
     if (current.size.height - target_height).abs() > 0.5 {
         let top = current.origin.y + current.size.height;

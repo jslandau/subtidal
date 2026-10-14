@@ -18,8 +18,45 @@ pub fn main() {
     // thread, but be explicit.
     let _mtm = MainThreadMarker::new().expect("main_macos::main must run on the main thread");
 
-    // 2. Load config (use the neutral Config::load() which defaults gracefully).
-    let mut config = Config::load();
+    use clap::Parser;
+
+    #[derive(Parser, Debug)]
+    #[command(
+        name = "subtidal",
+        about = "Real-time speech-to-text overlay for macOS"
+    )]
+    struct Args {
+        /// Path to config file
+        #[arg(long)]
+        config: Option<std::path::PathBuf>,
+        /// Override STT engine for this session (nemotron|parakeet)
+        #[arg(long)]
+        engine: Option<String>,
+        /// Reset config to defaults before starting
+        #[arg(long)]
+        reset_config: bool,
+        /// Start with captions disabled
+        #[arg(long)]
+        start_disabled: bool,
+    }
+
+    let args = Args::parse();
+    let mut config = if args.reset_config {
+        Config::default()
+    } else if let Some(path) = &args.config {
+        Config::load_from(path).unwrap_or_else(|e| {
+            eprintln!("warn: failed to load config from {}: {e}", path.display());
+            Config::default()
+        })
+    } else {
+        Config::load()
+    };
+    if let Some(name) = &args.engine {
+        config.engine = Config::parse_engine(name).unwrap_or_else(|| {
+            eprintln!("Unknown engine '{name}'. Valid engines: nemotron, parakeet.");
+            std::process::exit(1);
+        });
+    }
 
     // 3. Ensure selected engine model files are present before starting.
     let model_paths = models::ModelPaths::from_conventional_dirs();
@@ -128,7 +165,7 @@ pub fn main() {
     let engine_choice = Arc::new(arc_swap::ArcSwap::new(Arc::new(config.engine.clone())));
 
     // 7. Construct shared state: captions_enabled flag.
-    let captions_enabled: CaptionsEnabled = Arc::new(AtomicBool::new(true));
+    let captions_enabled: CaptionsEnabled = Arc::new(AtomicBool::new(!args.start_disabled));
 
     // Diarization-enabled flag: shared between STT thread and tray.
     let diarization_enabled = Arc::new(AtomicBool::new(config.diarization_enabled));

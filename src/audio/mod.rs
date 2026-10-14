@@ -43,5 +43,6 @@ mod impl_macos;
 #[cfg(target_os = "macos")]
 pub use impl_macos::{
     bundle_to_label, enumerate_process_snapshot, list_sources,
-    notify_request_authorization_best_effort, start_audio_thread, AudioCommand,
+    notify_request_authorization_best_effort, sources_from_process_snapshot, start_audio_thread,
+    AudioCommand,
 };

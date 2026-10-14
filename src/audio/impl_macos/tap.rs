@@ -516,7 +516,7 @@ unsafe fn read_tap_uid(tap_id: AudioObjectID) -> Result<String> {
     // AudioObjectGetPropertyData returns a +1 Create-rule reference;
     // wrap_under_create_rule adopts it so Drop releases it (from_void's
     // ItemRef never releases — a per-call leak).
-    let cf_str = CFString::wrap_under_create_rule(cf_string);
+    let cf_str = CFString::wrap_under_create_rule(cf_string.cast());
     Ok(cf_str.to_string())
 }
 

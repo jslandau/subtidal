@@ -74,6 +74,12 @@ pub struct TrayState {
 struct MainHop<T>(T);
 unsafe impl<T> Send for MainHop<T> {}
 
+impl<T> MainHop<T> {
+    fn into_inner(self) -> T {
+        self.0
+    }
+}
+
 /// Ivars for the `TrayActions` NSObject subclass.
 ///
 /// `Retained<NSMenuItem>` ivars are sound because `TrayActions` is
@@ -414,29 +420,17 @@ define_class!(
                 + 1;
             let generation_counter = ivars.state.audio_refresh_generation.clone();
 
+            let handles = MainHop((this, state, audio_item));
             let spawn = std::thread::Builder::new()
                 .name("tray-audio-enum".into())
                 .spawn(move || {
                     // (a) Core Audio enumeration off main. No AppKit here.
                     let next = crate::audio::enumerate_process_snapshot().ok();
                     // (b) Marshal raw results + AppKit handles to main.
-                    let hop = MainHop((
-                        this,
-                        state,
-                        audio_item,
-                        next,
-                        refresh_generation,
-                        generation_counter,
-                    ));
+                    let hop = (handles, next, refresh_generation, generation_counter);
                     dispatch2::DispatchQueue::main().exec_async(move || {
-                        let MainHop((
-                            this,
-                            state,
-                            audio_item,
-                            next,
-                            refresh_generation,
-                            generation_counter,
-                        )) = hop;
+                        let (handles, next, refresh_generation, generation_counter) = hop;
+                        let (this, state, audio_item) = handles.into_inner();
                         if generation_counter.load(Ordering::Acquire) != refresh_generation {
                             return;
                         }

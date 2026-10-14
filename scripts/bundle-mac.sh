@@ -12,6 +12,8 @@
 
 set -euo pipefail
 
+export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-14.4}"
+
 PROFILE="release"
 if [[ "${1:-}" == "--debug" ]]; then
   PROFILE="debug"

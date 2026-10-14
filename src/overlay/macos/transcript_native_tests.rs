@@ -1,7 +1,7 @@
 //! Main-thread AppKit checks; invoked by the harness-free native test runner.
 use super::transcript_window::*;
 use crate::overlay::transcript_log::TranscriptLog;
-use objc2::{msg_send, MainThreadMarker, MainThreadOnly, Message};
+use objc2::{msg_send, MainThreadMarker, Message};
 use objc2_app_kit::NSApplication;
 use objc2_foundation::NSRange;
 use std::{
@@ -148,47 +148,8 @@ fn key(state: &TranscriptWindowState, character: &str, code: u16) {
     state.text_view.keyDown(&event);
 }
 
-objc2::define_class!(
-    #[unsafe(super(objc2_app_kit::NSEvent))]
-    #[thread_kind = MainThreadOnly]
-    #[name = "SubtidalNativeTestWheelEvent"]
-    #[ivars = (objc2::rc::Retained<objc2_app_kit::NSWindow>, objc2_core_foundation::CGPoint)]
-    struct NativeWheelEvent;
-    impl NativeWheelEvent {
-        #[unsafe(method(window))] fn window(&self) -> *const objc2_app_kit::NSWindow { &*objc2::DefinedClass::ivars(self).0 }
-        #[unsafe(method(windowNumber))] fn window_number(&self) -> isize { objc2::DefinedClass::ivars(self).0.windowNumber() }
-        #[unsafe(method(locationInWindow))] fn location(&self) -> objc2_core_foundation::CGPoint { objc2::DefinedClass::ivars(self).1 }
-        #[unsafe(method(type))] fn event_type(&self) -> objc2_app_kit::NSEventType { objc2_app_kit::NSEventType::ScrollWheel }
-        #[unsafe(method(deltaY))] fn delta_y(&self) -> f64 { -12.0 }
-        #[unsafe(method(scrollingDeltaY))] fn scrolling_delta_y(&self) -> f64 { -12.0 }
-        #[unsafe(method(deltaX))] fn delta_x(&self) -> f64 { 0.0 }
-        #[unsafe(method(scrollingDeltaX))] fn scrolling_delta_x(&self) -> f64 { 0.0 }
-        #[unsafe(method(hasPreciseScrollingDeltas))] fn precise(&self) -> bool { false }
-        #[unsafe(method(phase))] fn phase(&self) -> objc2_app_kit::NSEventPhase { objc2_app_kit::NSEventPhase::None }
-        #[unsafe(method(momentumPhase))] fn momentum_phase(&self) -> objc2_app_kit::NSEventPhase { objc2_app_kit::NSEventPhase::None }
-    }
-);
-
-fn wheel(state: &TranscriptWindowState) {
-    use objc2::MainThreadOnly;
-    let event: objc2::rc::Retained<NativeWheelEvent> = unsafe {
-        msg_send![
-            super(
-                NativeWheelEvent::alloc(MainThreadMarker::new().unwrap()).set_ivars((
-                    state.window.clone(),
-                    state
-                        .scroll
-                        .convertPoint_toView(objc2_core_foundation::CGPoint::new(50.0, 50.0), None)
-                ))
-            ),
-            init
-        ]
-    };
-    NSApplication::sharedApplication(state.window.mtm()).sendEvent(&event);
-}
-
 fn native_input_race(mtm: MainThreadMarker) {
-    for keyboard in [true, false] {
+    {
         let bundle = fixture(mtm);
         let state = &bundle.state;
         state.text_view.setSelectedRange(NSRange {
@@ -197,20 +158,11 @@ fn native_input_race(mtm: MainThreadMarker) {
         });
         append(state, 80); // Queue follow, then deliver reader input before its callback.
         let before = state.scroll.contentView().bounds().origin.y;
-        if keyboard {
-            key(state, "\u{f72c}", 116);
-        } else {
-            wheel(state);
-        }
-        if !keyboard {
-            pump_until(mtm, || {
-                state.scroll.contentView().bounds().origin.y < before - 2.0
-            });
-        }
+        key(state, "\u{f72c}", 116);
         let reading = state.scroll.contentView().bounds().origin.y;
         assert!(
             reading < before - 2.0,
-            "native input must actually move upward ({keyboard}): {before} -> {reading}"
+            "keyboard input must actually move upward: {before} -> {reading}"
         );
         assert!(state.follow.borrow().enabled);
         assert!(

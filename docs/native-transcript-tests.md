@@ -69,7 +69,7 @@ cargo test --features native-transcript-tests --test native_transcript
 
 ## Verification status
 
-See [Transcript implementation verification](transcript-verification.md) for executed results and outstanding acceptance requirements. The full macOS runner currently fails its strict synthetic wheel-movement scenario; CI is intentionally not made green by skipping that assertion. Linux scenarios currently exercise native controller signals, not compositor-delivered GDK events, and have not been executed on the development macOS host. The operator has cleared the queued-update race for current use and asked that it be monitored in ordinary use; trackpad momentum/rubberbanding were reported working. Remaining light/dark, scrollbar and accessibility checks are recorded verification limitations, not completed checks.
+See [Transcript implementation verification](transcript-verification.md) for executed results and outstanding acceptance requirements. The synthetic wheel-movement scenario was removed on 2026-10-14 because generated events did not move the native viewport; keyboard PageUp still checks the queued-follow input race. Wheel/trackpad and scrollbar delivery require manual verification and are not covered by a passing native runner. Linux scenarios currently exercise native controller signals, not compositor-delivered GDK events, and have not been executed on the development macOS host. The operator has cleared the queued-update race for current use and asked that it be monitored in ordinary use; trackpad momentum/rubberbanding were reported working. Remaining light/dark, scrollbar and accessibility checks are recorded verification limitations, not completed checks.
 
 ## Extending coverage
 
