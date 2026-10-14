@@ -66,23 +66,18 @@ jobs:
           set -eu
           cargo test --lib --no-run
 
-          # build.rs discovers the ort-sys distribution by following this
-          # provider symlink in target/debug. The ORT runtime is alongside the
-          # resolved provider library; never search model directories.
+          # ort-sys rc14 statically links the core runtime and copies shared
+          # provider libraries into target/debug. Resolve the provider's pinned
+          # distribution for loader setup; never search model directories.
           provider_link="$(find target/debug -name 'libonnxruntime_providers_cuda.so' -print -quit)"
           if [ -z "$provider_link" ] || [ ! -e "$provider_link" ]; then
             echo "::error::ort-sys provider library was not produced under target/debug"
             exit 1
           fi
           ort_dir="$(dirname "$(realpath "$provider_link")")"
-          ort_runtime="$ort_dir/libonnxruntime.so"
-          if [ ! -e "$ort_runtime" ]; then
-            echo "::error::ORT runtime missing beside resolved provider: $ort_runtime"
-            exit 1
-          fi
           printf 'LD_LIBRARY_PATH=%s:%s:%s\n' \
             "$ort_dir" "$PWD/target/debug" "$PWD/target/debug/deps" >> "$GITHUB_ENV"
-          echo "Using ORT runtime from $ort_runtime"
+          echo "Using ORT provider libraries from $ort_dir"
 
       - name: Run ordinary Linux library tests
         run: cargo test --lib

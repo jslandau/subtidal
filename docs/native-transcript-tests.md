@@ -49,7 +49,7 @@ sudo ldconfig
 
 Before compiling, CI requires `pkg-config --atleast-version=4.10 gtk4`, `pkg-config --atleast-version=1.0 gtk4-layer-shell-0`, and `xvfb-run` to succeed. CI lists the filtered ignored test and requires exactly one matching test before executing it, so a renamed or missing test cannot report success with zero tests run.
 
-`build.rs` finds the ORT provider library produced by `ort-sys` in the Cargo target output/cache and follows it to its canonical runtime distribution. CI applies the same dependency-output discovery pattern: after `cargo test --lib --no-run`, resolve `libonnxruntime_providers_cuda.so` under `target/debug`, require the adjacent `libonnxruntime.so`, and add that directory to `LD_LIBRARY_PATH`. This is runtime loader setup only; CI must not use or fetch model files to locate ORT.
+The pinned `ort-sys` rc.14 distribution statically links the core ONNX Runtime into the test executable; it does not require an adjacent `libonnxruntime.so`. Shared execution-provider libraries are still copied into Cargo's target output. After `cargo test --lib --no-run`, CI resolves `libonnxruntime_providers_cuda.so` under `target/debug` and adds its distribution directory plus `target/debug` and `target/debug/deps` to `LD_LIBRARY_PATH`. This is provider loader setup only; CI must not use or fetch model files to locate ORT.
 
 ### Local run
 
