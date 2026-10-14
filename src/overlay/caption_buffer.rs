@@ -231,9 +231,11 @@ impl CaptionBuffer {
             }
         }
 
-        // Rebuild tail for overlap detection.
+        // Rebuild tail for overlap detection. The 60-byte window start must be
+        // snapped forward to a char boundary — `display.len() - 60` can land
+        // mid-scalar in multibyte text and `display[tail_start..]` would panic.
         let display = self.all_text();
-        let tail_start = display.len().saturating_sub(60);
+        let tail_start = snap_to_char_boundary(&display, display.len().saturating_sub(60));
         self.last_tail = display[tail_start..].to_string();
     }
 
@@ -263,20 +265,39 @@ impl CaptionBuffer {
     /// Remove overlapping prefix between existing tail and new text.
     /// Only triggers on overlaps of 4+ characters to avoid false positives
     /// from coincidental single-character matches.
+    ///
+    /// Case-insensitive matching is done on a per-scalar lowercase expansion
+    /// (`char::to_lowercase`, which maps `İ` U+0130 to the two chars `i` +
+    /// U+0307), and any cut into the original `new` string happens at the
+    /// byte offset recorded for the *original* scalar that produced the last
+    /// matched derived char. Slicing `new` by a byte offset derived from the
+    /// lowercased stream (whose byte length can differ, e.g. `İ` is 2 bytes
+    /// but lowercases to 3) panics on multilingual input; that is why the
+    /// mapping exists.
     fn remove_overlap(tail: &str, new: &str) -> String {
         if tail.is_empty() {
             return new.to_string();
         }
-        let tail_lower = tail.to_lowercase();
-        let new_lower = new.to_lowercase();
+        let tail_map = LowercaseExpansion::new(tail);
+        let new_map = LowercaseExpansion::new(new);
 
-        // Only consider overlaps of 4+ characters to avoid false positives.
-        let max_check = tail_lower.len().min(new_lower.len());
+        // Only consider overlaps of 4+ derived chars to avoid false positives.
+        let max_check = tail_map.derived.len().min(new_map.derived.len());
         for overlap_len in (4..=max_check).rev() {
-            let tail_suffix = &tail_lower[tail_lower.len() - overlap_len..];
-            let new_prefix = &new_lower[..overlap_len];
-            if tail_suffix == new_prefix {
-                let remainder = new[overlap_len..].trim_start();
+            let tail_start = tail_map.derived.len() - overlap_len;
+            // A match is only valid when it consumes whole scalars on both
+            // sides: it must start at a scalar boundary in the tail's
+            // expansion and end at one in the new text's expansion.
+            if !tail_map.starts_scalar(tail_start) || !new_map.ends_scalar(overlap_len - 1) {
+                continue;
+            }
+            if tail_map.derived[tail_start..] == new_map.derived[..overlap_len] {
+                // Cut `new` after the original scalar whose expansion produced
+                // the last matched derived char — never by a derived byte count.
+                let last_matched = overlap_len - 1;
+                let scalar = new_map.source_scalar[last_matched];
+                let orig_cut = new_map.scalar_orig_end[scalar];
+                let remainder = new[orig_cut..].trim_start();
                 if !remainder.is_empty() {
                     return remainder.to_string();
                 }
@@ -295,9 +316,10 @@ impl CaptionBuffer {
         let cutoff = Instant::now() - std::time::Duration::from_secs(self.expire_secs);
         if self.lines[0].last_active <= cutoff {
             self.lines.remove(0);
-            // Rebuild tail after removal.
+            // Rebuild tail after removal (snapped to a char boundary — the
+            // 60-byte window start can land mid-scalar in multibyte text).
             let display = self.all_text();
-            let tail_start = display.len().saturating_sub(60);
+            let tail_start = snap_to_char_boundary(&display, display.len().saturating_sub(60));
             self.last_tail = display[tail_start..].to_string();
             true
         } else {
@@ -424,6 +446,66 @@ fn label_for(names: &HashMap<u32, String>, speaker_id: Option<u32>) -> Option<St
             .cloned()
             .unwrap_or_else(|| format!("Speaker {}", id + 1))
     })
+}
+
+/// Per-scalar lowercase expansion map for overlap dedup.
+///
+/// For every scalar of the source string we record its `char::to_lowercase()`
+/// expansion (usually one char; `İ` U+0130 expands to `i` + U+0307), the index
+/// of the source scalar each derived char came from, and the byte offset just
+/// past each source scalar in the *original* string. Comparisons run on the
+/// concatenated derived streams; cuts into the original string use the recorded
+/// scalar boundaries, so a derived char/byte count can never slice mid-char.
+///
+/// This preserves the existing equivalence semantics (`to_lowercase`, not full
+/// case folding — `ß` stays `ß` and does not become `ss`).
+struct LowercaseExpansion {
+    /// Concatenated lowercase expansion of every scalar.
+    derived: Vec<char>,
+    /// Source scalar index for each derived char.
+    source_scalar: Vec<usize>,
+    /// Byte offset just past each source scalar in the original string.
+    scalar_orig_end: Vec<usize>,
+}
+
+impl LowercaseExpansion {
+    fn new(s: &str) -> Self {
+        let mut map = LowercaseExpansion {
+            derived: Vec::new(),
+            source_scalar: Vec::new(),
+            scalar_orig_end: Vec::new(),
+        };
+        for (idx, (orig_start, ch)) in s.char_indices().enumerate() {
+            map.scalar_orig_end.push(orig_start + ch.len_utf8());
+            for lc in ch.to_lowercase() {
+                map.derived.push(lc);
+                map.source_scalar.push(idx);
+            }
+        }
+        map
+    }
+
+    /// True when derived index `i` is the first char of its source scalar.
+    fn starts_scalar(&self, i: usize) -> bool {
+        i == 0 || self.source_scalar[i] != self.source_scalar[i - 1]
+    }
+
+    /// True when derived index `i` is the last char of its source scalar.
+    fn ends_scalar(&self, i: usize) -> bool {
+        i + 1 == self.derived.len() || self.source_scalar[i] != self.source_scalar[i + 1]
+    }
+}
+
+/// Advance `start` forward to the next char boundary of `s` (std's
+/// `floor_char_boundary` is still unstable, and we need the *ceiling* —
+/// snapping the tail start forward never swallows extra text mid-scalar).
+/// `start <= s.len()` must hold; `s.len()` is returned when past the end.
+fn snap_to_char_boundary(s: &str, start: usize) -> usize {
+    let mut i = start.min(s.len());
+    while i < s.len() && !s.is_char_boundary(i) {
+        i += 1;
+    }
+    i
 }
 
 #[cfg(test)]
@@ -1016,5 +1098,115 @@ mod tests {
             "expected corrected label, got {:?}",
             buf.lines[0].text
         );
+    }
+
+    // ------------------------------------------------------------------
+    // AC.1 (F1): UTF-8-safe overlap/tail handling. Non-ASCII captions must
+    // never panic the GUI thread.
+    // ------------------------------------------------------------------
+
+    /// `İ` U+0130 lowercases to two chars (`i` + U+0307) whose byte length
+    /// (3) differs from the original scalar's (2). Overlap matches that span
+    /// the expansion must cut `new` at the recorded original-scalar boundary.
+    #[test]
+    fn overlap_handles_lowercase_expansion() {
+        // The match consumes "İabc" (derived: i, U+0307, a, b, c) and the cut
+        // must land after byte 5 of "İabc def" — not after 6 derived bytes.
+        assert_eq!(CaptionBuffer::remove_overlap("İabc", "İabc def"), "def");
+        // Expansion in the tail too.
+        assert_eq!(CaptionBuffer::remove_overlap("xİy", "xİyz tail"), "z tail");
+        // ASCII behaviour is unchanged (minimum 4-char match still applies).
+        assert_eq!(CaptionBuffer::remove_overlap("abcd", "abcde"), "e");
+        assert_eq!(CaptionBuffer::remove_overlap("hello worl", "world"), "d");
+        // Below-minimum matches still do not dedup.
+        assert_eq!(CaptionBuffer::remove_overlap("abc", "abc def"), "abc def");
+    }
+
+    /// Multibyte text must never panic in remove_overlap, even when the old
+    /// byte-offset arithmetic would slice mid-char or run past the end.
+    #[test]
+    fn overlap_multibyte_no_panic() {
+        // Derived stream (5 chars) is one char shorter than the old lowercased
+        // *byte* arithmetic assumed: "İ" (2 bytes) -> "i" + U+0307 (3 bytes),
+        // so the old code computed overlap_len = 9 and sliced new[9..] on an
+        // 8-byte string — out of bounds. The full-tail match leaves no
+        // remainder, so the whole text is returned unchanged.
+        let out = CaptionBuffer::remove_overlap("i̇ééé", "İééé");
+        assert_eq!(out, "İééé");
+
+        // CJK: overlap dedup still works across 3-byte scalars.
+        assert_eq!(
+            CaptionBuffer::remove_overlap("预置测试", "预置测试继续"),
+            "继续"
+        );
+        // CJK tail with unrelated ASCII new text: no panic, no dedup.
+        let out = CaptionBuffer::remove_overlap("你好世界尾巴", "aaaaaa");
+        assert_eq!(out, "aaaaaa");
+
+        // 4-byte emoji scalars: dedup and no-panic paths.
+        assert_eq!(CaptionBuffer::remove_overlap("🎮🎮🎮🎮", "🎮🎮🎮🎮!"), "!");
+        let out = CaptionBuffer::remove_overlap("🎮🎮🎮🎮 tail", "unrelated");
+        assert_eq!(out, "unrelated");
+
+        // Mixed: multibyte tail, ASCII overlap prefix of new.
+        assert_eq!(
+            CaptionBuffer::remove_overlap("结束 hello", "hello world"),
+            "world"
+        );
+    }
+
+    /// The 60-byte tail window can start mid-scalar in multibyte text; both
+    /// `push_inner`'s and `expire`'s tail rebuild must snap forward to the
+    /// next char boundary instead of panicking.
+    #[test]
+    fn tail_cut_snaps_to_char_boundary() {
+        // push_inner variant: 21 CJK scalars (63 bytes) + "abcde" = 68 bytes;
+        // tail_start = 68 - 60 = 8, which is mid-scalar (boundaries at 0,3,6,9,...).
+        let mut buf = CaptionBuffer::new(3, 200, 8);
+        let word = format!("{}abcde", "世".repeat(21));
+        assert_eq!(word.len(), 68);
+        assert!(!word.is_char_boundary(8));
+        buf.push(format!(" {word}"));
+        let expected_tail = &word[9..]; // snapped forward to boundary 9
+        assert_eq!(buf.last_tail, expected_tail);
+
+        // expire variant: same layout, age the first line, expire it, and the
+        // rebuild path (which re-derives the tail from remaining text) must
+        // not panic when the window start lands mid-scalar. max_chars 40
+        // forces "second line" onto its own line (the 68-byte word itself
+        // overflows any line budget and lands whole, as word-fill does).
+        let mut buf2 = CaptionBuffer::new(2, 40, 1);
+        buf2.push(format!(" {word}"));
+        buf2.push(" second line".to_string());
+        assert_eq!(buf2.lines.len(), 2);
+        // display = word + "second line" = 68 + 11 = 79 bytes; tail_start = 19
+        // (mid-scalar: 18 and 21 are the surrounding boundaries).
+        buf2.lines[0].last_active = Instant::now() - std::time::Duration::from_secs(2);
+        assert!(buf2.expire());
+        assert_eq!(buf2.display_text(), "second line");
+        assert_eq!(buf2.last_tail, "second line");
+    }
+
+    /// Overlap matching across mixed scripts still dedups correctly for
+    /// ASCII-identical text embedded in multilingual content.
+    #[test]
+    fn overlap_mixed_scripts() {
+        // The overlap "world こんにちは" spans an ASCII word and CJK text.
+        assert_eq!(
+            CaptionBuffer::remove_overlap("hello world こんにちは", "world こんにちは again"),
+            "again"
+        );
+        // Cyrillic + ASCII mix.
+        assert_eq!(
+            CaptionBuffer::remove_overlap("привет мир hello", "hello мир"),
+            "мир"
+        );
+        // End-to-end through push: repeated RNNT tail in Cyrillic dedups
+        // (overlap "мирный" is 6 chars, above the 4-char minimum).
+        let mut buf = CaptionBuffer::new(3, 60, 8);
+        buf.push(" Привет мирный".to_string());
+        buf.push(" мирный день".to_string());
+        let text = buf.display_text();
+        assert_eq!(text, "Привет мирный день");
     }
 }

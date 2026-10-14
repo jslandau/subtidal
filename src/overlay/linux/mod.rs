@@ -67,7 +67,7 @@ pub fn run_gtk_app(
         let is_dragging = Rc::new(Cell::new(false));
 
         if cfg.overlay_mode == OverlayMode::Floating && !cfg.locked {
-            add_drag_handler(&window, &is_dragging);
+            add_drag_handler(&window, &is_dragging, &cfg);
         }
 
         let label = find_caption_label(&window);
@@ -356,7 +356,7 @@ fn handle_overlay_command(
                         set_empty_input_region(window);
                     } else {
                         clear_input_region(window);
-                        add_drag_handler(window, is_dragging);
+                        add_drag_handler(window, is_dragging, &cfg);
                     }
                     window.set_visible(true);
                 }
@@ -389,7 +389,7 @@ fn handle_overlay_command(
             } else {
                 clear_input_region(window);
                 window.set_keyboard_mode(KeyboardMode::OnDemand);
-                add_drag_handler(window, is_dragging);
+                add_drag_handler(window, is_dragging, &config.lock().unwrap());
             }
         }
         OverlayCommand::ResetFloatingPosition => {

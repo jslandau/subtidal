@@ -14,7 +14,7 @@
 //! The downstream `audio/resampler.rs` handles 48 kHz stereo → 16 kHz mono.
 
 use anyhow::{Context, Result};
-use core_foundation::base::{FromVoid, TCFType};
+use core_foundation::base::TCFType;
 use core_foundation::dictionary::CFDictionary;
 use core_foundation::number::CFNumber;
 use core_foundation::string::CFString;
@@ -298,8 +298,16 @@ extern "C" fn ioproc_fn(
             return 0; // noErr
         }
         let buf = &buf_list.mBuffers[0];
-        let n_frames = buf.mDataByteSize as usize / std::mem::size_of::<f32>();
-        let samples = std::slice::from_raw_parts(buf.mData as *const f32, n_frames);
+        // Validate before forming any reference: null/empty/misaligned/non-
+        // divisible buffers are dropped silently (RT-safe — no panic path).
+        // SAFETY: Core Audio guarantees mData references mDataByteSize
+        // readable bytes for the duration of this IOProc invocation; this
+        // callback is the trusted caller of the guard.
+        let Some(samples) =
+            crate::audio::validation::audio_buffer_f32(buf.mData, buf.mDataByteSize as usize)
+        else {
+            return 0; // noErr
+        };
 
         // Try to push samples into the ring buffer. If locked, skip this callback.
         // RT-safe: we use try_lock, not lock.
@@ -387,18 +395,29 @@ unsafe fn verify_tap_format(tap_id: AudioObjectID) -> Result<()> {
         );
     }
 
-    if (asbd.mSampleRate - 48000.0).abs() > 1.0 {
+    // Full PCM layout guard (CLAUDE.md contract): exactly 48 kHz stereo f32
+    // interleaved linear PCM. The predicate is platform-neutral so its test
+    // matrix runs on every target; here we only surface which field failed.
+    if let Some(violation) = crate::audio::validation::tap_format_violation(
+        asbd.mSampleRate,
+        asbd.mFormatID,
+        asbd.mFormatFlags,
+        asbd.mChannelsPerFrame,
+        asbd.mBitsPerChannel,
+        asbd.mBytesPerFrame,
+    ) {
         anyhow::bail!(
-            "tap delivers {} Hz; downstream resampler expects 48 kHz. \
-             Tap format coercion not yet implemented.",
-            asbd.mSampleRate
-        );
-    }
-
-    if asbd.mChannelsPerFrame != 2 {
-        anyhow::bail!(
-            "tap delivers {} channels; downstream expects stereo",
-            asbd.mChannelsPerFrame
+            "tap format rejected: {} (rate={:?}, format_id=0x{:X}, flags=0x{:X}, \
+             channels={}, bits_per_channel={}, bytes_per_frame={}). \
+             No format coercion is implemented; downstream resampling assumes \
+             48 kHz stereo f32 interleaved.",
+            violation,
+            asbd.mSampleRate,
+            asbd.mFormatID,
+            asbd.mFormatFlags,
+            asbd.mChannelsPerFrame,
+            asbd.mBitsPerChannel,
+            asbd.mBytesPerFrame
         );
     }
 
@@ -494,7 +513,10 @@ unsafe fn read_tap_uid(tap_id: AudioObjectID) -> Result<String> {
         anyhow::bail!("kAudioTapPropertyUID returned null");
     }
 
-    let cf_str = CFString::from_void(cf_string as *const std::ffi::c_void);
+    // AudioObjectGetPropertyData returns a +1 Create-rule reference;
+    // wrap_under_create_rule adopts it so Drop releases it (from_void's
+    // ItemRef never releases — a per-call leak).
+    let cf_str = CFString::wrap_under_create_rule(cf_string);
     Ok(cf_str.to_string())
 }
 
@@ -506,8 +528,12 @@ unsafe fn read_tap_uid(tap_id: AudioObjectID) -> Result<String> {
 /// # Returns
 /// The AudioObjectID of the new aggregate device.
 ///
-/// The aggregate device UID is constructed from a unique suffix (PID + counter)
-/// to avoid collisions with other Subtidal instances.
+/// The aggregate device UID is constructed from a unique suffix (PID +
+/// process-global atomic counter) to avoid collisions: with other Subtidal
+/// instances (different PIDs) and with our own previous aggregates during
+/// fast source-switch rebuilds (different counters) — Core Audio can still
+/// hold the previous aggregate object briefly after the tap drop, and a
+/// reused UID would make the create call collide (F20).
 unsafe fn create_aggregate_device(tap_uid: &str) -> Result<AudioObjectID> {
     use core_foundation::base::CFTypeRef;
 
@@ -522,9 +548,11 @@ unsafe fn create_aggregate_device(tap_uid: &str) -> Result<AudioObjectID> {
         CFString::new(s)
     }
 
-    // Generate a unique aggregate device UID.
+    // Generate a unique aggregate device UID (F20: PID + atomic counter).
+    static AGGREGATE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let pid = std::process::id();
-    let aggregate_uid = format!("com.subtidal.tap.{}", pid);
+    let counter = AGGREGATE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let aggregate_uid = format!("com.subtidal.tap.{pid}.{counter}");
 
     // Build the tap sub-dictionary: { kAudioSubTapUIDKey: tap_uid }
     let sub_uid_key = const_key(coreaudio_sys::kAudioSubTapUIDKey);
@@ -575,13 +603,21 @@ unsafe fn create_aggregate_device(tap_uid: &str) -> Result<AudioObjectID> {
     keys.push(tap_list_key.as_CFTypeRef());
     vals.push(tap_list_val.as_CFTypeRef());
 
-    // Create dictionary from raw CFTypeRefs using the FFI directly.
+    // Create dictionary from raw CFTypeRefs using the FFI directly. The
+    // kCFTypeDictionary*CallBacks (F20) give the dictionary correct
+    // CFType-retention semantics; NULL callbacks would leave the dict
+    // without ownership management for the values added below.
     let agg_dict = coreaudio_sys::CFDictionaryCreateMutable(
         std::ptr::null(),
         keys.len() as i64,
-        std::ptr::null(),
-        std::ptr::null(),
+        &coreaudio_sys::kCFTypeDictionaryKeyCallBacks as *const _,
+        &coreaudio_sys::kCFTypeDictionaryValueCallBacks as *const _,
     );
+    if agg_dict.is_null() {
+        anyhow::bail!(
+            "CFDictionaryCreateMutable returned NULL for the aggregate device dictionary"
+        );
+    }
 
     // Populate the dictionary.
     for (k, v) in keys.into_iter().zip(vals.into_iter()) {

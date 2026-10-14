@@ -5,6 +5,27 @@ All notable changes to Subtidal are documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.3] — 2026-10-13
+
+### Added
+- **Linux floating drag override:** `floating_drag_coordinate_handling` accepts `automatic`, `cumulative`, or `compensated`. Changes apply on the next drag, including with custom config paths.
+
+### Fixed
+- **Linux floating positioning:** corrected accelerated dragging on Umbriel and bounded dragging and restored positions to the output.
+- **Reproducible installation:** pinned the tested parakeet-rs 0.3.6 and ORT rc.12 inference dependencies and documented installation with `--locked` to avoid incompatible dependency resolution.
+
+### Performance & security hardening
+
+### Fixed
+- **Panic and process-abort boundaries:** made multilingual caption overlap/tail handling UTF-8 safe; validated PipeWire chunk bounds/alignment and Core Audio IOProc buffers; and enforced the complete 48 kHz stereo f32 interleaved tap format.
+- **Model supply-chain integrity:** pinned the Hugging Face revision and SHA-256 digests, verified existing and fetched files, quarantined mismatches, and installed atomically without replacing a trusted destination. Nemotron model downloads now run concurrently.
+- **Engine and runtime performance:** added engine-build failure backoff with one actionable notice per failure streak, corrected pre-switch audio discard, fixed Core Foundation Create-rule ownership, reduced macOS caption/tray overhead, and cached the CUDA probe verdict.
+- **Hardening and test safety:** made config temporary files unique and symlink-safe, flushed output before raw exit, reused the Nemotron drain buffer, mitigated watchdog PID reuse, synchronized the macOS bundle version, sandboxed the CLI test, moved macOS notifications onto the main queue, fixed aggregate-dictionary callbacks and UID uniqueness, and lengthened the PipeWire command-loop timeout.
+
+### Audit status
+- `cargo audit --deny warnings` was run against the updated lockfile. Fixable advisories were addressed by upgrading `crossbeam-epoch` to 0.9.20, `h2` to 0.4.16, `ringbuf` to 0.5.2, `rustls` to 0.23.45, and `rustls-webpki` to 0.103.15.
+- The remaining audit findings are explicitly acknowledged because they are transitive and not independently upgradeable without a broader dependency or platform change: **RUSTSEC-2026-0194** and **RUSTSEC-2026-0195** affect `quick-xml 0.37.5` required by the Windows-only `tauri-winrt-notification 0.7.2` path in `notify-rust`; **RUSTSEC-2024-0436** affects unmaintained `paste 1.0.15` through `parakeet-rs` → `tokenizers`; **RUSTSEC-2026-0190** affects `anyhow 1.0.102` (used directly and by PipeWire); **RUSTSEC-2026-0221** affects `event-listener 5.4.1` through `async-channel`/`zbus`; **RUSTSEC-2024-0429** affects Linux `glib 0.19.9`; **RUSTSEC-2026-0097** affects `rand 0.9.2` through `hf-hub`/`tokenizers`; and the yanked-package warnings for **js-sys 0.3.88** and **wasm-bindgen 0.2.111** arise from the wasm-capable transitive dependency graph. None is used as an externally exposed parser or unsafe callback boundary by Subtidal; each remains a tracked dependency-maintenance item.
+
 ## [0.3.2] — 2026-06-26
 
 ### Changed

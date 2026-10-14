@@ -7,6 +7,11 @@
 //! public surface here.
 
 pub mod resampler;
+pub mod validation;
+
+pub use validation::{
+    audio_buffer_f32, extract_f32, push_pw_chunk, tap_format_ok, tap_format_violation,
+};
 
 /// Neutral identifier surfaced to the tray menu. Phase 5 introduces this for
 /// macOS; Linux's existing `AudioNode` continues alongside.
@@ -37,5 +42,6 @@ mod impl_macos;
 
 #[cfg(target_os = "macos")]
 pub use impl_macos::{
-    list_sources, notify_request_authorization_best_effort, start_audio_thread, AudioCommand,
+    bundle_to_label, enumerate_process_snapshot, list_sources,
+    notify_request_authorization_best_effort, start_audio_thread, AudioCommand,
 };

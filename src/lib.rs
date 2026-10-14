@@ -10,5 +10,6 @@ pub mod audio;
 pub mod config;
 pub mod models;
 pub mod overlay;
+pub mod probe_cache;
 pub mod stt;
 pub mod tray;

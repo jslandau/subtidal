@@ -32,7 +32,7 @@ All processing happens locally — no cloud services, no network requests (excep
 
 ### Linux
 ```bash
-cargo install --path .
+cargo install --path . --locked
 ```
 
 Models download automatically on first run from HuggingFace to `~/.local/share/subtidal/models/`.
@@ -76,6 +76,25 @@ Choose **Transcript** from the Mode menu to read the full session history. Text 
 - Show Above Fullscreen / Lock Position
 
 ## Configuration
+
+### Linux floating drag override
+
+If the unlocked floating overlay moves too quickly or does not track the pointer,
+set this **root-level** key in your TOML config (before any `[table]` headers):
+
+```toml
+floating_drag_coordinate_handling = "automatic"
+```
+
+- `"automatic"` (default): choose handling based on the desktop.
+- `"cumulative"`: use the gesture's offset from the drag start directly. Try this
+  if dragging is accelerated; this is the automatic choice for Niri and Umbriel.
+- `"compensated"`: account for movement already applied to the window. Try this
+  if the window lags behind the pointer with cumulative handling.
+
+Changes take effect on the next drag without restarting, including when using
+`--config`. Both modes retain screen bounds protection. This setting has no
+effect on macOS.
 
 Config path:
 - Linux: `~/.config/subtidal/config.toml`

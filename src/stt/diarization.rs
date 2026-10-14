@@ -34,10 +34,20 @@ use crate::config::DiarizationPreset;
 /// values are NOT scaled down with chunk_len — they hold the model's
 /// accumulated speaker context and shrinking them costs accuracy without
 /// reducing latency.
-const RT_CHUNK_LEN: usize = 12;
+///
+/// `DOCUMENTED_PRESET` is the single source of truth tying these constants to
+/// the documented preset (CLAUDE.md and the model card) — the constants and
+/// the docs cannot drift apart again (F17; the 12/12 detour was an
+/// undocumented change without measurement, reverted here).
+const RT_CHUNK_LEN: usize = DOCUMENTED_PRESET.0;
 const RT_FIFO_LEN: usize = 188;
 const RT_SPKCACHE_LEN: usize = 188;
-const RT_RIGHT_CONTEXT: usize = 12;
+const RT_RIGHT_CONTEXT: usize = DOCUMENTED_PRESET.1;
+
+/// The documented low-latency preset `(chunk_len, right_context)` for
+/// `diar_streaming_sortformer_4spk-v2.1`. Algorithmic latency is
+/// `(chunk_len + right_context) * 80 ms` = 1.04 s at the preset values.
+pub const DOCUMENTED_PRESET: (usize, usize) = (6, 7);
 
 /// A speaker segment within a chunk of audio.
 #[derive(Debug, Clone)]
@@ -270,4 +280,23 @@ where
             )
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// AC.12 (F17): the streaming constants and their documented preset
+    /// (CLAUDE.md + the Sortformer v2.1 model card) share one source of
+    /// truth. At the documented preset the algorithmic latency is
+    /// (6 + 7) × 80 ms = 1.04 s.
+    #[test]
+    fn diarization_preset_matches_docs() {
+        assert_eq!((RT_CHUNK_LEN, RT_RIGHT_CONTEXT), DOCUMENTED_PRESET);
+        assert_eq!(DOCUMENTED_PRESET, (6, 7), "documented low-latency preset");
+        let latency_ms = (DOCUMENTED_PRESET.0 + DOCUMENTED_PRESET.1) * 80;
+        assert_eq!(latency_ms, 1040, "1.04 s at the documented preset");
+        // The context FIFO/spkcache values stay at the model card's numbers.
+        assert_eq!((RT_FIFO_LEN, RT_SPKCACHE_LEN), (188, 188));
+    }
 }

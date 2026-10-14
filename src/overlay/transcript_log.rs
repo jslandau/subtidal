@@ -185,6 +185,11 @@ impl TranscriptLog {
         &self.fragments
     }
 
+    /// The paragraph-break threshold (exposed for the routing snapshot, F8).
+    pub fn paragraph_gap(&self) -> StdDuration {
+        self.paragraph_gap
+    }
+
     /// Derive paragraphs from the stored fragments.
     ///
     /// Walks fragments in order, splitting on the same gap rule as `push_at`.

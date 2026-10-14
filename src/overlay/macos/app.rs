@@ -5,7 +5,8 @@
 use super::{drag, panel, rename_dialog, transcript_window};
 use crate::config::{Config, OverlayMode};
 use crate::overlay::{
-    caption_buffer::CaptionBuffer, transcript_log::TranscriptLog, CaptionsEnabled, OverlayCommand,
+    caption_buffer::CaptionBuffer, transcript_log::TranscriptLog, AppearanceSnapshot,
+    CaptionsEnabled, OverlayCommand,
 };
 use objc2::rc::Retained;
 use objc2::MainThreadMarker;
@@ -27,6 +28,11 @@ struct OverlayHandles {
     caption_buffer: Arc<Mutex<CaptionBuffer>>,
     transcript_log: Arc<Mutex<TranscriptLog>>,
     config: Arc<Mutex<Config>>,
+    /// Pre-derived caption-render snapshot (F8): the per-caption path takes
+    /// exactly one cheap lock+clone of this instead of cloning the full
+    /// `Config` two to three times per caption. Refreshed by
+    /// `UpdateAppearance` / `SetSpeakerNames` / `SetMode` handlers.
+    appearance: Arc<Mutex<AppearanceSnapshot>>,
     cmd_tx: async_channel::Sender<OverlayCommand>,
     caption_epoch: Arc<std::sync::atomic::AtomicU64>,
 }
@@ -124,6 +130,10 @@ pub fn run_app(
         panel::install_screen_observer(&panel, &label, Arc::clone(&config_arc), mtm);
 
     // Wrap all handles in Arc so workers can share ownership.
+    let appearance_snapshot = {
+        let cfg = config_arc.lock().unwrap();
+        AppearanceSnapshot::from_config(&cfg)
+    };
     let handles = Arc::new(OverlayHandles {
         panel,
         label,
@@ -131,6 +141,7 @@ pub fn run_app(
         caption_buffer,
         transcript_log,
         config: config_arc,
+        appearance: Arc::new(Mutex::new(appearance_snapshot)),
         cmd_tx,
         caption_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     });
@@ -167,20 +178,72 @@ pub fn run_app(
                     let mtm =
                         MainThreadMarker::new().expect("dispatch main queue runs on main thread");
 
-                    routing(&handles_closure, &enabled_at_dispatch).caption(
-                        event,
-                        epoch,
-                        mtm,
-                        |display, cfg| {
+                    let appearance = handles_closure.appearance.lock().unwrap().clone();
+                    match event {
+                        crate::overlay::CaptionEvent::Append { text, speaker_id, emit_sample } => {
+                            let display = {
+                                let mut buf = handles_closure.caption_buffer.lock().unwrap();
+                                buf.push_with_speaker_and_sample(text.clone(), speaker_id, emit_sample);
+                                buf.display_text()
+                            };
                             panel::set_caption_text(
                                 &handles_closure.panel,
                                 &handles_closure.label,
-                                display,
+                                &display,
                                 mtm,
-                                cfg,
+                                &appearance,
                             );
-                        },
-                    );
+
+                            // Record once, then incrementally render the recorded fragment
+                            // in every mode so a hidden transcript remains up to date.
+                            let (fragment, kind) = {
+                                let mut log = handles_closure.transcript_log.lock().unwrap();
+                                let kind = log.push_with_speaker_and_sample(text, speaker_id, emit_sample);
+                                (log.fragments().last().unwrap().clone(), kind)
+                            };
+                            transcript_window::append_fragment_to_view(
+                                &handles_closure.transcript_state,
+                                &fragment,
+                                kind,
+                                &appearance.speaker_names,
+                            );
+                        }
+                        crate::overlay::CaptionEvent::Relabel { from_sample, new_speaker_id } => {
+                            // Retroactively re-attribute. Transcript log update is
+                            // unconditional; rebuild the visible transcript so late
+                            // Sortformer corrections are reflected immediately.
+                            let n_log = handles_closure.transcript_log
+                                .lock().unwrap()
+                                .relabel_since(from_sample, new_speaker_id);
+                            let (n_buf, display) = {
+                                let mut buf = handles_closure.caption_buffer.lock().unwrap();
+                                let n = buf.relabel_since(from_sample, new_speaker_id);
+                                (n, buf.display_text())
+                            };
+                            if n_log + n_buf > 0 {
+                                eprintln!(
+                                    "info: diarization: relabeled {n_log} log fragment(s), {n_buf} overlay line(s) to Speaker {}",
+                                    new_speaker_id + 1,
+                                );
+                            }
+                            if n_buf > 0 {
+                                panel::set_caption_text(
+                                    &handles_closure.panel,
+                                    &handles_closure.label,
+                                    &display,
+                                    mtm,
+                                    &appearance,
+                                );
+                            }
+                            if n_log > 0 {
+                                transcript_window::rebuild_view(
+                                    &handles_closure.transcript_state,
+                                    mtm,
+                                    &appearance.speaker_names,
+                                );
+                            }
+                        }
+                    }
                 });
             }
         })
@@ -206,13 +269,13 @@ pub fn run_app(
                         }
                     };
                     if let Some(display) = display_opt {
-                        let cfg_snapshot = handles_closure.config.lock().unwrap().clone();
+                        let appearance = handles_closure.appearance.lock().unwrap().clone();
                         panel::set_caption_text(
                             &handles_closure.panel,
                             &handles_closure.label,
                             &display,
                             _mtm,
-                            &cfg_snapshot,
+                            &appearance,
                         );
                     }
                 });
@@ -316,7 +379,11 @@ fn handle_overlay_command(
     let remaining = routing(handles, captions_enabled).command(
         cmd,
         mtm,
-        |display, cfg| panel::set_caption_text(&handles.panel, &handles.label, display, mtm, cfg),
+        |display, cfg| {
+            let appearance = AppearanceSnapshot::from_config(cfg);
+            *handles.appearance.lock().unwrap() = appearance.clone();
+            panel::set_caption_text(&handles.panel, &handles.label, display, mtm, &appearance);
+        },
         |visible| {
             if visible {
                 handles.panel.orderFront(None);
@@ -331,6 +398,8 @@ fn handle_overlay_command(
             let _ = cfg.save();
             cfg.clone()
         };
+        *handles.appearance.lock().unwrap() = AppearanceSnapshot::from_config(&cfg);
+        // Drop the config lock before geometry triggers the drag observer.
         panel::apply_geometry(
             &handles.panel,
             &handles.label,
@@ -428,6 +497,13 @@ fn handle_overlay_command(
                 max_chars,
                 appearance.effective_expire_secs(),
             );
+            // Keep the caption-render snapshot in sync (F8).
+            {
+                let mut snap = handles.appearance.lock().unwrap();
+                snap.font_family = appearance.font_family.clone();
+                snap.font_size = appearance.font_size as f64;
+                snap.max_lines = appearance.max_lines as usize;
+            }
         }
         OverlayCommand::SetCaption(_text) => {
             // SetCaption is handled via the caption-bridge; this arm is a no-op.

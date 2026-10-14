@@ -4,7 +4,7 @@ use anyhow::Context;
 use anyhow::Result;
 use pipewire as pw;
 use pw::properties::properties;
-use ringbuf::traits::{Producer, Split};
+use ringbuf::traits::Split;
 use ringbuf::HeapRb;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -178,10 +178,18 @@ fn run_pipewire_loop(
     let mut current_source = initial_source.clone(); // track for fallback check (AC1.4)
 
     // Poll for AudioCommands and run the PipeWire event loop.
-    // PipeWire Loop::iterate() processes pending events non-blockingly.
+    // PipeWire Loop::iterate() processes pending events non-blockingly and
+    // returns early when events are pending, so this timeout only applies
+    // during silence. F21: 100 ms (10 Hz idle wakeups instead of the old
+    // 10 ms / 100 Hz) trades at most 100 ms of command latency — well inside
+    // the ≤1 s source-switch caption-gap budget — for a 10× reduction in
+    // steady-state wakeups. Integrating the command channel as a true
+    // pw event source (pipewire::channel attaches to the loop) would make
+    // command dispatch event-driven but requires rewiring every
+    // AudioCommand producer; recorded as follow-up rather than forced here.
     let loop_ref = mainloop.loop_();
     loop {
-        let _ = loop_ref.iterate(std::time::Duration::from_millis(10));
+        let _ = loop_ref.iterate(std::time::Duration::from_millis(100));
 
         match rx_cmd.try_recv() {
             Ok(AudioCommand::Shutdown) => break,
@@ -357,14 +365,15 @@ fn create_capture_stream<'a>(
                     let offset = chunk.offset() as usize;
                     let size = chunk.size() as usize;
                     if let Some(bytes) = data.data() {
-                        let float_bytes = &bytes[offset..offset + size];
-                        let samples = bytemuck::cast_slice::<u8, f32>(float_bytes);
-                        let mut pushed = false;
-                        if let Ok(mut prod) = ring_producer.try_lock() {
-                            let n = prod.push_slice(samples);
-                            pushed = n > 0;
-                        }
-                        if pushed {
+                        // RT-safe: validation (bounds/alignment/divisibility),
+                        // try_lock push, and wake notification only on push.
+                        // Malformed chunk metadata is dropped silently.
+                        if crate::audio::validation::push_pw_chunk(
+                            bytes,
+                            offset,
+                            size,
+                            ring_producer,
+                        ) {
                             wake.notify();
                         }
                     }

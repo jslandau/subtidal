@@ -30,32 +30,25 @@ pub fn main() {
     rt.block_on(async {
         match config.engine {
             config::Engine::Nemotron => {
-                if !models::nemotron_models_present() {
-                    println!("Downloading Nemotron model files (first run)...");
-                    models::ensure_nemotron_models().await.unwrap_or_else(|e| {
-                        eprintln!("error: {e}");
-                        std::process::exit(1);
-                    });
-                }
+                // Always run the digest-aware ensure path (F5): an existence
+                // check here would load unverified pre-planted files.
+                println!("Verifying Nemotron model files (digest-pinned)...");
+                models::ensure_nemotron_models().await.unwrap_or_else(|e| {
+                    eprintln!("error: {e:#}");
+                    std::process::exit(1);
+                });
             }
         }
-    });
 
-    // Always download the Sortformer diarization model (skipped if present).
-    if !models::diarization_models_present() {
-        println!("Downloading Sortformer diarization model (first run)...");
-        rt.block_on(async {
-            models::ensure_diarization_models()
-                .await
-                .unwrap_or_else(|e| {
-                    eprintln!("warn: failed to download Sortformer model: {e:#}");
-                    eprintln!(
-                        "hint: diarization will be unavailable until the model is downloaded"
-                    );
-                });
-        });
-        println!("Sortformer diarization model ready.");
-    }
+        // Always run the digest-aware ensure path for Sortformer. Failure is
+        // non-fatal; any quarantine is logged inside.
+        models::ensure_diarization_models()
+            .await
+            .unwrap_or_else(|e| {
+                eprintln!("warn: failed to install Sortformer model: {e:#}");
+                eprintln!("hint: diarization will be unavailable until the model is downloaded");
+            });
+    });
 
     // 3b. Request notification authorization (best-effort, ignore result).
     // This surfaces the macOS notification permission prompt. If denied,
@@ -175,7 +168,7 @@ pub fn main() {
     let pipeline_cfg = stt::PipelineConfig {
         engine_choice: Arc::clone(&engine_choice),
         captions_enabled: Arc::clone(&captions_enabled),
-        unload_after: Some(std::time::Duration::from_secs(8)), // default from Linux
+        unload_after: config.vram_unload_duration(), // F16: honors cfg.vram_unload_secs (shared default), same as Linux
         model_paths: model_paths.clone(),
         use_cuda: true, // Request WebGPU on macOS; CPU fallback is automatic.
         diarization_enabled: Arc::clone(&diarization_enabled),
@@ -183,6 +176,8 @@ pub fn main() {
         diarization_model_dir: models::diarization_model_dir(),
         diarization_display_delay_ms: config.diarization_display_delay_ms,
         diarization_alignment_lag_ms: config.diarization_alignment_lag_ms,
+        // CUDA probe caching is Linux-only (F10).
+        probe_cache_path: None,
     };
     let _stt_handle = stt::spawn_stt_thread(
         ring_consumer,
@@ -239,6 +234,9 @@ pub fn main() {
         audio_cmd_tx: audio_cmd_tx.clone(),
         engine_choice: Arc::clone(&engine_choice),
         audio_sources,
+        // F9: raw process snapshot for label-independent change detection.
+        audio_processes: Arc::new(std::sync::Mutex::new(Vec::new())),
+        audio_refresh_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     };
 
     let (_tray_item, _tray_actions) = tray::install_tray(tray_state, mtm);

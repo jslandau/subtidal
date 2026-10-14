@@ -36,7 +36,14 @@ fi
 
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/subtidal"
-cp resources/macos/Info.plist "$APP/Contents/Info.plist"
+# F15: substitute the version from Cargo.toml into the Info.plist template so
+# the bundle can never drift from the crate version.
+CARGO_VERSION="$(sed -n '/^\[package\]/,/^\[/ s/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -n1)"
+if [[ -z "$CARGO_VERSION" ]]; then
+  echo "error: could not parse version from Cargo.toml" >&2
+  exit 1
+fi
+sed "s/@CFBUNDLE_VERSION@/$CARGO_VERSION/g" resources/macos/Info.plist > "$APP/Contents/Info.plist"
 cp resources/macos/tray-icon-template.png "$APP/Contents/Resources/"
 
 # Generate a Dock/Finder app icon from the canonical SVG asset.
@@ -70,5 +77,9 @@ fi
 plutil -lint "$APP/Contents/Info.plist"
 
 codesign --force --deep --sign - "$APP"
+
+# F15: hard-fail the bundle when the plist version drifted from Cargo.toml
+# (also catches an unsubstituted placeholder).
+bash scripts/check-macos-version.sh "$APP"
 
 echo "Built $APP"

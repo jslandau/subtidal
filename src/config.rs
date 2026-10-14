@@ -197,6 +197,28 @@ pub enum DockPosition {
     Offset(i32),
 }
 
+/// How Linux floating drags interpret GTK gesture offsets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FloatingDragCoordinateHandling {
+    #[default]
+    Automatic,
+    /// Offsets already include all movement since the drag started.
+    Cumulative,
+    /// Offsets shrink as the surface moves; include movement already applied.
+    Compensated,
+}
+
+impl FloatingDragCoordinateHandling {
+    pub fn needs_compensation(self, automatic: bool) -> bool {
+        match self {
+            Self::Automatic => automatic,
+            Self::Cumulative => false,
+            Self::Compensated => true,
+        }
+    }
+}
+
 /// Root configuration struct. Serialized to ~/.config/subtidal/config.toml.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -219,6 +241,10 @@ pub struct Config {
     /// Window position in floating mode.
     #[serde(default)]
     pub position: OverlayPosition,
+
+    /// Linux-only drag offset override, read from disk at the next drag.
+    #[serde(default)]
+    pub floating_drag_coordinate_handling: FloatingDragCoordinateHandling,
 
     /// Whether the floating overlay is locked (click-through).
     #[serde(default = "default_locked")]
@@ -273,6 +299,15 @@ pub struct Config {
     pub config_file_path: Option<PathBuf>,
 }
 
+impl Config {
+    /// Resolve the VRAM/engine idle-unload window (F16): `vram_unload_secs
+    /// == 0` disables unloading (`None`); otherwise the configured duration.
+    /// Both platform mains resolve identically through this helper.
+    pub fn vram_unload_duration(&self) -> Option<std::time::Duration> {
+        (self.vram_unload_secs != 0).then(|| std::time::Duration::from_secs(self.vram_unload_secs))
+    }
+}
+
 fn default_locked() -> bool {
     true
 }
@@ -297,6 +332,7 @@ impl Default for Config {
             overlay_mode: OverlayMode::default(),
             screen_edge: ScreenEdge::default(),
             position: OverlayPosition::default(),
+            floating_drag_coordinate_handling: FloatingDragCoordinateHandling::default(),
             locked: true,
             above_fullscreen: false,
             dock_position: DockPosition::default(),
@@ -384,25 +420,67 @@ impl Config {
         }
         let text = toml::to_string_pretty(self).context("serializing config")?;
 
-        // Atomic write: serialize to `{path}.tmp.{pid}` then rename. On POSIX,
+        // Atomic write: serialize to a unique temp then rename. On POSIX,
         // rename within the same filesystem is atomic — readers (the hot-reload
         // debouncer) either see the old file or the fully-written new file,
-        // never a truncated one. PID-suffixed tmp keeps concurrent writers from
-        // clobbering each other's tmp file before the rename.
-        let tmp_path = {
-            let fname = path
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("config");
-            let mut p = path.clone();
-            p.set_file_name(format!(".{}.tmp.{}", fname, std::process::id()));
-            p
-        };
-        std::fs::write(&tmp_path, text)
-            .with_context(|| format!("writing config tmp {}", tmp_path.display()))?;
-        std::fs::rename(&tmp_path, &path)
-            .with_context(|| format!("renaming {} -> {}", tmp_path.display(), path.display()))?;
-        Ok(())
+        // never a truncated one. The tmp name carries the PID plus a
+        // process-global monotonic counter (F11) so concurrent in-process
+        // writers (fallback worker, drag save) never share a staging file,
+        // and `create_new` refuses to open a pre-existing file — a
+        // pre-planted symlink at the tmp path is never followed or clobbered.
+        static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let mut last_err: Option<std::io::Error> = None;
+        for _ in 0..8 {
+            let counter = TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let tmp_path = {
+                let fname = path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("config");
+                let mut p = path.clone();
+                p.set_file_name(format!(".{}.tmp.{}.{}", fname, std::process::id(), counter));
+                p
+            };
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp_path);
+            let mut file = match file {
+                Ok(f) => f,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    // Concurrent writer grabbed this counter value; retry
+                    // with the next one.
+                    last_err = Some(e);
+                    continue;
+                }
+                Err(e) => {
+                    return Err(e)
+                        .with_context(|| format!("creating config tmp {}", tmp_path.display()));
+                }
+            };
+            let outcome = std::io::Write::write_all(&mut file, text.as_bytes())
+                .with_context(|| format!("writing config tmp {}", tmp_path.display()))
+                .and_then(|()| {
+                    std::fs::rename(&tmp_path, &path).with_context(|| {
+                        format!("renaming {} -> {}", tmp_path.display(), path.display())
+                    })
+                });
+            match outcome {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    // Clean the staging file before retrying/failing so no
+                    // tmp leftovers accumulate.
+                    let _ = std::fs::remove_file(&tmp_path);
+                    return Err(e);
+                }
+            }
+        }
+        Err(anyhow::anyhow!(
+            "could not create a unique config tmp file after 8 attempts: {}",
+            last_err
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        ))
     }
 }
 
@@ -625,6 +703,31 @@ pub fn start_hot_reload_macos(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn floating_drag_coordinate_handling_parses_and_round_trips() {
+        use FloatingDragCoordinateHandling::*;
+        let cfg: Config = toml::from_str("").unwrap();
+        assert_eq!(cfg.floating_drag_coordinate_handling, Automatic);
+        for (value, expected) in [
+            ("automatic", Automatic),
+            ("cumulative", Cumulative),
+            ("compensated", Compensated),
+        ] {
+            let cfg: Config =
+                toml::from_str(&format!("floating_drag_coordinate_handling = {value:?}")).unwrap();
+            assert_eq!(cfg.floating_drag_coordinate_handling, expected);
+            let restored: Config = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+            assert_eq!(restored.floating_drag_coordinate_handling, expected);
+        }
+        assert!(toml::from_str::<Config>("floating_drag_coordinate_handling = 'invalid'").is_err());
+        assert!(!Automatic.needs_compensation(false));
+        assert!(Automatic.needs_compensation(true));
+        for automatic in [false, true] {
+            assert!(!Cumulative.needs_compensation(automatic));
+            assert!(Compensated.needs_compensation(automatic));
+        }
+    }
     use std::fs;
 
     #[test]
@@ -922,5 +1025,71 @@ capture_bundle_ids = ["com.hnc.Discord", "com.hnc.Discord.helper", "com.hnc.Disc
             serialized.contains(r#"overlay_mode = "transcript""#),
             "expected serialized TOML to contain `overlay_mode = \"transcript\"`, got: {serialized}"
         );
+    }
+
+    /// AC.11 (F11): N concurrent `Config::save` calls to the same path from
+    /// threads use distinct tmp names (monotonic counter suffix), all saves
+    /// succeed (each stages to its own file before the atomic rename), and
+    /// no tmp file is left behind.
+    #[test]
+    fn config_save_concurrent_tmp_names_unique() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("concurrent.toml");
+
+        let mut handles = Vec::new();
+        for i in 0..8 {
+            let path = path.clone();
+            handles.push(std::thread::spawn(move || {
+                let cfg = Config {
+                    locked: i % 2 == 0,
+                    ..Config::default()
+                };
+                let mut cfg = cfg;
+                cfg.config_file_path = Some(path);
+                cfg.save()
+            }));
+        }
+        let mut failures = Vec::new();
+        for h in handles {
+            if let Err(e) = h.join().expect("thread must not panic") {
+                failures.push(format!("{e:#}"));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "concurrent saves must all succeed: {failures:?}"
+        );
+
+        // The final file exists and parses.
+        let loaded = Config::load_from(&path).expect("saved config parses");
+        assert_eq!(loaded.config_file_path, Some(path.clone()));
+
+        // No tmp staging file was left behind.
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.contains(".tmp."))
+            .collect();
+        assert!(leftovers.is_empty(), "tmp leftovers: {leftovers:?}");
+    }
+
+    /// AC.13 (F16): the shared helper resolves the unload window from
+    /// `vram_unload_secs` for both platform mains.
+    #[test]
+    fn vram_unload_resolves_from_config() {
+        let mut cfg = Config::default();
+        assert_eq!(
+            cfg.vram_unload_duration(),
+            Some(std::time::Duration::from_secs(default_vram_unload_secs())),
+            "default resolves to the shared default"
+        );
+        cfg.vram_unload_secs = 90;
+        assert_eq!(
+            cfg.vram_unload_duration(),
+            Some(std::time::Duration::from_secs(90))
+        );
+        cfg.vram_unload_secs = 0;
+        assert_eq!(cfg.vram_unload_duration(), None, "0 disables unloading");
     }
 }

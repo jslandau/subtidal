@@ -464,9 +464,9 @@ pub fn set_caption_text(
     label: &NSTextField,
     text: &str,
     _mtm: MainThreadMarker,
-    config: &Config,
+    appearance: &crate::overlay::AppearanceSnapshot,
 ) {
-    if matches!(config.overlay_mode, OverlayMode::Transcript) {
+    if matches!(appearance.overlay_mode, OverlayMode::Transcript) {
         // Panel is hidden; just update text so it's right when we switch back.
         let ns_text = NSString::from_str(text);
         label.setStringValue(&ns_text);
@@ -482,11 +482,11 @@ pub fn set_caption_text(
     let current = panel.frame();
     let label_width = (current.size.width - 2.0 * INSET).max(40.0);
     let measured_h = measure_text_height(label, text, label_width);
-    let nat_line_h = (config.appearance.font_size as f64) * 1.2;
+    let nat_line_h = appearance.font_size * 1.2;
     let visual_lines = ((measured_h / nat_line_h).round() as usize)
         .max(text.lines().count().max(1))
-        .min(config.appearance.max_lines as usize);
-    let target_height = panel_height_for_lines(config.appearance.font_size, visual_lines);
+        .min(appearance.max_lines);
+    let target_height = panel_height_for_lines(appearance.font_size, visual_lines);
 
     if (current.size.height - target_height).abs() > 0.5 {
         let top = current.origin.y + current.size.height;

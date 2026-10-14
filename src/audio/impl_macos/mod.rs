@@ -136,6 +136,8 @@ fn run_tap_capture(
     // check if it's still running. On disappearance, fall back to SystemOutput.
     let watchdog_tick = std::time::Duration::from_secs(1);
     let mut last_tick = std::time::Instant::now();
+    // F14: monotonic tick count driving the slower PID-reuse revalidation.
+    let mut tick_count: u64 = 0;
 
     loop {
         // Short timeout (250ms) so we can interleave watchdog ticks.
@@ -194,6 +196,7 @@ fn run_tap_capture(
         // Run watchdog tick if we're capturing specific processes.
         if last_tick.elapsed() >= watchdog_tick {
             last_tick = std::time::Instant::now();
+            tick_count = tick_count.wrapping_add(1);
             let pids = tap.captured_pids();
             if !pids.is_empty() {
                 // Use POSIX kill(pid, 0) to test process liveness — Core Audio's
@@ -206,11 +209,54 @@ fn run_tap_capture(
                     rc == 0 || unsafe { *libc::__error() } != libc::ESRCH
                 });
 
-                if !any_alive {
+                // F14: PID-reuse detection. kill(pid, 0) also succeeds for a
+                // recycled PID now owned by an unrelated process, which
+                // would keep a dead tap "capturing" forever. Every 10th tick
+                // (~10 s), re-resolve the source's current PID set from Core
+                // Audio's process registry and treat the source as
+                // disappeared when a watched PID is no longer part of it.
+                // (A grown set — new helper processes — is fine; only a
+                // watched PID dropping out of the bundle's set is stale.)
+                let mut stale_after_pid_reuse = false;
+                if tick_count % 10 == 0 {
+                    if let crate::config::AudioSource::App {
+                        bundle_id,
+                        capture_bundle_ids,
+                        ..
+                    } = &current_source
+                    {
+                        match tap_processes::enumerate_audio_processes() {
+                            Ok(procs) => {
+                                let fresh: std::collections::HashSet<std::ffi::c_int> = procs
+                                    .into_iter()
+                                    .filter(|p| {
+                                        p.bundle_id.as_ref().is_some_and(|id| {
+                                            id == bundle_id || capture_bundle_ids.contains(id)
+                                        })
+                                    })
+                                    .map(|p| p.pid)
+                                    .collect();
+                                stale_after_pid_reuse = pids.iter().any(|pid| !fresh.contains(pid));
+                            }
+                            Err(e) => {
+                                // Enumeration failure is not evidence of
+                                // death; keep the kill()-based verdict.
+                                eprintln!("warn: watchdog revalidation enumeration failed: {e}");
+                            }
+                        }
+                    }
+                }
+
+                if !any_alive || stale_after_pid_reuse {
                     // Source disappeared; fall back to SystemOutput.
                     eprintln!(
-                        "info: audio source '{}' disappeared; switched to SystemOutput",
-                        current_label
+                        "info: audio source '{}' {} switched to SystemOutput",
+                        current_label,
+                        if stale_after_pid_reuse && any_alive {
+                            "(stale after PID reuse)"
+                        } else {
+                            "disappeared"
+                        },
                     );
 
                     // Post a user notification about the disappearance.
@@ -339,19 +385,57 @@ pub fn notify_request_authorization_best_effort() {
     notify::request_authorization_best_effort();
 }
 
+/// Enumerate audio processes as a platform-neutral snapshot — Core Audio
+/// only, **no AppKit**, safe to run off the main thread (F9). The order is
+/// canonicalized so consumers can compare snapshots for equality.
+pub fn enumerate_process_snapshot() -> Result<Vec<crate::tray::AudioProcessSnapshot>> {
+    let mut procs: Vec<crate::tray::AudioProcessSnapshot> =
+        tap_processes::enumerate_audio_processes()?
+            .into_iter()
+            .filter_map(|p| {
+                p.bundle_id.map(|bundle| crate::tray::AudioProcessSnapshot {
+                    object_id: p.audio_object_id,
+                    bundle_id: bundle,
+                    watchdog_pid: p.pid,
+                })
+            })
+            .collect();
+    procs.sort_by(|a, b| {
+        (&a.bundle_id, a.object_id, a.watchdog_pid).cmp(&(
+            &b.bundle_id,
+            b.object_id,
+            b.watchdog_pid,
+        ))
+    });
+    Ok(procs)
+}
+
 /// Enumerate audio sources visible in the tray menu.
 ///
 /// Returns exactly one SystemOutput row followed by user-facing grouped app
-/// choices. Core Audio still reports raw helper/background processes; this
-/// function filters obvious non-user-selectable system/self entries and groups
-/// helper bundle IDs into the visible parent app while preserving those raw IDs
-/// in `AudioSource::App::capture_bundle_ids` for reliable tap construction.
+/// choices. Helper bundle IDs are grouped into the visible parent app while
+/// retained in `AudioSource::App::capture_bundle_ids` for tap construction.
+///
+/// Calls `bundle_to_label` (AppKit); only call this from the main thread.
+/// The tray refresh enumerates with [`enumerate_process_snapshot`] in the
+/// background and groups and labels the snapshot on main instead.
 pub fn list_sources() -> Result<Vec<crate::audio::AudioSourceInfo>> {
     let raw_bundle_ids: Vec<String> = tap_processes::enumerate_audio_processes()?
         .into_iter()
         .filter_map(|p| p.bundle_id)
         .collect();
     Ok(build_source_infos(raw_bundle_ids, bundle_to_label))
+}
+
+/// Group and label a background-enumerated snapshot for the audio picker.
+/// AppKit labeling requires this function to run on the main thread.
+pub fn sources_from_process_snapshot(
+    processes: &[crate::tray::AudioProcessSnapshot],
+) -> Vec<crate::audio::AudioSourceInfo> {
+    build_source_infos(
+        processes.iter().map(|p| p.bundle_id.clone()).collect(),
+        bundle_to_label,
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -645,7 +729,9 @@ fn cmp_label_then_bundle(
 /// Finder — e.g. "Music" instead of "com.apple.Music", "Firefox" instead
 /// of "org.mozilla.firefox". Falls back to the bundle id if no running
 /// instance is found.
-fn bundle_to_label(bundle_id: &str) -> String {
+///
+/// AppKit: main thread only.
+pub fn bundle_to_label(bundle_id: &str) -> String {
     use objc2::rc::Retained;
     use objc2_app_kit::NSRunningApplication;
     use objc2_foundation::{NSArray, NSString};

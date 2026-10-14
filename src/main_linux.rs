@@ -187,6 +187,9 @@ pub fn run_cuda_probe() -> ! {
         let loaded =
             parakeet_rs::Nemotron::from_pretrained(std::path::Path::new(&model_dir), Some(config));
         if loaded.is_err() {
+            use std::io::Write as _;
+            let _ = std::io::stdout().flush();
+            let _ = std::io::stderr().flush();
             unsafe { libc::_exit(1) };
         }
         let _ = std::io::stdout().write_all(b"cuda:ok");
@@ -215,6 +218,12 @@ pub fn cuda_status_message(cuda_available: bool) -> &'static str {
 /// SIGABRT. std::process::exit still runs atexit handlers, so we bypass
 /// them via libc::_exit.
 pub fn exit_without_atexit(code: i32) -> ! {
+    // `_exit` skips stdio flush too (F12): anything still buffered in
+    // stdout/stderr would be lost, so flush explicitly first. Best-effort —
+    // flush failures must not block the exit.
+    use std::io::Write as _;
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
     unsafe { libc::_exit(code) }
 }
 
@@ -263,7 +272,7 @@ pub fn main() {
     use subtidal::{
         audio,
         config::{self, Config},
-        models, overlay, stt, tray,
+        models, overlay, probe_cache, stt, tray,
     };
 
     #[derive(Parser, Debug)]
@@ -354,33 +363,25 @@ pub fn main() {
     runtime.block_on(async {
         match cfg.engine {
             config::Engine::Nemotron => {
-                if !models::nemotron_models_present() {
-                    println!("Downloading Nemotron model files (first run)...");
-                    models::ensure_nemotron_models().await.unwrap_or_else(|e| {
-                        eprintln!("error: failed to download Nemotron model: {e:#}");
-                        eprintln!("hint: check network connectivity and disk space in ~/.local/share/subtidal/models/");
-                        std::process::exit(1);
-                    });
-                    println!("Nemotron models ready.");
-                } else {
-                    println!("Nemotron models already present, skipping download.");
-                }
+                // Always run the digest-aware ensure path (F5): an existence
+                // check here would load unverified pre-planted files.
+                println!("Verifying Nemotron model files (digest-pinned)...");
+                models::ensure_nemotron_models().await.unwrap_or_else(|e| {
+                    eprintln!("error: failed to install Nemotron model: {e:#}");
+                    eprintln!("hint: check network connectivity and disk space in ~/.local/share/subtidal/models/");
+                    std::process::exit(1);
+                });
+                println!("Nemotron models ready.");
             }
         }
 
-        // Always download the Sortformer diarization model (skipped if present).
-        if !models::diarization_models_present() {
-            println!("Downloading Sortformer diarization model (first run)...");
-            models::ensure_diarization_models().await
-                .unwrap_or_else(|e| {
-                    eprintln!("warn: failed to download Sortformer model: {e:#}");
-                    eprintln!("hint: diarization will be unavailable until the model is downloaded");
-                    // Non-fatal: the app can still run with STT-only.
-                });
-            println!("Sortformer diarization model ready.");
-        } else {
-            println!("Sortformer model already present, skipping download.");
-        }
+        // Always run the digest-aware ensure path for Sortformer. Failure is
+        // non-fatal (STT-only still works); any quarantine is logged inside.
+        models::ensure_diarization_models().await.unwrap_or_else(|e| {
+            eprintln!("warn: failed to install Sortformer model: {e:#}");
+            eprintln!("hint: diarization will be unavailable until the model is downloaded");
+            // Non-fatal: the app can still run with STT-only.
+        });
     });
 
     // Shared wake primitive: PipeWire RT callback notifies, STT thread waits.
@@ -407,10 +408,30 @@ pub fn main() {
         let _ = audio_cmd_tx.send(audio::AudioCommand::SwitchSource(validated_source));
     }
 
-    // Probe CUDA in a subprocess so a CUDA-provider crash can't take the parent down.
+    // Probe CUDA in a subprocess so a CUDA-provider crash can't take the
+    // parent down. The verdict is cached (F10) in ~/.cache/subtidal/
+    // cuda-probe.json keyed on the ORT distribution hash, the size+mtime of
+    // every model file, and the cheap in-process availability check — so
+    // steady-state launches skip the subprocess (which loads the full
+    // model). The build_engine failure path in the STT thread invalidates
+    // the cache when CUDA was requested.
     let model_paths = models::ModelPaths::from_conventional_dirs();
     let cuda_probe_dir = model_paths.for_engine(&cfg.engine).to_path_buf();
-    let use_cuda = cuda_available(&cuda_probe_dir);
+    let probe_cache_path = dirs::cache_dir().map(|d| d.join("subtidal").join("cuda-probe.json"));
+    let use_cuda = {
+        let key = probe_cache::ProbeKey::from_parts(
+            option_env!("ORT_DIST_HASH").unwrap_or(""),
+            &[models::models_dir()],
+            CUDA::default().is_available().unwrap_or(false),
+        );
+        match &probe_cache_path {
+            Some(cache) => {
+                let probe_dir = cuda_probe_dir.clone();
+                probe_cache::cuda_available_cached(&key, cache, move || cuda_available(&probe_dir))
+            }
+            None => cuda_available(&cuda_probe_dir),
+        }
+    };
     eprintln!("{}", cuda_status_message(use_cuda));
 
     // Captions-enabled flag: read by STT thread to skip inference, by tray/overlay for UI.
@@ -423,11 +444,7 @@ pub fn main() {
     // Lock-free engine selection. Tray writes this; STT thread reads on each chunk.
     let engine_choice = Arc::new(ArcSwap::from_pointee(cfg.engine.clone()));
 
-    let unload_after = if cfg.vram_unload_secs == 0 {
-        None
-    } else {
-        Some(std::time::Duration::from_secs(cfg.vram_unload_secs))
-    };
+    let unload_after = cfg.vram_unload_duration();
 
     // Caption and command channels to the GTK main loop.
     // async-channel integrates with glib::MainContext::spawn_local so the GTK
@@ -451,6 +468,7 @@ pub fn main() {
             diarization_model_dir: models::diarization_model_dir(),
             diarization_display_delay_ms: cfg.diarization_display_delay_ms,
             diarization_alignment_lag_ms: cfg.diarization_alignment_lag_ms,
+            probe_cache_path,
         },
     );
 

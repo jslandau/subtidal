@@ -21,10 +21,31 @@ static NOTIFICATION_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// The audio watchdog and on-screen error messages provide fallback
 /// notification of source disappearance.
 ///
-/// **Thread safety:** May be called from any thread; internally marshals
-/// to the main thread via dispatch2 if needed (UNUserNotificationCenter
-/// is main-thread-only).
+/// **Thread safety:** May be called from any thread; UNUserNotificationCenter
+/// is main-thread-only, so this hops to the main queue via dispatch2 when
+/// called off-main (F19 — the code now honors the contract this doc always
+/// promised) and posts directly when already on main.
 pub fn post_user_notification(title: &str, body: &str) -> Result<()> {
+    let count = NOTIFICATION_COUNTER.fetch_add(1, Ordering::Relaxed);
+    if MainThreadMarker::new().is_some() {
+        return post_user_notification_on_main(title, body, count);
+    }
+    let title = title.to_string();
+    let body = body.to_string();
+    dispatch2::DispatchQueue::main().exec_async(move || {
+        if let Err(e) = post_user_notification_on_main(&title, &body, count) {
+            eprintln!("warn: failed to post user notification: {e:#}");
+        }
+    });
+    Ok(())
+}
+
+/// Main-thread-only implementation of [`post_user_notification`].
+/// `count` seeds the unique request identifier.
+fn post_user_notification_on_main(title: &str, body: &str, count: u64) -> Result<()> {
+    let _mtm = MainThreadMarker::new()
+        .expect("UNUserNotificationCenter access must happen on the main thread");
+
     // Create notification content with title and body.
     let content = UNMutableNotificationContent::new();
 
@@ -35,7 +56,6 @@ pub fn post_user_notification(title: &str, body: &str) -> Result<()> {
     content.setBody(&*body_ns);
 
     // Generate a unique identifier for this notification request.
-    let count = NOTIFICATION_COUNTER.fetch_add(1, Ordering::Relaxed);
     let identifier = NSString::from_str(&format!("subtidal-notification-{}", count));
 
     // Create notification request with immediate delivery (trigger = nil).
@@ -74,8 +94,9 @@ pub fn request_authorization_best_effort() {
     let center = UNUserNotificationCenter::currentNotificationCenter();
 
     // Request authorization with .alert option (banner notifications).
-    // The block must outlive the async call; we leak it intentionally since it's
-    // a fire-and-forget operation. The system retains ownership during the auth flow.
+    // The Objective-C API copies the completion block for the asynchronous
+    // authorization request; keep the Rust owner alive through this call and
+    // let normal Drop release it afterward.
     let options = objc2_user_notifications::UNAuthorizationOptions::Alert;
 
     let block = RcBlock::new(|_, _| {
@@ -84,9 +105,8 @@ pub fn request_authorization_best_effort() {
 
     center.requestAuthorizationWithOptions_completionHandler(options, &block);
 
-    // Leak the block intentionally. The system holds a reference to it during the
-    // auth flow, and this function is fire-and-forget.
-    std::mem::forget(block);
+    // The system owns its copied completion handler for the authorization flow;
+    // dropping the local owner here avoids a permanent process-lifetime leak.
 }
 
 #[cfg(test)]

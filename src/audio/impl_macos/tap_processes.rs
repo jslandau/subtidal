@@ -6,7 +6,7 @@
 //! (watchdog detection of source disappearance).
 
 use anyhow::Result;
-use core_foundation::base::FromVoid;
+use core_foundation::base::TCFType;
 use core_foundation::string::CFString;
 use coreaudio_sys::*;
 
@@ -205,8 +205,10 @@ unsafe fn read_process_bundle_id(obj: AudioObjectID) -> Result<Option<String>> {
         return Ok(None);
     }
 
-    // Convert CFString to Rust String using core_foundation's TCFType trait.
-    let cf_str = CFString::from_void(cf_string as *const std::ffi::c_void);
+    // Convert CFString to Rust String. AudioObjectGetPropertyData returns a
+    // +1 Create-rule reference; wrap_under_create_rule adopts it so Drop
+    // releases it (from_void's ItemRef never releases — a per-call leak).
+    let cf_str = CFString::wrap_under_create_rule(cf_string);
     let bundle = cf_str.to_string();
 
     if bundle.is_empty() {

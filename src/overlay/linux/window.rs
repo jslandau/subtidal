@@ -134,8 +134,9 @@ fn configure_floating(window: &ApplicationWindow, cfg: &Config) {
     });
 
     // Position the window via margins from the anchored edges.
-    window.set_margin(Edge::Left, cfg.position.x);
-    window.set_margin(Edge::Top, cfg.position.y);
+    let (x, y) = super::drag::bounded_position(window, cfg.position.x, cfg.position.y);
+    window.set_margin(Edge::Left, x);
+    window.set_margin(Edge::Top, y);
 }
 
 /// Build CSS string from appearance config. Pure — no GTK display needed,

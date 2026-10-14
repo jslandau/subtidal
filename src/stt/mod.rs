@@ -114,6 +114,10 @@ pub struct PipelineConfig {
     /// Estimated STT↔diarization alignment lag used to map emitted text onto
     /// the recent Sortformer segment timeline. Startup-only; requires restart.
     pub diarization_alignment_lag_ms: u64,
+    /// CUDA probe verdict cache path (F10, Linux only; `None` on macOS).
+    /// `build_engine` failures invalidate the cached verdict so the next
+    /// start re-probes instead of trusting a stale "CUDA available".
+    pub probe_cache_path: Option<std::path::PathBuf>,
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -323,6 +327,9 @@ pub fn spawn_stt_thread(
             }
 
             let mut raw = vec![0f32; 8192];
+            // F6: rebuild backoff + one-notice-per-streak + post-rebuild
+            // batch discard.
+            let mut rebuild_policy = EngineRebuildPolicy::default();
 
             loop {
                 if wake.is_shutdown() {
@@ -401,16 +408,51 @@ pub fn spawn_stt_thread(
                     let desired = Engine::clone(&cfg.engine_choice.load());
                     let needs_rebuild =
                         engine.is_none() || engine_built_for.as_ref() != Some(&desired);
-                    if needs_rebuild {
-                        eprintln!("info: (re)loading STT engine: {desired:?}");
-                        match build_engine(&desired, &cfg.model_paths, cfg.use_cuda) {
-                            Ok(e) => {
-                                engine = Some(e);
-                                engine_built_for = Some(desired);
-                            }
-                            Err(err) => {
-                                eprintln!("warn: failed to build STT engine: {err:#}");
-                                continue;
+                    let engine_choice_changed = engine_built_for.is_some()
+                        && engine_built_for.as_ref() != Some(&desired);
+                    match rebuild_policy.on_batch(needs_rebuild, engine_choice_changed, Instant::now())
+                    {
+                        RebuildDecision::Process => {}
+                        RebuildDecision::DiscardAndContinue | RebuildDecision::SkipBackoff => {
+                            continue;
+                        }
+                        RebuildDecision::AttemptRebuild => {
+                            eprintln!("info: (re)loading STT engine: {desired:?}");
+                            match build_engine(&desired, &cfg.model_paths, cfg.use_cuda) {
+                                Ok(e) => {
+                                    engine = Some(e);
+                                    engine_built_for = Some(desired);
+                                    rebuild_policy.note_build_success();
+                                    // Drain the ring AND discard the already-
+                                    // popped batch: this audio predates the
+                                    // engine switch. Draining alone would
+                                    // leave the triggering batch in scope to
+                                    // be transcribed — the discard must be
+                                    // explicit.
+                                    loop {
+                                        if ring_consumer.pop_slice(&mut raw) == 0 {
+                                            break;
+                                        }
+                                    }
+                                    continue;
+                                }
+                                Err(err) => {
+                                    // A CUDA-requested failure invalidates
+                                    // the probe verdict cache so the next
+                                    // start re-probes (F10; Linux only).
+                                    if cfg.use_cuda {
+                                        crate::probe_cache::invalidate_if_configured(
+                                            cfg.probe_cache_path.as_deref(),
+                                        );
+                                    }
+                                    rebuild_policy.note_build_failure(&err);
+                                    if let Some(notice) =
+                                        rebuild_policy.take_failure_notice()
+                                    {
+                                        eprintln!("warn: {notice}");
+                                    }
+                                    continue;
+                                }
                             }
                         }
                     }
@@ -624,11 +666,231 @@ fn build_engine(
     }
 }
 
+// ---------------------------------------------------------------------
+// Engine rebuild policy (F6): persistent `build_engine` failures must not
+// be retried on every 8192-sample batch (~12/s with unbounded stderr spam).
+// ---------------------------------------------------------------------
+
+/// Backoff between rebuild attempts after a failure. A successful build or
+/// an explicit engine-choice change clears/bypasses it immediately.
+pub const ENGINE_BUILD_BACKOFF: Duration = Duration::from_secs(10);
+
+/// Pure decision core of the backoff (unit-testable without a pipeline).
+///
+/// - No recorded failure → always attempt.
+/// - Explicit engine-choice change → always attempt (the user switched).
+/// - Otherwise attempt only once the backoff window has elapsed.
+pub fn should_attempt_rebuild(
+    last_failure: Option<Instant>,
+    engine_choice_changed: bool,
+    now: Instant,
+) -> bool {
+    if engine_choice_changed {
+        return true;
+    }
+    match last_failure {
+        None => true,
+        Some(t) => now.duration_since(t) >= ENGINE_BUILD_BACKOFF,
+    }
+}
+
+/// What the pipeline should do with the batch it just popped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RebuildDecision {
+    /// Engine present and current — transcribe this batch.
+    Process,
+    /// (Re)build the engine now.
+    AttemptRebuild,
+    /// A recent build failed and the backoff window hasn't elapsed — drop
+    /// this batch without another attempt.
+    SkipBackoff,
+    /// The batch that triggered a successful rebuild: it (and anything else
+    /// drained at the switch) belongs to the old engine context and must be
+    /// discarded, not transcribed.
+    DiscardAndContinue,
+}
+
+/// Bookkeeping for engine (re)builds inside the STT pipeline loop.
+///
+/// Holds the last failure time (backoff), a one-notice-per-failure-streak
+/// channel (production maps notices to `eprintln!`; tests count them — no
+/// stderr capture needed), and the post-rebuild batch-discard flag.
+#[derive(Default)]
+pub struct EngineRebuildPolicy {
+    last_build_failure: Option<Instant>,
+    pending_discard: bool,
+    notice: Option<String>,
+}
+
+impl EngineRebuildPolicy {
+    /// Decide what to do with a freshly popped batch.
+    ///
+    /// `needs_rebuild`: no engine, or the built engine differs from the
+    /// desired choice. `engine_choice_changed`: the desired choice differs
+    /// from what was *last successfully built* (a real user switch, not the
+    /// initial build) — bypasses the backoff.
+    pub fn on_batch(
+        &mut self,
+        needs_rebuild: bool,
+        engine_choice_changed: bool,
+        now: Instant,
+    ) -> RebuildDecision {
+        if self.pending_discard {
+            self.pending_discard = false;
+            return RebuildDecision::DiscardAndContinue;
+        }
+        if !needs_rebuild {
+            return RebuildDecision::Process;
+        }
+        if should_attempt_rebuild(self.last_build_failure, engine_choice_changed, now) {
+            RebuildDecision::AttemptRebuild
+        } else {
+            RebuildDecision::SkipBackoff
+        }
+    }
+
+    /// Record a failed build: starts/extends the backoff window and records
+    /// one actionable notice (only if none is pending, so a persistent
+    /// failure streak surfaces exactly once until taken or cleared).
+    pub fn note_build_failure(&mut self, err: &anyhow::Error) {
+        self.last_build_failure = Some(Instant::now());
+        if self.notice.is_none() {
+            self.notice = Some(format!(
+                "STT engine build failed; retrying at most every {ENGINE_BUILD_BACKOFF:?}: {err:#}"
+            ));
+        }
+    }
+
+    /// Record a successful build: clears the backoff and any pending notice,
+    /// and arms the one-shot discard of the batch that triggered the rebuild.
+    pub fn note_build_success(&mut self) {
+        self.last_build_failure = None;
+        self.notice = None;
+        self.pending_discard = true;
+    }
+
+    /// Take the pending failure notice, if any (drains it).
+    pub fn take_failure_notice(&mut self) -> Option<String> {
+        self.notice.take()
+    }
+}
+
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests {
     use super::*;
     use std::thread;
     use std::time::Instant;
+
+    // ------------------------------------------------------------------
+    // AC.6 (F6): engine-build failure backoff.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn should_attempt_rebuild_honors_backoff() {
+        let now = Instant::now();
+        // No failure recorded: always attempt.
+        assert!(should_attempt_rebuild(None, false, now));
+        // Failure 5s ago, choice unchanged: within the 10s window — skip.
+        assert!(!should_attempt_rebuild(
+            Some(now - Duration::from_secs(5)),
+            false,
+            now
+        ));
+        // Failure exactly at the window edge: attempt.
+        assert!(should_attempt_rebuild(
+            Some(now - ENGINE_BUILD_BACKOFF),
+            false,
+            now
+        ));
+        // Long past: attempt.
+        assert!(should_attempt_rebuild(
+            Some(now - Duration::from_secs(60)),
+            false,
+            now
+        ));
+    }
+
+    #[test]
+    fn should_attempt_rebuild_bypasses_on_choice_change() {
+        let now = Instant::now();
+        // Even a failure recorded *now* must not delay an explicit switch.
+        assert!(should_attempt_rebuild(Some(now), true, now));
+    }
+
+    #[test]
+    fn rebuild_policy_discards_triggering_batch() {
+        let mut policy = EngineRebuildPolicy::default();
+        policy.note_build_success();
+        // The batch that triggered the successful rebuild is discarded …
+        assert_eq!(
+            policy.on_batch(false, false, Instant::now()),
+            RebuildDecision::DiscardAndContinue
+        );
+        // … exactly once; the next batch processes normally.
+        assert_eq!(
+            policy.on_batch(false, false, Instant::now()),
+            RebuildDecision::Process
+        );
+        // A failed build followed by a successful one re-arms the discard.
+        policy.note_build_failure(&anyhow::anyhow!("boom").into());
+        policy.note_build_success();
+        assert_eq!(
+            policy.on_batch(false, false, Instant::now()),
+            RebuildDecision::DiscardAndContinue
+        );
+    }
+
+    #[test]
+    fn rebuild_failure_emits_single_notice() {
+        let mut policy = EngineRebuildPolicy::default();
+        // Persistent failures within one streak yield exactly one notice.
+        for i in 0..5 {
+            policy.note_build_failure(&anyhow::anyhow!("attempt {i}").into());
+        }
+        let notice = policy
+            .take_failure_notice()
+            .expect("one notice per failure streak");
+        assert!(
+            notice.contains("attempt 0"),
+            "first (actionable) cause: {notice}"
+        );
+        assert!(notice.contains("retrying"));
+        assert_eq!(
+            policy.take_failure_notice(),
+            None,
+            "no second notice in the same streak"
+        );
+        // A later failure after the notice was taken starts a new streak.
+        policy.note_build_failure(&anyhow::anyhow!("later").into());
+        assert!(policy.take_failure_notice().is_some());
+        // Success clears any pending notice.
+        policy.note_build_failure(&anyhow::anyhow!("again").into());
+        policy.note_build_success();
+        assert_eq!(policy.take_failure_notice(), None);
+    }
+
+    #[test]
+    fn rebuild_policy_backoff_skips_batches() {
+        let mut policy = EngineRebuildPolicy::default();
+        policy.note_build_failure(&anyhow::anyhow!("boom").into());
+        // Within the window: batches are skipped, not retried.
+        assert_eq!(
+            policy.on_batch(true, false, Instant::now()),
+            RebuildDecision::SkipBackoff
+        );
+        // Choice change bypasses the window.
+        assert_eq!(
+            policy.on_batch(true, true, Instant::now()),
+            RebuildDecision::AttemptRebuild
+        );
+        // After the window elapses, attempts resume.
+        policy.note_build_failure(&anyhow::anyhow!("boom").into());
+        let later = Instant::now() + ENGINE_BUILD_BACKOFF + Duration::from_secs(1);
+        assert_eq!(
+            policy.on_batch(true, false, later),
+            RebuildDecision::AttemptRebuild
+        );
+    }
 
     #[test]
     fn audio_wake_notify_wakes_waiter() {

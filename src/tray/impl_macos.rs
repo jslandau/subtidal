@@ -41,11 +41,12 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{NSData, NSObject, NSPoint, NSSize, NSString, NSTimer};
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex};
 
 /// Shared state passed in by `main_macos.rs`.
+#[derive(Clone)]
 pub struct TrayState {
     pub config: Arc<Mutex<Config>>,
     pub captions_enabled: Arc<AtomicBool>,
@@ -55,7 +56,23 @@ pub struct TrayState {
     pub audio_cmd_tx: SyncSender<AudioCommand>,
     pub engine_choice: Arc<ArcSwap<Engine>>,
     pub audio_sources: Arc<Mutex<Vec<AudioSourceInfo>>>,
+    /// Last raw Core Audio process snapshot (F9): label-independent change
+    /// detection for the 5 s refresh, so identical process sets skip AppKit
+    /// labeling entirely.
+    pub audio_processes: Arc<Mutex<Vec<crate::tray::AudioProcessSnapshot>>>,
+    /// Monotonic refresh generation; stale background enumeration results are
+    /// discarded when a newer timer tick has already started.
+    pub audio_refresh_generation: Arc<AtomicU64>,
 }
+
+/// Unsafe-Send wrapper (the `OverlayHandles` precedent in
+/// `overlay/macos/app.rs`): MainThreadOnly AppKit references cross a
+/// background-thread boundary, but they are only dereferenced inside a
+/// `dispatch2::DispatchQueue::main().exec_async` closure, where the
+/// `MainThreadMarker` acquisition proves main-thread affinity. The background
+/// thread itself touches no AppKit — only Core Audio enumeration.
+struct MainHop<T>(T);
+unsafe impl<T> Send for MainHop<T> {}
 
 /// Ivars for the `TrayActions` NSObject subclass.
 ///
@@ -375,30 +392,76 @@ define_class!(
             }
         }
 
-        /// AC5.4: every 5 s, re-poll audio process list and rebuild the
-        /// Audio Source submenu if it has changed.
+        /// AC5.4 + F9: every 5 s, re-poll the Core Audio process list on a
+        /// background thread (blocking IPC per process must not run on the
+        /// main run loop) and rebuild the Audio Source submenu on main when
+        /// the snapshot changed. AppKit labeling (`NSRunningApplication`)
+        /// stays on the main thread.
         #[unsafe(method(refreshAudioSources:))]
         fn refresh_audio_sources(&self, _timer: Option<&NSTimer>) {
             let ivars = self.ivars();
-            let new_sources = match crate::audio::list_sources() {
-                Ok(s) => s,
-                Err(_) => return,
-            };
-            let changed = {
-                let mut cached = ivars.state.audio_sources.lock().unwrap();
-                if new_sources == *cached {
-                    false
-                } else {
-                    *cached = new_sources;
-                    true
-                }
-            };
-            if !changed {
-                return;
+            // Retain self for the main-queue continuation. The NSTimer holds
+            // us as its target for the duration of this callback, so the
+            // reference is valid; the retain keeps it valid across the hop.
+            let this = unsafe { Retained::retain(self as *const Self as *mut Self) }
+                .expect("NSTimer target is alive during its own callback");
+            let state = ivars.state.clone();
+            let audio_item = ivars.audio_item.borrow().clone();
+            let refresh_generation = ivars
+                .state
+                .audio_refresh_generation
+                .fetch_add(1, Ordering::Relaxed)
+                + 1;
+            let generation_counter = ivars.state.audio_refresh_generation.clone();
+
+            let spawn = std::thread::Builder::new()
+                .name("tray-audio-enum".into())
+                .spawn(move || {
+                    // (a) Core Audio enumeration off main. No AppKit here.
+                    let next = crate::audio::enumerate_process_snapshot().ok();
+                    // (b) Marshal raw results + AppKit handles to main.
+                    let hop = MainHop((
+                        this,
+                        state,
+                        audio_item,
+                        next,
+                        refresh_generation,
+                        generation_counter,
+                    ));
+                    dispatch2::DispatchQueue::main().exec_async(move || {
+                        let MainHop((
+                            this,
+                            state,
+                            audio_item,
+                            next,
+                            refresh_generation,
+                            generation_counter,
+                        )) = hop;
+                        if generation_counter.load(Ordering::Acquire) != refresh_generation {
+                            return;
+                        }
+                        let mtm = MainThreadMarker::new()
+                            .expect("dispatch main queue runs on main thread");
+                        // (c) Neutral routing decision: unchanged snapshot →
+                        // skip everything (no labeling, no rebuild).
+                        let prev = state.audio_processes.lock().unwrap().clone();
+                        let plan = crate::tray::plan_refresh_handoff(&prev, next);
+                        if !plan.changed {
+                            return;
+                        }
+                        // Group helper processes and resolve AppKit labels on main.
+                        let sources =
+                            crate::audio::sources_from_process_snapshot(&plan.label_on_main);
+                        *state.audio_processes.lock().unwrap() = plan.label_on_main.clone();
+                        *state.audio_sources.lock().unwrap() = sources;
+                        // Submenu rebuild on main.
+                        let new_submenu = build_audio_submenu_for(&state, mtm, &this);
+                        audio_item.setSubmenu(Some(&new_submenu));
+                    });
+                });
+            if spawn.is_err() {
+                eprintln!("warn: failed to spawn tray audio enumeration thread");
             }
-            let mtm = MainThreadMarker::from(self);
-            let new_submenu = build_audio_submenu_for(&ivars.state, mtm, self);
-            ivars.audio_item.borrow().setSubmenu(Some(&new_submenu));
         }
     }
 );
@@ -948,6 +1011,8 @@ mod tests {
             audio_cmd_tx: audio_tx,
             engine_choice: Arc::new(ArcSwap::from_pointee(Engine::Nemotron)),
             audio_sources: Arc::new(Mutex::new(vec![])),
+            audio_processes: Arc::new(Mutex::new(vec![])),
+            audio_refresh_generation: Arc::new(AtomicU64::new(0)),
         };
     }
 }

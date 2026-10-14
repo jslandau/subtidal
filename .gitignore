@@ -3,5 +3,6 @@
 *.so
 *.so.*
 sublog.txt
+stdout
 /.polytoken/
 /tests/fixtures/diarization/

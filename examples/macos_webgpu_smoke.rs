@@ -17,6 +17,7 @@ fn main() {
 
 #[cfg(target_os = "macos")]
 use std::path::PathBuf;
+#[cfg(target_os = "macos")]
 use std::time::Instant;
 
 #[cfg(target_os = "macos")]

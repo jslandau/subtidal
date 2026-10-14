@@ -17,6 +17,10 @@ pub struct NemotronEngine {
     inner: parakeet_rs::Nemotron,
     /// Internal buffer to accumulate 160ms chunks until 560ms is reached.
     chunk_buf: Vec<f32>,
+    /// Reusable drain target for the chunk handed to `transcribe_chunk`
+    /// (F13): keeps its allocation across ticks so the 560 ms inference
+    /// cadence doesn't allocate a fresh ~35 KB Vec every time.
+    process_buf: Vec<f32>,
 }
 
 impl NemotronEngine {
@@ -59,6 +63,7 @@ impl NemotronEngine {
         Ok(NemotronEngine {
             inner,
             chunk_buf: Vec::with_capacity(NEMOTRON_CHUNK_SAMPLES),
+            process_buf: Vec::with_capacity(NEMOTRON_CHUNK_SAMPLES),
         })
     }
 }
@@ -114,12 +119,15 @@ impl SttEngine for NemotronEngine {
             return Ok(None); // Still accumulating
         }
 
-        // Drain exactly NEMOTRON_CHUNK_SAMPLES and process.
-        let chunk: Vec<f32> = self.chunk_buf.drain(..NEMOTRON_CHUNK_SAMPLES).collect();
+        // Drain exactly NEMOTRON_CHUNK_SAMPLES into the reusable process
+        // buffer (F13): the allocation is retained across ticks.
+        self.process_buf.clear();
+        self.process_buf
+            .extend(self.chunk_buf.drain(..NEMOTRON_CHUNK_SAMPLES));
 
         let text = self
             .inner
-            .transcribe_chunk(&chunk)
+            .transcribe_chunk(&self.process_buf)
             .context("Nemotron transcribe_chunk")?;
 
         if text.is_empty() {
