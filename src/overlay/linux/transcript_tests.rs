@@ -15,6 +15,7 @@ fn linux_transcript_native_routing() {
         .application_id("com.subtidal.transcript-test")
         .build();
     app.register(None::<&gtk4::gio::Cancellable>).unwrap();
+    native_anchor_capture_with_margins(&app);
     let log = Rc::new(RefCell::new(TranscriptLog::new(Duration::from_secs(7))));
     let state = transcript_window::build_transcript_window(
         &app,
@@ -122,6 +123,190 @@ fn linux_transcript_native_routing() {
     );
     state.window.close();
     overlay.close();
+}
+
+fn anchor_geometry(state: &transcript_window::TranscriptWindowState) -> String {
+    let adj = state.scrolled.vadjustment();
+    format!(
+        "visible={:?}, adjustment=(value={}, lower={}, upper={}, page={})",
+        state.text_view.visible_rect(),
+        adj.value(),
+        adj.lower(),
+        adj.upper(),
+        adj.page_size()
+    )
+}
+
+fn assert_fresh_anchor(state: &transcript_window::TranscriptWindowState, log: &TranscriptLog) {
+    use crate::overlay::transcript_presentation::{byte_from_gtk, gtk_offset, Presentation};
+    let rect = state.text_view.visible_rect();
+    assert!(state.text_view.left_margin() > 0 && state.text_view.top_margin() > 0);
+    assert!(
+        state
+            .text_view
+            .iter_at_location(rect.x(), rect.y())
+            .is_none(),
+        "fixture corner must miss text: {}",
+        anchor_geometry(state)
+    );
+    // Independently enumerate native display rows from the buffer start.
+    let mut expected = state.buffer.start_iter();
+    loop {
+        let mut next = expected;
+        if !state.text_view.forward_display_line(&mut next)
+            || next.offset() <= expected.offset()
+            || state.text_view.iter_location(&next).y() > rect.y()
+        {
+            break;
+        }
+        expected = next;
+    }
+    let (line, _) = state.text_view.line_at_y(rect.y());
+    assert!(
+        line.offset() <= expected.offset(),
+        "vertical lookup must find text"
+    );
+    let presentation = Presentation::from_log(log, &HashMap::new());
+    let expected_position = presentation
+        .position(byte_from_gtk(
+            &presentation.text,
+            expected.offset() as usize,
+        ))
+        .expect("nonempty display row has a fragment position");
+    let (position, pixel) = state.test_fresh_anchor().unwrap_or_else(|| {
+        panic!(
+            "fresh margin-safe anchor missing: {}",
+            anchor_geometry(state)
+        )
+    });
+    assert_eq!(position, expected_position, "{}", anchor_geometry(state));
+    assert_eq!(
+        gtk_offset(&presentation.text, presentation.resolve(position)),
+        expected.offset() as usize,
+        "anchor must resolve to native display-row character offset"
+    );
+    assert_eq!(
+        pixel,
+        rect.y() - state.text_view.iter_location(&expected).y()
+    );
+}
+
+fn native_anchor_capture_with_margins(app: &Application) {
+    let log = Rc::new(RefCell::new(TranscriptLog::new(Duration::from_secs(7))));
+    let state = transcript_window::build_transcript_window(
+        app,
+        log.clone(),
+        "anchor test".into(),
+        chrono::Local::now(),
+    );
+    state.window.set_default_size(520, 450);
+    // Guarantee the viewport corner misses text, retaining production top padding.
+    state.text_view.set_left_margin(100);
+    state.window.present();
+    settle(&state);
+    assert!(
+        state.test_fresh_anchor().is_none(),
+        "empty transcript has no fragment anchor"
+    );
+    state.test_follow_enabled(false);
+    route_transcript_event(
+        &state,
+        &log,
+        &CaptionEvent::Append {
+            text: " hé🙂 世界 wrapped reading position ".repeat(700),
+            speaker_id: None,
+            emit_sample: 0,
+        },
+        &HashMap::new(),
+    );
+    settle(&state);
+    state.test_user_scroll(0.0);
+    settle(&state);
+    assert_fresh_anchor(&state, &log.borrow());
+    let adj = state.scrolled.vadjustment();
+    state.test_user_scroll((adj.upper() - adj.page_size()) * 0.45);
+    settle(&state);
+    assert!(
+        state.text_view.visible_rect().y() > 1000,
+        "fixture is inside wrapped paragraph"
+    );
+    assert_fresh_anchor(&state, &log.borrow());
+    state.window.set_visible(false);
+    state.window.present();
+    settle(&state);
+    assert_fresh_anchor(&state, &log.borrow());
+    native_anchor_wrapped_reflow(&state);
+    state.window.close();
+}
+
+fn native_anchor_wrapped_reflow(state: &transcript_window::TranscriptWindowState) {
+    // Align a row well inside the paragraph so the independent glyph belongs to
+    // the row being preserved, rather than the next fully visible row.
+    let middle = state.buffer.iter_at_offset(state.buffer.char_count() / 2);
+    state.test_user_scroll(f64::from(state.text_view.iter_location(&middle).y()));
+    settle(state);
+    let text = state
+        .buffer
+        .text(&state.buffer.start_iter(), &state.buffer.end_iter(), false);
+    let rect = state.text_view.visible_rect();
+    // Find an actual visible glyph independently of anchor/vertical-line lookup.
+    let glyph = (0..state.buffer.char_count())
+        .find_map(|offset| {
+            let iter = state.buffer.iter_at_offset(offset);
+            let location = state.text_view.iter_location(&iter);
+            if !iter.char().is_whitespace()
+                && location.width() > 0
+                && location.y() >= rect.y()
+                && location.y() + location.height() <= rect.y() + rect.height()
+            {
+                let hit = state.text_view.iter_at_location(
+                    location.x() + location.width() / 2,
+                    location.y() + location.height() / 2,
+                )?;
+                (hit.offset() == offset).then_some((offset, location.y()))
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| panic!("no visible glyph: {}", anchor_geometry(state)));
+    let relative_y = glyph.1 - rect.y();
+    assert_eq!(
+        relative_y,
+        0,
+        "independent glyph must be on the aligned top row: {}",
+        anchor_geometry(state)
+    );
+    let width = state.text_view.width();
+    // This clears the cache immediately before the capture used for restoration.
+    state
+        .test_fresh_anchor()
+        .unwrap_or_else(|| panic!("no reflow anchor: {}", anchor_geometry(state)));
+    state.window.set_default_size(850, 450);
+    settle(state);
+    let after = state
+        .text_view
+        .iter_location(&state.buffer.iter_at_offset(glyph.0));
+    let visible = state.text_view.visible_rect();
+    assert_ne!(width, state.text_view.width(), "resize changes text width");
+    assert_ne!(glyph.1, after.y(), "resize changes wrapped row positions");
+    assert!(
+        after.y() + after.height() > visible.y() && after.y() < visible.y() + visible.height(),
+        "same Unicode character stays visible: {}",
+        anchor_geometry(state)
+    );
+    assert!(
+        (after.y() - visible.y() - relative_y).abs() <= 2,
+        "same character retains viewport y within 2 pixels: before={relative_y}, after={}, {}",
+        after.y() - visible.y(),
+        anchor_geometry(state)
+    );
+    assert_eq!(
+        text,
+        state
+            .buffer
+            .text(&state.buffer.start_iter(), &state.buffer.end_iter(), false),
+        "reflow must not mutate buffer content"
+    );
 }
 
 fn native_panel_controls(state: &transcript_window::TranscriptWindowState) {

@@ -63,20 +63,31 @@ impl TranscriptWindowState {
 
     fn capture_anchor(&self) {
         let rect = self.text_view.visible_rect();
-        if let Some(iter) = self.text_view.iter_at_location(rect.x(), rect.y()) {
-            let p = self.presentation.borrow();
-            let byte = p
-                .text
-                .char_indices()
-                .nth(iter.offset().max(0) as usize)
-                .map(|(b, _)| b)
-                .unwrap_or(p.text.len());
-            if let Some(position) = p.position(byte) {
-                self.reading_anchor.set(Some((
-                    position,
-                    rect.y() - self.text_view.iter_location(&iter).y(),
-                )));
+        // The viewport corner can lie in a margin; anchor lookup must not hit-test x.
+        let (mut iter, _) = self.text_view.line_at_y(rect.y());
+        // Normalize to the wrapped display row, even if lookup starts at a logical line.
+        loop {
+            let mut next = iter;
+            if !self.text_view.forward_display_line(&mut next)
+                || next.offset() <= iter.offset()
+                || self.text_view.iter_location(&next).y() > rect.y()
+            {
+                break;
             }
+            iter = next;
+        }
+        let p = self.presentation.borrow();
+        let byte = p
+            .text
+            .char_indices()
+            .nth(iter.offset().max(0) as usize)
+            .map(|(b, _)| b)
+            .unwrap_or(p.text.len());
+        if let Some(position) = p.position(byte) {
+            self.reading_anchor.set(Some((
+                position,
+                rect.y() - self.text_view.iter_location(&iter).y(),
+            )));
         }
     }
 
@@ -164,6 +175,16 @@ impl TranscriptWindowState {
     )> {
         self.capture_anchor();
         self.reading_anchor.get()
+    }
+    #[cfg(test)]
+    pub(super) fn test_fresh_anchor(
+        &self,
+    ) -> Option<(
+        crate::overlay::transcript_presentation::FragmentPosition,
+        i32,
+    )> {
+        self.reading_anchor.set(None);
+        self.test_anchor()
     }
     #[cfg(test)]
     pub(super) fn test_anchor_pixel(
