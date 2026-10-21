@@ -126,7 +126,11 @@ impl TranscriptWindowState {
                 f64::from(state.text_view.iter_location(&iter).y() + pixel)
             };
             state.programmatic.set(true);
-            adj.set_value(target);
+            // TextView buffer coordinates exclude the top margin, whereas the
+            // scroll adjustment includes it. Preserve their current offset.
+            let adjustment_target =
+                adj.value() + target - f64::from(state.text_view.visible_rect().y());
+            adj.set_value(adjustment_target);
             state.programmatic.set(false);
             state.tick.borrow_mut().take();
             glib::ControlFlow::Break

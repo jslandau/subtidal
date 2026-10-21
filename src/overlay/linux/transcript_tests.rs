@@ -243,7 +243,9 @@ fn native_anchor_wrapped_reflow(state: &transcript_window::TranscriptWindowState
     // Align a row well inside the paragraph so the independent glyph belongs to
     // the row being preserved, rather than the next fully visible row.
     let middle = state.buffer.iter_at_offset(state.buffer.char_count() / 2);
-    state.test_user_scroll(f64::from(state.text_view.iter_location(&middle).y()));
+    let target_y = state.text_view.iter_location(&middle).y();
+    // Convert buffer y to adjustment coordinates independently of restoration.
+    state.test_user_scroll(f64::from(target_y + state.text_view.top_margin()));
     settle(state);
     let text = state
         .buffer
